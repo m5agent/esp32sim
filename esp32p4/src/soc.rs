@@ -227,6 +227,7 @@ impl esp_soc::SocBus for SocBus {
         p.psram1.psram_mr = old.psram1.psram_mr;      // the PSRAM keeps its mode registers
         p.gpio.g.strap = old.gpio.g.strap;
         p.gpio.g.restore_external(&old.gpio.g);         // the board still drives its inputs
+        p.i2s0.pcm = std::mem::take(&mut old.i2s0.pcm); p.i2s0.frames_out = old.i2s0.frames_out;
         p.i2s1.pcm = std::mem::take(&mut old.i2s1.pcm); p.i2s1.frames_out = old.i2s1.frames_out;   // keep the captured audio continuous
         // The card in the socket keeps its power and its state; IDF's init resets it with CMD0.
         p.sdmmc.devices = old.sdmmc.devices;
@@ -290,14 +291,41 @@ impl esp_soc::SocBus for SocBus {
     fn gpio_input(&self) -> u64 { self.periph.gpio.g.input }
     fn board(&mut self) -> &mut dyn BoardModel { &mut *self.board }
     fn board_ref(&self) -> &dyn BoardModel { &*self.board }
-    fn audio(&self) -> (&[i16], u32) { (&self.periph.i2s1.pcm, self.periph.i2s1.sample_rate) }
+    fn board_command(&mut self, verb: &str, args: &[&str]) -> bool {
+        let ok = match (verb, args) {
+            ("usb-hid", ["keyboard" | "gamepad"]) => self.periph.usb_otg.attach_hid(self.cycles, args[0] == "gamepad"),
+            ("usb-msc", []) => self.periph.usb_otg.attach_msc(self.cycles),
+            ("usb-report", bytes) => bytes.iter().map(|byte| u8::from_str_radix(byte, 16)).collect::<Result<Vec<_>, _>>()
+                .is_ok_and(|report| self.periph.usb_otg.hid_report(&report)),
+            ("usb-key", [usage]) => u8::from_str_radix(usage, 16)
+                .is_ok_and(|key| self.periph.usb_otg.hid_report(&[0, 0, key, 0, 0, 0, 0, 0])),
+            ("usb-unplug", []) => self.periph.usb_otg.detach_host_device(),
+            _ => return self.board.board_command(self.cycles, verb, args),
+        };
+        esp_periph::Dispatch::refresh_optional(&mut self.periph, periph::USB_OTG_BLOCK);
+        self.irq_dirty |= ok;
+        ok
+    }
+    fn i2s_input(&mut self, port: usize) -> Option<&mut esp_periph::i2s::PcmInput> {
+        (port == 0).then(|| self.periph.i2s0.rx_input())
+    }
+    fn audio(&self) -> (&[i16], u32) {
+        let port = if self.periph.i2s0.frames_out == 0 { &self.periph.i2s1 } else { &self.periph.i2s0 };
+        (&port.pcm, port.sample_rate)
+    }
     /// `line` is the CPU interrupt line, CLIC ID - 16.
     fn irq_sources_of(&self, core: usize, line: u32) -> Vec<usize> { self.periph.sources_of(core, line + CLIC_EXT_OFFSET) }
     /// The card goes in the reference board's socket, on slot 0's IO MUX pins; firmware reaches
     /// it through slot 0 or, routing those pins through the GPIO matrix, slot 1.
     fn attach_sd_card(&mut self, image: Box<dyn esp_periph::sdmmc::SdStore>, config: esp_periph::sdmmc::SdCardConfig) -> Result<String, String> {
         let timed = config.timed_bus;
+        let (image, spi) = if self.board.has_spi_sd_slot() {
+            let shared = crate::tab5_aux::SocketStore(std::rc::Rc::new(std::cell::RefCell::new(image)));
+            let spi = esp_periph::sdmmc::SdCard::with_config(Box::new(shared.clone()), config.clone())?;
+            (Box::new(shared) as Box<dyn esp_periph::sdmmc::SdStore>, Some(spi))
+        } else { (image, None) };
         let card = esp_periph::sdmmc::SdCard::with_config(image, config)?;
+        if let Some(spi) = spi { self.board.insert_spi_sd(spi); }
         let what = format!("{}, {} blocks ({}), serial {:08x}, programming {} us, at CLK {} CMD {} D0-D3 {:?}", card.describe(), card.blocks(), if card.sdxc() { "SDXC" } else { "SDHC" },
                            card.serial(), card.config.prg_ns / 1000, periph::SdPins::SOCKET.clk, periph::SdPins::SOCKET.cmd, periph::SdPins::SOCKET.data);
         self.periph.sdmmc.timed = timed;
@@ -314,6 +342,9 @@ impl esp_soc::SocBus for SocBus {
             let (d, k) = (&self.periph.usb_otg.stats, &l.stats);
             out.push(format!("[usb] {} SETUPs, {} IN packets ({} bytes), {} OUT packets ({} bytes), {} NAKs, {} STALLs; host: {} transfers, {} bus resets, {} data PID errors; core: {} DMA faults, {} FIFO size errors",
                              d.setups, d.packets_in, d.bytes_in, d.packets_out, d.bytes_out, d.naks, d.stalls, k.transfers, k.resets, k.toggle_errors, d.dma_faults, d.fifo_errors));
+        }
+        if let Some((setups, transfers, bytes)) = self.periph.usb_otg.host_stats().filter(|&(_, t, _)| t != 0) {
+            out.push(format!("[usb-hcd] {setups} SETUPs, {transfers} QTDs, {bytes} bytes"));
         }
         if self.periph.spi2.transfers > 0 { out.push(format!("[emu] spi2: {} transfers", self.periph.spi2.transfers)); }
         let b = self.board.report(); if !b.is_empty() { out.push(b); }

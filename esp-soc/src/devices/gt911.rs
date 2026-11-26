@@ -1,6 +1,6 @@
 //! Goodix GT911 I²C touch controller and shared pointer state.
 use esp_periph::i2c::I2cDevice;
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, rc::Rc, sync::{Arc, Mutex}};
 
 /// Touch state shared between a board (UI) and its touch controller.
 #[derive(Default, Debug, Clone, Copy)]
@@ -21,19 +21,54 @@ impl TouchState {
 
 /// Goodix GT911 capacitive touch controller: 16-bit register addresses; product ID at 0x8140,
 /// config at 0x8047.., status + up to 5 points at 0x814E...
-pub struct Gt911 { addr: u16, phase: u8, touch: std::sync::Arc<std::sync::Mutex<TouchState>>, pub reads: u64, w: u16, h: u16, pending: Option<Rc<Cell<bool>>> }
+enum TouchInputs { Single(Arc<Mutex<TouchState>>), Multi(Arc<Mutex<[TouchState; 5]>>) }
+pub struct Gt911 {
+    addr: u16, phase: u8, touch: TouchInputs, pub reads: u64, w: u16, h: u16,
+    pending: Option<Rc<Cell<bool>>>, report: [u8; 41],
+}
 impl Gt911 {
-    pub fn new(touch: std::sync::Arc<std::sync::Mutex<TouchState>>, w: u16, h: u16) -> Self { Gt911 { addr: 0, phase: 0, touch, reads: 0, w, h, pending: None } }
+    pub fn new(touch: Arc<Mutex<TouchState>>, w: u16, h: u16) -> Self { Self::with_inputs(TouchInputs::Single(touch), w, h) }
+    pub fn new_multi(touch: Arc<Mutex<[TouchState; 5]>>, w: u16, h: u16) -> Self { Self::with_inputs(TouchInputs::Multi(touch), w, h) }
+    fn with_inputs(touch: TouchInputs, w: u16, h: u16) -> Self {
+        Self { addr: 0, phase: 0, touch, reads: 0, w, h, pending: None, report: [0; 41] }
+    }
     /// The optional pin gate keeps INT asserted through the zero-contact
     /// report. Polling-only boards can leave the signal disconnected.
     pub fn with_pending(mut self, pending: Rc<Cell<bool>>) -> Self { self.pending = Some(pending); self }
-    fn reg(&self, a: u16) -> u8 {
-        let mut tl = self.touch.lock().unwrap();
-        if a == 0x814e {
-            tl.observe();
-            if let Some(pending) = self.pending.as_ref().filter(|_| !tl.down) { pending.set(false); }
+    fn reg(&mut self, a: u16) -> u8 {
+        let mut t = TouchState::default();
+        match &self.touch {
+            TouchInputs::Single(point) => {
+                let mut point = point.lock().unwrap();
+                if a == 0x814e {
+                    point.observe();
+                    if let Some(pending) = self.pending.as_ref().filter(|_| !point.down) { pending.set(false); }
+                }
+                t = *point;
+            }
+            TouchInputs::Multi(points) => {
+                if a == 0x814e {
+                    let mut points = points.lock().unwrap();
+                    self.report.fill(0);
+                    let mut count = 0;
+                    for (id, point) in points.iter_mut().enumerate() {
+                        point.observe();
+                        if point.down {
+                            let [xl, xh] = point.x.to_le_bytes();
+                            let [yl, yh] = point.y.to_le_bytes();
+                            let pos = 1 + count * 8;
+                            self.report[pos..pos + 8].copy_from_slice(&[id as u8, xl, xh, yl, yh, 20, 0, 0]);
+                            count += 1;
+                        }
+                    }
+                    self.report[0] = 0x80 | count as u8;
+                    if let Some(pending) = self.pending.as_ref().filter(|_| count == 0) { pending.set(false); }
+                }
+                if let Some(i) = a.checked_sub(0x814e).map(usize::from).filter(|&i| i < self.report.len()) {
+                    return self.report[i];
+                }
+            }
         }
-        let t = *tl;
         match a {
             0x8140 => b'9', 0x8141 => b'1', 0x8142 => b'1', 0x8143 => 0, 0x8144 => 0x60, 0x8145 => 0x10,      // "911", firmware 0x1060
             0x8047 => 0x41,                                                                                     // config version
