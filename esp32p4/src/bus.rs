@@ -367,6 +367,14 @@ impl SocBus {
         let old_ena = ena_port.map_or(0, |i| self.periph.uart[i].int_ena);
         let resetting = self.periph.lp.sw_reset;
         self.periph.write32(a, v);
+        match a >> 12 {
+            crate::dsi::HOST_BLOCK => {
+                self.periph.dsi.deliver(&mut *self.board);
+                self.schedule_dsi();
+            }
+            crate::dsi::DW_DMA_BLOCK => self.schedule_dsi(),
+            _ => {}
+        }
         // the store that asks for a software reset is where ASSIST_DEBUG finds this core
         if !resetting && self.periph.lp.sw_reset { self.reset_request = Some((self.cur_core, self.periph.misc.cur_pc)); }
         if self.periph.spi_exec { self.run_spi(); }
@@ -383,6 +391,25 @@ impl SocBus {
             Some(i) => { if self.ena_latency.on_write(old_ena, self.periph.uart[i].int_ena) { self.irq_dirty = true; } else { self.uart_busy = true; } }
             None => self.irq_dirty = true,
         }
+    }
+
+    fn schedule_dsi(&mut self) {
+        let dma = &mut self.periph.dw_dma;
+        if !dma.active() || self.periph.dsi.video().is_none() { dma.due = None; }
+        else if dma.due.is_none() { dma.due = Some(self.cycles.saturating_add(crate::periph::CPU_HZ / 60)); }
+    }
+
+    #[cold]
+    fn scan_dsi(&mut self) {
+        let dma = &mut self.periph.dw_dma;
+        dma.due = None;
+        let Some((w, h, bpp)) = self.periph.dsi.video() else { return };
+        let mut memory = DmaView { l2mem: &mut self.l2mem, psram: &mut self.psram, mmu: &self.mmu_psram, ver: &mut self.code_ver };
+        if dma.scan(&mut memory, w as usize * h as usize * bpp) {
+            self.board.dsi_frame(w, h, bpp, &dma.bytes);
+            self.periph.dsi.vsync();
+        }
+        self.irq_dirty = true;
     }
 
     /// The board's I2C devices on I2C1 (bus 0 of `BoardModel::i2c_devices`).
@@ -601,6 +628,7 @@ impl SocBus {
         if edges { self.irq_dirty |= esp_soc::gpio::drain_board_inputs(&mut *self.board, &mut self.periph.gpio.g, &mut self.gpio_events, self.cycles); }
         if self.periph.spi2.dma_tx_pending.is_some() { self.spi2_dma_tx(); }
         if self.periph.spi2.has_pending_transfer() || !self.periph.gpio.g.changes.is_empty() { self.deliver_board_events(); }
+        if self.periph.dw_dma.due.is_some_and(|due| due <= self.cycles) { self.scan_dsi(); }
         if self.periph.i2s1.poll_active() { self.i2s1_tx(cycles as u64); }
         if self.periph.usb_otg.pending() { self.run_usb(); }
         if self.periph.sdmmc.timed { self.sd_time(); }

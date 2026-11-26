@@ -110,6 +110,12 @@ pub trait BoardModel {
     fn camera_preview(&self, _w: u32, _h: u32) -> Option<Vec<u8>> { None }
     /// A complete frame from the LCD_CAM RGB interface (RGB565 little-endian, `w`x`h`).
     fn lcd_frame(&mut self, _w: u32, _h: u32, _rgb565: &[u8]) {}
+    /// MIPI-DSI generic or DCS command carried over the board's DSI lanes.
+    fn dsi_write(&mut self, _channel: u8, _dtype: u8, _data: &[u8]) {}
+    /// The panel's payload, to be read through the host's RX FIFO.
+    fn dsi_read(&mut self, _channel: u8, _dtype: u8, _request: &[u8], _len: usize) -> Vec<u8> { Vec::new() }
+    /// A frame transferred through the DSI video bridge. Pixels occupy 2 or 3 bytes.
+    fn dsi_frame(&mut self, _w: u32, _h: u32, _bpp: usize, _data: &[u8]) {}
     /// The board's display for the UI/PNG: (width, height, RGB565 pixels, change counter).
     fn display(&self) -> Option<(u32, u32, Vec<u16>, u64)> { None }
     /// Completed display frames (for the UI's statistics line).
