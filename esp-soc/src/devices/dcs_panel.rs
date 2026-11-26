@@ -83,9 +83,13 @@ impl DcsPanel {
         // MX / MY mirror
         let (mut col, mut row) = (self.xc as usize, self.yc as usize);
         if self.madctl & 0x20 != 0 { std::mem::swap(&mut col, &mut row); }
-        if self.madctl & 0x40 != 0 { col = self.cols - 1 - col.min(self.cols - 1); }
-        if self.madctl & 0x80 != 0 { row = self.rows - 1 - row.min(self.rows - 1); }
-        if col < self.cols && row < self.rows { self.gram[row * self.cols + col] = px; self.pixels_written += 1; }
+        // ILI9342C v1.00 §§8.2.20–21 ignore out-of-range data. Check before mirroring
+        // so excess pixels cannot overwrite the last valid row or column.
+        if col < self.cols && row < self.rows {
+            if self.madctl & 0x40 != 0 { col = self.cols - 1 - col; }
+            if self.madctl & 0x80 != 0 { row = self.rows - 1 - row; }
+            self.gram[row * self.cols + col] = px; self.pixels_written += 1;
+        }
         // advance within the window, x fastest, wrapping to the window's origin
         if self.xc >= self.x1 { self.xc = self.x0; if self.yc >= self.y1 { self.yc = self.y0; } else { self.yc += 1; } } else { self.xc += 1; }
     }
@@ -128,6 +132,17 @@ mod tests {
         cmd(&mut p, 0x36, &[0x20]);                       // MV: the column counter walks rows
         cmd(&mut p, 0x2a, &[0, 1, 0, 1]); cmd(&mut p, 0x2b, &[0, 2, 0, 2]); cmd(&mut p, 0x2c, &[0, 9]);
         assert_eq!(p.gram[3 + 2], 9, "row 1, col 2");
+    }
+
+    #[test]
+    fn mirrored_window_discards_pixels_outside_gram() {
+        let mut p = DcsPanel::new(4, 3);
+        cmd(&mut p, 0x36, &[0xe0]); // MX + MY + MV
+        cmd(&mut p, 0x2a, &[0, 2, 0, 3]);
+        cmd(&mut p, 0x2b, &[0, 3, 0, 4]);
+        cmd(&mut p, 0x2c, &[0, 1, 0, 2, 0, 3, 0, 4]);
+        assert_eq!(p.pixels_written, 1);
+        assert_eq!(p.gram, [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]

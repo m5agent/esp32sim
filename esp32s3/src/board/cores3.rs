@@ -283,7 +283,9 @@ impl Cores3 {
         }
     }
 
-    /// What the glass shows: the RAM as addressed, red and blue exchanged unless MADCTL.BGR is set
+    /// The fixed landscape glass shows GRAM in chassis coordinates. ILI9342C v1.00 §8.2.29
+    /// MX/MY/MV transform writes in DcsPanel; do not rotate the framebuffer again for MV.
+    /// Red and blue are exchanged unless MADCTL.BGR is set
     /// (M5GFX sets it), inverted unless INVON (the IPS glass is normally white; M5GFX's CoreS3
     /// panel configuration has `invert = true`), black while asleep, off or in reset.
     pub fn visible(hw: &Cores3Hw) -> Vec<u16> {
