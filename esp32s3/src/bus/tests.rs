@@ -1874,7 +1874,7 @@ fn board_battery_uses_gpio10_sar_adc_and_preserves_host_overrides() {
     bus.board = Box::new(Battery);
     bus.attach_board_devices();
 
-    // ESP-IDF v5.4.3 S3 sens_reg.h. GPIO10 = ADC1 pad 9, attenuation 3.
+    // ESP-IDF v5.4.2 S3 sens_reg.h. GPIO10 = ADC1 pad 9, attenuation 3.
     fn read_battery(bus: &mut SocBus) -> u32 {
         let ctrl = 0x6000_880c;
         bus.write32(0x6000_8814, 3 << 18).unwrap();
@@ -1885,7 +1885,7 @@ fn board_battery_uses_gpio10_sar_adc_and_preserves_host_overrides() {
         assert_eq!(bus.adc_observation(10).unwrap().raw, value as u16);
         value & 0xffff
     }
-    // IDF v5.4.3's adc_cali_curve_fitting.c first step, using the S3 ADC1
+    // IDF v5.4.2's adc_cali_curve_fitting.c first step, using the S3 ADC1
     // atten-3 eFuse calibration point (900 counts at 850 mV) and the same
     // second-step coefficients as the legacy curve. At these points both
     // scales yield the same first-stage integer.
@@ -1940,7 +1940,7 @@ fn es8311_pcm_crosses_the_s3_gpio_matrix_and_gdma() {
         bus.attach_board_devices();
         bus.i2s_input(rx_port).unwrap().push(&[[1234, -2345]]);
 
-        // IDF v5.4.3 ESP32-S3 gpio_sig_map.h and i2s_reg.h. MCLK is derived in the codec.
+        // IDF v5.4.2 ESP32-S3 gpio_sig_map.h and i2s_reg.h. MCLK is derived in the codec.
         let (bck, ws, input) = if rx_port == 0 { (26, 27, 25) } else { (28, 29, 30) };
         for (pin, route) in [(41, if connected { bck } else { 24 }), (43, ws), (42, 30)] {
             bus.periph.io_mux.write(4 + pin * 4, 1 << 12);
