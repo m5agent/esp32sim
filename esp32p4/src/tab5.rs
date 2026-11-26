@@ -169,7 +169,7 @@ impl BoardModel for Tab5 {
     fn released_inputs(&mut self) -> Vec<u8> { std::mem::take(&mut self.released) }
     fn touch_at(&mut self, cycle: VirtualCycle, x: u16, y: u16, down: bool) { self.contact(cycle, 0, x, y, down); }
     fn touch(&mut self, x: u16, y: u16, down: bool) { self.touch_at(0, x, y, down); }
-    fn accepts_command(&self, verb: &str) -> bool { verb == "contact" }
+    fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "contact" | "usb-hid" | "usb-msc" | "usb-report" | "usb-key" | "usb-unplug") }
     fn board_command(&mut self, cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
         let ("contact", [id, x, y, down]) = (verb, args) else { return false };
         let (Ok(id), Ok(x), Ok(y), Ok(down @ 0..=1)) = (id.parse(), x.parse(), y.parse(), down.parse::<u8>()) else { return false };

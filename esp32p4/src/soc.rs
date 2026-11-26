@@ -291,6 +291,21 @@ impl esp_soc::SocBus for SocBus {
     fn gpio_input(&self) -> u64 { self.periph.gpio.g.input }
     fn board(&mut self) -> &mut dyn BoardModel { &mut *self.board }
     fn board_ref(&self) -> &dyn BoardModel { &*self.board }
+    fn board_command(&mut self, verb: &str, args: &[&str]) -> bool {
+        let ok = match (verb, args) {
+            ("usb-hid", ["keyboard" | "gamepad"]) => self.periph.usb_otg.attach_hid(self.cycles, args[0] == "gamepad"),
+            ("usb-msc", []) => self.periph.usb_otg.attach_msc(self.cycles),
+            ("usb-report", bytes) => bytes.iter().map(|byte| u8::from_str_radix(byte, 16)).collect::<Result<Vec<_>, _>>()
+                .is_ok_and(|report| self.periph.usb_otg.hid_report(&report)),
+            ("usb-key", [usage]) => u8::from_str_radix(usage, 16)
+                .is_ok_and(|key| self.periph.usb_otg.hid_report(&[0, 0, key, 0, 0, 0, 0, 0])),
+            ("usb-unplug", []) => self.periph.usb_otg.detach_host_device(),
+            _ => return self.board.board_command(self.cycles, verb, args),
+        };
+        esp_periph::Dispatch::refresh_optional(&mut self.periph, periph::USB_OTG_BLOCK);
+        self.irq_dirty |= ok;
+        ok
+    }
     fn audio(&self) -> (&[i16], u32) {
         let port = if self.periph.i2s0.frames_out == 0 { &self.periph.i2s1 } else { &self.periph.i2s0 };
         (&port.pcm, port.sample_rate)
@@ -318,6 +333,9 @@ impl esp_soc::SocBus for SocBus {
             let (d, k) = (&self.periph.usb_otg.stats, &l.stats);
             out.push(format!("[usb] {} SETUPs, {} IN packets ({} bytes), {} OUT packets ({} bytes), {} NAKs, {} STALLs; host: {} transfers, {} bus resets, {} data PID errors; core: {} DMA faults, {} FIFO size errors",
                              d.setups, d.packets_in, d.bytes_in, d.packets_out, d.bytes_out, d.naks, d.stalls, k.transfers, k.resets, k.toggle_errors, d.dma_faults, d.fifo_errors));
+        }
+        if let Some((setups, transfers, bytes)) = self.periph.usb_otg.host_stats().filter(|&(_, t, _)| t != 0) {
+            out.push(format!("[usb-hcd] {setups} SETUPs, {transfers} QTDs, {bytes} bytes"));
         }
         if self.periph.spi2.transfers > 0 { out.push(format!("[emu] spi2: {} transfers", self.periph.spi2.transfers)); }
         let b = self.board.report(); if !b.is_empty() { out.push(b); }

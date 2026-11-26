@@ -10,8 +10,10 @@
 //!
 //! The core answers transactions the link asks of it (a SETUP, an IN token, an OUT data packet)
 //! from its endpoint registers, moving the payload through DMA or the data FIFOs; the link
-//! decides when they happen. Host mode is not modelled.
+//! decides when they happen. The P4 host port has a separate descriptor-DMA path.
 mod fifo;
+mod host;
+mod host_msc;
 pub mod link;
 pub use link::{BusEvent, Completion, Handshake, InReply, LinkFault, LinkStats, Outcome, PortStatus, Request, Speed, UsbFunction, UsbLink, UsbTiming};
 use crate::device::{Device, WriteEffect};
@@ -185,6 +187,7 @@ pub struct Dwc2 {
     /// time in `cfg.hz` ticks, kept while a cable is attached
     pub now: u64,
     pub link: Option<Box<UsbLink>>,
+    host: Option<Box<host::Host>>,
     pending: bool,
     /// the block's reset line is asserted: registers at reset values, writes ignored
     held: bool,
@@ -202,7 +205,7 @@ impl Dwc2 {
         let mut d = Dwc2 { cfg, gotgctl: 0, gotgint: 0, gahbcfg: 0, gusbcfg: 0, grstctl: 0, gintsts: 0, gintmsk: 0, grxfsiz: 0, gnptxfsiz: 0, gdfifocfg: 0,
             dieptxf: [0; 15], pcgcctl: 0, dcfg: 0, dctl: 0, diepmsk: 0, doepmsk: 0, daintmsk: 0, diepempmsk: 0,
             ep_in: [Ep::default(); 16], ep_out: [Ep::default(); 16], ram: RegRam::new(), fifo: None, vbus: false, speed: None, sof_since: None,
-            sof_ack: 0, suspended: false, setup_phase: false, setup_stash: None, pullup_seen: false, now: 0, link: None, pending: false,
+            sof_ack: 0, suspended: false, setup_phase: false, setup_stash: None, pullup_seen: false, now: 0, link: None, host: None, pending: false,
             held: false, phy: true, frame: 0, stats: Dwc2Stats::default(), log: false };
         d.set_speed(None);
         d.reset_registers();
@@ -240,6 +243,7 @@ impl Dwc2 {
         self.ep_out[0].ctl = epctl::USBAEP;
         self.setup_phase = false; self.setup_stash = None;
         self.fifo = None;
+        if let Some(host) = &mut self.host { host.reset(); }
         self.stats.resets += 1;
     }
 
@@ -273,6 +277,32 @@ impl Dwc2 {
         self.notify_pullup();
     }
 
+    fn host_mode(&self) -> bool { self.cfg.high_speed && self.gusbcfg & gusbcfg::FHMOD != 0 }
+    pub fn attach_hid(&mut self, now: u64, gamepad: bool) -> bool {
+        if !self.cfg.high_speed || self.link.is_some() { return false; }
+        self.now = now;
+        self.host.get_or_insert_with(Default::default).attach(gamepad);
+        if self.log { eprintln!("[usb-hcd] attach {} mode={} port={:#x}", if gamepad { "gamepad" } else { "keyboard" }, self.host_mode(), self.host.as_ref().map_or(0, |host| host.read(0x440, 0))); }
+        true
+    }
+    pub fn attach_msc(&mut self, now: u64) -> bool {
+        if !self.cfg.high_speed || self.link.is_some() { return false; }
+        self.now = now;
+        self.host.get_or_insert_with(Default::default).attach_msc();
+        true
+    }
+    pub fn hid_report(&mut self, data: &[u8]) -> bool {
+        let accepted = self.host.as_mut().is_some_and(|host| host.report(data));
+        self.pending |= accepted;
+        accepted
+    }
+    pub fn detach_host_device(&mut self) -> bool {
+        if let Some(host) = &mut self.host { host.detach(); true } else { false }
+    }
+    pub fn host_stats(&self) -> Option<(u64, u64, u64)> {
+        self.host.as_ref().map(|host| (host.setups, host.transfers, host.bytes))
+    }
+
     /// The cable's work is due: `run` it with the memory the DMA reaches.
     #[inline]
     pub fn pending(&self) -> bool { self.pending }
@@ -280,6 +310,9 @@ impl Dwc2 {
     /// Let the link carry out what is due at the current time.
     pub fn run(&mut self, mem: &mut dyn DmaMemory) {
         self.pending = false;
+        if self.host_mode() {
+            if let Some(host) = &mut self.host { host.service(mem, self.gahbcfg & GAHBCFG_DMAEN != 0, self.log); }
+        }
         let Some(mut link) = self.link.take() else { return };
         link.service(self.now, self, mem);
         self.link = Some(link);
@@ -418,6 +451,9 @@ impl Dwc2 {
     }
 
     fn gintsts_now(&self) -> u32 {
+        if self.host_mode() {
+            return 1 | self.host.as_ref().map_or(0, |host| host.gint());
+        }
         let mut v = self.gintsts & gint::W1C;
         if self.gotgint != 0 { v |= gint::OTGINT; }
         if self.dctl & dctl::GINSTS != 0 { v |= gint::GINAKEFF; }
@@ -724,6 +760,9 @@ impl UsbFunction for Dwc2 {
 impl Device for Dwc2 {
     fn read(&mut self, off: u32) -> u32 {
         use reg::*;
+        if self.host_mode() && (0x400..0x700).contains(&off) {
+            return self.host.as_ref().map_or(0, |host| host.read(off, self.now / (self.cfg.hz / 8000).max(1)));
+        }
         if let Some((n, out, r)) = Self::ep_regs(off) {
             if n >= if out { self.cfg.eps } else { self.cfg.in_eps } { return 0; }
             let e = if out { self.ep_out[n] } else { self.ep_in[n] };
@@ -775,6 +814,15 @@ impl Device for Dwc2 {
     fn write(&mut self, off: u32, v: u32) -> WriteEffect {
         use reg::*;
         if self.held { return WriteEffect::NONE; }
+        if self.host_mode() && (0x400..0x700).contains(&off) {
+            if self.log { eprintln!("[usb-hcd] W +{off:#05x} = {v:#010x}"); }
+            if let Some(host) = &mut self.host { self.pending |= host.write(off, v); }
+            else if off == 0x440 || off == 0x400 {
+                let host = self.host.get_or_insert_with(Default::default);
+                self.pending |= host.write(off, v);
+            }
+            return WriteEffect::NONE;
+        }
         if let Some((n, out, r)) = Self::ep_regs(off) {
             if n >= if out { self.cfg.eps } else { self.cfg.in_eps } { return WriteEffect::NONE; }
             match r {
@@ -799,9 +847,17 @@ impl Device for Dwc2 {
                 self.gahbcfg = v & 0x01e0_01bf;
                 if !self.slave_mode() { self.fifo = None; }
             }
-            GUSBCFG => { self.gusbcfg = v; self.notify_pullup(); }
+            GUSBCFG => {
+                if self.log && self.cfg.high_speed { eprintln!("[usb] GUSBCFG <- {v:#010x}"); }
+                self.gusbcfg = v;
+                self.notify_pullup();
+            }
             GRSTCTL => self.write_grstctl(v),
-            GINTSTS => { self.gintsts &= !(v & gint::W1C); if v & gint::SOF != 0 { self.sof_ack = self.now; } }
+            GINTSTS => {
+                self.gintsts &= !(v & gint::W1C);
+                if v & gint::SOF != 0 { self.sof_ack = self.now; }
+                if let Some(host) = &mut self.host { host.clear_gint(v); }
+            }
             GINTMSK => self.gintmsk = v,
             GRXFSIZ => self.grxfsiz = v & 0xffff,
             GNPTXFSIZ => self.gnptxfsiz = v,
@@ -824,7 +880,7 @@ impl Device for Dwc2 {
     fn irq_sources(&self) -> u64 { self.irq() as u64 }
 
     /// Time runs only while a cable is attached; the core itself never needs a clock.
-    fn clock(&self) -> Option<ClockDomain> { self.link.as_ref().map(|_| ClockDomain::Cpu) }
+    fn clock(&self) -> Option<ClockDomain> { (self.link.is_some() || self.host.as_ref().is_some_and(|h| h.has_device())).then_some(ClockDomain::Cpu) }
 
     fn tick(&mut self, ticks: u64) {
         self.now += ticks;
