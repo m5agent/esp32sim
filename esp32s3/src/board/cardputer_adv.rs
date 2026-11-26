@@ -319,7 +319,7 @@ impl BoardModel for CardputerAdv {
         let pins = std::mem::take(&mut self.released);
         [SDA, SCL, LCD_DATA].into_iter().filter(|&pin| pins & (1 << pin) != 0).collect()
     }
-    fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "key" | "imu") }
+    fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "key" | "key-edge" | "imu") }
     fn board_command(&mut self, cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
         if verb == "imu" {
             if args.len() != 6 { return false; }
@@ -331,6 +331,14 @@ impl BoardModel for CardputerAdv {
             }
             let [ax, ay, az, gx, gy, gz] = values;
             self.imu.borrow_mut().set_sample([ax, ay, az], [gx, gy, gz], None);
+            return true;
+        }
+        if verb == "key-edge" {
+            let [name, state] = args else { return false; };
+            let Some((row, col)) = Self::key_position(name) else { return false; };
+            let down = match *state { "1" => true, "0" => false, _ => return false };
+            self.key_up.retain(|&(r, c, _)| (r, c) != (row, col));
+            self.keyboard.borrow_mut().key(row, col, down);
             return true;
         }
         if verb != "key" { return false; }

@@ -139,6 +139,15 @@ impl<S: Soc> Machine<S> {
             match t.as_str() {
                 "btn" => { let pin: u8 = field("pin").and_then(|x| x.parse().ok()).unwrap_or(0); let v = field("v").unwrap_or_default() == "1";
                            self.bus.gpio_set_input(pin, !v); *self.bus.irq_dirty() = true; }
+                "matrix-key" if self.bus.board_ref().accepts_command("key-edge") => {
+                    if let (Some(key), Some(down)) = (field("key"), field("down")) {
+                        self.bus.board_command("key-edge", &[&key, &down]);
+                    }
+                }
+                "power-key" if self.bus.board_ref().accepts_command("pwrkey") => {
+                    // A short PMIC press, measured in guest time.
+                    self.bus.board_command("pwrkey", &["200"]);
+                }
                 "knobpress" => { let v = field("v").unwrap_or_default() == "1"; if let Some(sw) = self.bus.board_ref().named_pin("sw") { self.bus.gpio_set_input(sw, !v); *self.bus.irq_dirty() = true; } }
                 "knob" => {
                     // Bound each browser message to about one second of encoder motion.
