@@ -1,11 +1,13 @@
 //! M5Stack Cardputer-ADV (ESP32-S3FN8, 8 MiB flash), with ST7789V2 and TCA8418.
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{Arc, atomic::Ordering};
 
 use esp_periph::i2c::I2cDevice;
-use esp_soc::board::{BoardEdge, BoardModel, SpiPins, VirtualCycle};
+use esp_periph::sdmmc::{SdCard, SpiSdCard};
+use esp_soc::board::{BoardEdge, BoardModel, I2sCodecs, SpiPins, VirtualCycle};
 use esp_soc::pins::PinRoutes;
-use esp_soc::devices::{DcsPanel, SpiBitBang, tca8418::Tca8418};
+use esp_soc::devices::{Bmi270, DcsPanel, SpiBitBang, BMI270_ADDRESS, es8311::Es8311, imu_motion::ImuMotion, tca8418::Tca8418};
 
 use super::cardputer_adv_ir::NecReceiver;
 use super::soft_i2c::{SoftI2c, SoftOp};
@@ -30,13 +32,32 @@ const KEY_INT: u8 = 11;
 const BUTTON: u8 = 0;
 const IR: u8 = 44;
 
-struct KeyboardPort(Rc<RefCell<Tca8418>>);
-impl I2cDevice for KeyboardPort {
+// Arduino-ESP32 3.2.5 variants/m5stack_cardputer/pins_arduino.h and the SD docs sketch.
+const TF_CS: u8 = 12;
+const TF: SpiPins = SpiPins { sclk: 1 << 40, mosi: 1 << 14, miso: Some(39), cs: 1 << TF_CS };
+
+enum InternalPort {
+    Keyboard(Rc<RefCell<Tca8418>>),
+    Imu(Rc<RefCell<Bmi270>>),
+    Codec(Es8311),
+}
+
+impl InternalPort {
+    fn with<T>(&mut self, f: impl FnOnce(&mut dyn I2cDevice) -> T) -> T {
+        match self {
+            Self::Keyboard(device) => f(&mut *device.borrow_mut()),
+            Self::Imu(device) => f(&mut *device.borrow_mut()),
+            Self::Codec(device) => f(device),
+        }
+    }
+}
+
+impl I2cDevice for InternalPort {
     fn pins(&self) -> Option<(u8, u8)> { Some((SDA, SCL)) }
-    fn start(&mut self, read: bool) -> bool { self.0.borrow_mut().start(read) }
-    fn write(&mut self, byte: u8) -> bool { self.0.borrow_mut().write(byte) }
-    fn read(&mut self) -> u8 { self.0.borrow_mut().read() }
-    fn stop(&mut self) { self.0.borrow_mut().stop(); }
+    fn start(&mut self, read: bool) -> bool { self.with(|d| d.start(read)) }
+    fn write(&mut self, byte: u8) -> bool { self.with(|d| d.write(byte)) }
+    fn read(&mut self) -> u8 { self.with(|d| d.read()) }
+    fn stop(&mut self) { self.with(|d| d.stop()); }
 }
 
 pub struct CardputerAdv {
@@ -52,7 +73,13 @@ pub struct CardputerAdv {
     lcd_gpio_reads: u64,
     lcd_spi_bytes: u64,
     keyboard: Rc<RefCell<Tca8418>>,
-    key_up: [Option<VirtualCycle>; 56],
+    key_up: Vec<(u8, u8, VirtualCycle)>,
+    imu: Rc<RefCell<Bmi270>>,
+    motion: Arc<ImuMotion>,
+    codec: Es8311,
+    soft_codec: Es8311,
+    sd: Option<Box<SpiSdCard>>,
+    sd_cs_low: bool,
     key_int_high: bool,
     soft: SoftI2c,
     soft_acks: u64,
@@ -70,10 +97,15 @@ impl Default for CardputerAdv { fn default() -> Self { Self::new() } }
 
 impl CardputerAdv {
     pub fn new() -> Self {
+        let motion = Arc::new(ImuMotion::default());
+        let codec = Es8311::new();
+        let soft_codec = codec.i2c_port();
         Self { lcd: DcsPanel::st7789(), lcd_gpio: SpiBitBang::new(LCD_CLK, LCD_DATA, LCD_CS),
                lcd_cmd: 0, lcd_read_bit: 0, lcd_reset: false, lcd_selected: false, lcd_clk: false,
                lcd_bl: false, lcd_version: 0, lcd_gpio_reads: 0, lcd_spi_bytes: 0,
-               keyboard: Default::default(), key_up: [None; 56], key_int_high: true,
+               keyboard: Default::default(), key_up: Vec::new(), key_int_high: true,
+               imu: Rc::new(RefCell::new(Bmi270::new(motion.clone(), CPU_HZ))), motion,
+               codec, soft_codec, sd: None, sd_cs_low: false,
                soft: SoftI2c::idle(), soft_acks: 0, sda_drive: Some(true), scl_drive: Some(true),
                lcd_drive: None, released: 0, cycle: 0, edges: Vec::new(), ir: Default::default(), ir_pwm: false }
     }
@@ -137,13 +169,25 @@ impl CardputerAdv {
         let (scl, sda) = (level(SCL), level(SDA));
         if (scl, sda) != (self.soft.scl, self.soft.sda) {
             let mut keyboard = self.keyboard.borrow_mut();
-            let mut bus = |op| match op {
-                SoftOp::Start(Tca8418::ADDRESS, read) => { self.soft_acks += 1; keyboard.start(read) as u8 }
-                SoftOp::Write(Tca8418::ADDRESS, byte) => keyboard.write(byte) as u8,
-                SoftOp::Read(Tca8418::ADDRESS) => keyboard.read(),
-                SoftOp::Read(_) => 0xff,
-                SoftOp::Stop(Tca8418::ADDRESS) => { keyboard.stop(); 0 }
-                _ => 0,
+            let mut imu = self.imu.borrow_mut();
+            let mut bus = |op| {
+                let addr = match op {
+                    SoftOp::Start(addr, _) | SoftOp::Write(addr, _) | SoftOp::Read(addr) | SoftOp::Stop(addr) => addr,
+                    SoftOp::Sync => return 0,
+                };
+                let dev: &mut dyn I2cDevice = match addr {
+                    Tca8418::ADDRESS => &mut *keyboard,
+                    BMI270_ADDRESS => &mut *imu,
+                    Es8311::ADDRESS => &mut self.soft_codec,
+                    _ => return if matches!(op, SoftOp::Read(_)) { 0xff } else { 0 },
+                };
+                match op {
+                    SoftOp::Start(_, read) => { self.soft_acks += 1; dev.start(read) as u8 }
+                    SoftOp::Write(_, byte) => dev.write(byte) as u8,
+                    SoftOp::Read(_) => dev.read(),
+                    SoftOp::Stop(_) => { dev.stop(); 0 }
+                    SoftOp::Sync => 0,
+                }
             };
             if scl != self.soft.scl { self.soft.levels(scl, self.soft.sda, &mut bus); }
             if sda != self.soft.sda { self.soft.levels(scl, sda, &mut bus); }
@@ -156,7 +200,7 @@ impl CardputerAdv {
 
     // M5Cardputer Keyboard.h's physical key labels, in the library's remapped grid.
     // KeyboardReader/TCA8418.cpp maps (row, col) to (col % 4, row * 2 + col / 4).
-    fn key_position(name: &str) -> Option<(usize, u8, u8)> {
+    fn key_position(name: &str) -> Option<(u8, u8)> {
         const ROWS: [[&str; 14]; 4] = [
             ["`", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "del"],
             ["tab", "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "[", "]", "\\"],
@@ -165,7 +209,7 @@ impl CardputerAdv {
         ];
         let name = match name { "backspace" | "delete" => "del", "return" => "enter", _ => name };
         ROWS.iter().enumerate().find_map(|(y, keys)| keys.iter().position(|key| key.eq_ignore_ascii_case(name))
-            .map(|x| (y * 14 + x, (x / 2) as u8, (y + (x % 2) * 4) as u8)))
+            .map(|x| ((x / 2) as u8, (y + (x % 2) * 4) as u8)))
     }
 
     fn visible(&self) -> Vec<u16> {
@@ -195,6 +239,11 @@ impl BoardModel for CardputerAdv {
         }
         self.gpio_lcd(enabled, output);
         self.gpio_i2c(enabled, output);
+        if let Some(sd) = &mut self.sd {
+            let selected = routes.software_pad_output(TF_CS) == Some(false);
+            if self.sd_cs_low && !selected { sd.deselect(); }
+            self.sd_cs_low = selected;
+        }
         // GPIO mode is also usable by an unmodulated NEC transmitter.
         if !self.ir_pwm { self.ir.carrier(cycle, routes.software_pad_output(IR) == Some(true)); }
     }
@@ -209,7 +258,13 @@ impl BoardModel for CardputerAdv {
         self.ir_pwm = ir.is_some();
     }
     fn uses_spi_pins(&self) -> bool { true }
+    fn has_spi_sd_slot(&self) -> bool { true }
+    fn insert_spi_sd(&mut self, card: SdCard) { self.sd = Some(Box::new(SpiSdCard::new(card))); }
     fn spi_transfer_pins(&mut self, host: u8, pins: SpiPins, tx: &[u8], rx_len: usize) -> Vec<u8> {
+        if let Some(sd) = &mut self.sd {
+            let now_ns = (u128::from(self.cycle) * 1_000_000_000 / u128::from(CPU_HZ)).min(u128::from(u64::MAX)) as u64;
+            if let Some(rx) = pins.transfer_sd(TF, sd, tx, rx_len, now_ns) { return rx; }
+        }
         let mut rx = vec![0xff; rx_len];
         if host != 3 || self.lcd_reset || pins.cs & (1 << LCD_CS) == 0 || pins.sclk & (1 << LCD_CLK) == 0 { return rx; }
         if self.lcd.dc && rx_len != 0 && pins.miso == Some(LCD_DATA) && !self.lcd_id().is_empty() {
@@ -224,19 +279,32 @@ impl BoardModel for CardputerAdv {
         rx
     }
     fn i2c_devices(&mut self) -> Vec<(u8, u8, Box<dyn I2cDevice>)> {
-        (0..2).map(|bus| (bus, Tca8418::ADDRESS, Box::new(KeyboardPort(self.keyboard.clone())) as Box<dyn I2cDevice>)).collect()
+        let mut devices: Vec<(u8, u8, Box<dyn I2cDevice>)> = Vec::new();
+        for bus in 0..2 {
+            devices.push((bus, Tca8418::ADDRESS, Box::new(InternalPort::Keyboard(self.keyboard.clone()))));
+            devices.push((bus, BMI270_ADDRESS, Box::new(InternalPort::Imu(self.imu.clone()))));
+            devices.push((bus, Es8311::ADDRESS, Box::new(InternalPort::Codec(self.codec.i2c_port()))));
+        }
+        devices
     }
-    fn next_deadline(&self) -> Option<VirtualCycle> { self.key_up.iter().flatten().copied().min() }
+    fn i2s_codecs(&self) -> Option<I2sCodecs> {
+        // M5Unified 0.3.0 M5Unified.inl: I2S1 TX and I2S0 RX share BCK and WS.
+        Some(self.codec.i2s_codecs(1, 0, 41, 43, 42, 46))
+    }
+    // M5Unified 0.3.0 Power_Class.inl doubles the calibrated ADC1 GPIO10 voltage.
+    fn default_analog_inputs(&self) -> &'static [(u8, f32)] { &[(10, 1.85)] }
+    fn set_imu_motion(&mut self, mode: u32) -> bool { self.motion.mode.store(mode, Ordering::Relaxed); true }
+    fn imu_motion(&self) -> u32 { self.motion.mode.load(Ordering::Relaxed) }
+    fn next_deadline(&self) -> Option<VirtualCycle> { self.key_up.iter().map(|&(_, _, due)| due).min() }
     fn advance_to(&mut self, cycle: VirtualCycle) {
         self.cycle = cycle;
+        self.motion.cycle.store(cycle, Ordering::Relaxed);
         if self.next_deadline().is_some_and(|due| due <= cycle) {
             let mut keyboard = self.keyboard.borrow_mut();
-            for (key, end) in self.key_up.iter_mut().enumerate() {
-                if end.is_some_and(|due| due <= cycle) {
-                    *end = None;
-                    keyboard.key((key % 14 / 2) as u8, (key / 14 + key % 2 * 4) as u8, false);
-                }
-            }
+            self.key_up.retain(|&(row, col, due)| {
+                if due <= cycle { keyboard.key(row, col, false); }
+                due > cycle
+            });
         }
     }
     fn take_edges(&mut self) -> Vec<BoardEdge> {
@@ -251,17 +319,34 @@ impl BoardModel for CardputerAdv {
         let pins = std::mem::take(&mut self.released);
         [SDA, SCL, LCD_DATA].into_iter().filter(|&pin| pins & (1 << pin) != 0).collect()
     }
-    fn accepts_command(&self, verb: &str) -> bool { verb == "key" }
+    fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "key" | "imu") }
     fn board_command(&mut self, cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
+        if verb == "imu" {
+            if args.len() != 6 { return false; }
+            let mut values = [0.0; 6];
+            for (dst, arg) in values.iter_mut().zip(args) {
+                let Ok(value) = arg.parse::<f64>() else { return false; };
+                if !value.is_finite() { return false; }
+                *dst = value;
+            }
+            let [ax, ay, az, gx, gy, gz] = values;
+            self.imu.borrow_mut().set_sample([ax, ay, az], [gx, gy, gz], None);
+            return true;
+        }
         if verb != "key" { return false; }
         let (name, ms) = match args {
             [name] => (name, 100u32),
             [name, ms] => { let Ok(ms) = ms.parse::<u32>() else { return false; }; (name, ms.max(1)) }
             _ => return false,
         };
-        let Some((key, row, col)) = Self::key_position(name) else { return false; };
+        let Some((row, col)) = Self::key_position(name) else { return false; };
         let release = cycle.saturating_add(u64::from(ms) * (CPU_HZ / 1000));
-        if self.key_up[key].replace(release).is_none() { self.keyboard.borrow_mut().key(row, col, true); }
+        if let Some((_, _, due)) = self.key_up.iter_mut().find(|(r, c, _)| (*r, *c) == (row, col)) {
+            *due = release;
+        } else {
+            self.key_up.push((row, col, release));
+            self.keyboard.borrow_mut().key(row, col, true);
+        }
         true
     }
     fn display(&self) -> Option<(u32, u32, Vec<u16>, u64)> { Some((WIDTH as u32, HEIGHT as u32, self.visible(), self.display_version())) }
@@ -275,6 +360,7 @@ impl BoardModel for CardputerAdv {
             report += &format!("\n[emu] cardputer-adv GPIO44 NEC: {} frames", self.ir.count);
             for &(address, command) in &self.ir.recent { report += &format!(" address=0x{address:04x}/command=0x{command:02x}"); }
         }
+        if let Some(sd) = &self.sd { report += &format!("\n{}", sd.report()); }
         report
     }
 }
@@ -335,7 +421,7 @@ mod tests {
     #[test]
     fn key_labels_match_the_tca8418_matrix_remap() {
         for (name, row, col) in [("a", 1, 2), ("space", 6, 7), ("enter", 6, 6), ("backspace", 6, 4), ("fn", 0, 2)] {
-            let (_, r, c) = CardputerAdv::key_position(name).unwrap();
+            let (r, c) = CardputerAdv::key_position(name).unwrap();
             assert_eq!((r, c), (row, col));
         }
     }
