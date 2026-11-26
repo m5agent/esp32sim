@@ -186,7 +186,7 @@ mod tests {
         write(&mut sensor, 0x05, &[0, 240, 1, 64, 0, 248, 1, 72]);
         let (w, h, frame) = sensor.camera_frame().unwrap();
         assert_eq!((w, h), (320, 240));
-        assert!(frame.as_chunks::<2>().0.iter().all(|p| *p == [0xff, 0xff]));
+        assert!(frame.iter().all(|&byte| byte == 0xff));
         write(&mut sensor, 0xfe, &[1]);
         write(&mut sensor, 0x53, &[0x82, 0x77, 1, 0x02, 0x46, 0x02, 0x46]);
         assert_eq!(sensor.camera_frame().map(|(w, h, _)| (w, h)), Some((182, 137)));
