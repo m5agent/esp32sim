@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(rd(&mut d, INT_STATUS_1 as u8, 1), [0xe0]);
 
         d.set_sample([0.5, -0.25, 1.0], [125.0, -250.0, 0.0], Some([20.0, -10.0, 30.0]));
-        let words = |bytes: Vec<u8>| bytes.chunks_exact(2).map(|p| i16::from_le_bytes([p[0], p[1]])).collect::<Vec<_>>();
+        let words = |bytes: Vec<u8>| bytes.as_chunks::<2>().0.iter().copied().map(i16::from_le_bytes).collect::<Vec<_>>();
         let burst = words(rd(&mut d, DATA_AUX as u8, 20));
         assert_eq!(&burst[..4], &[66 << 3, -33 << 3, 86 << 1, 6926 << 2 | 1]);
         assert_eq!(&burst[4..], &[2048, -1024, 4096, 2048, -4096, 0]);
