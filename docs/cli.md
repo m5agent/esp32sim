@@ -204,6 +204,13 @@ One action per line, `<seconds> <cmd> [args]`; buttons/encoder are active low.
 real-time keep-up (push gaps, lag, audio delivered); `hw/wsaudio.py [port] [seconds]` listens to the
 UI's audio stream and reports sample counts/peak (how to check sound without listening).
 
+### CoreS3 power inputs
+
+On `m5stack-cores3`, `pwrkey <ms>` holds the AXP2101 power key for the specified
+duration. `battery <mV> <percent> <charging 0|1> [vbus 0|1]` supplies battery
+readings and optionally disconnects VBUS (0) or supplies 5 V (1). Omitting VBUS
+keeps its previous value.
+
 ### ADC inputs
 
 Scripts accept `adc <gpio> <volts>` for a constant voltage and

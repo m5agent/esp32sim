@@ -18,13 +18,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use esp_periph::i2c::{I2cDevice, Reg8Device};
+use esp_periph::i2c::I2cDevice;
 use esp_periph::sdmmc::{SdCard, SpiSdCard};
 use esp_soc::board::{BoardEdge, BoardModel, I2sCodecs, SpiPins, VirtualCycle};
 use esp_soc::camera::Gc0308;
 use esp_soc::picture::Picture;
 use esp_soc::devices::{aw88298::Aw88298, es7210::Es7210};
-use esp_soc::devices::{Bmi270, Bmm150, DcsPanel, Ft5x06, Ft5x06Points, Ltr553, BMI270_ADDRESS, FT5X06_ADDRESS, LTR553_ADDRESS};
+use esp_soc::devices::{Axp2101, Bm8563, Bmi270, Bmm150, DcsPanel, Ft5x06, Ft5x06Points, Ltr553, AXP2101_ADDRESS, BM8563_ADDRESS, BMI270_ADDRESS, FT5X06_ADDRESS, LTR553_ADDRESS};
 use esp_soc::devices::imu_motion::ImuMotion;
 
 pub const PIN_CORES3_I2C_SDA: u8 = 12;
@@ -35,7 +35,6 @@ pub const PIN_CORES3_SD_CS: u8 = 4;
 pub const PIN_CORES3_I2C_INT: u8 = 21;
 const PIN_SPI_SCLK: u8 = 36;
 const PIN_SPI_MOSI: u8 = 37;
-const AXP2101_ADDRESS: u8 = 0x34;
 
 pub const CORES3_LCD_W: usize = 320;
 pub const CORES3_LCD_H: usize = 240;
@@ -128,13 +127,15 @@ pub struct Cores3Hw {
     pub aw9523: Aw9523,
     pub touch: Ft5x06,
     camera: Gc0308,
+    pub pmic: Axp2101,
+    pub rtc: Bm8563,
+    backlight: bool,
     pub points: Ft5x06Points,
     bmi270: Bmi270,
     ltr553: Ltr553,
     amp: Aw88298,
     mic: Es7210,
     pub others: Vec<(u8, Box<dyn I2cDevice>)>,
-    axp2101: Reg8Device,
     sd: Option<Box<SpiSdCard>>,
     lcd_in_reset: bool,
     lcd_id_offset: Option<usize>,
@@ -145,6 +146,8 @@ impl Cores3Hw {
     fn sync(&mut self) {
         // CoreS3 K128 schematic v1.0: AW_RST is driven by AW9523 P0_2.
         self.amp.set_reset_released(self.aw9523.outputs() & !self.aw9523.word(0x04) & (1 << 2) != 0);
+        let backlight = self.pmic.backlight_on();
+        if backlight != self.backlight { self.panel_version += 1; self.backlight = backlight; }
         let in_reset = !self.aw9523.lcd_reset_released();
         if in_reset && !self.lcd_in_reset {
             self.panel.reset(); self.panel_version += 1; self.lcd_id_offset = None;
@@ -157,12 +160,12 @@ impl Cores3Hw {
     // Sch_M5_CoreS3_v1.0 sheets 1 and 5 connect ALDO4 to VDD_3V3_SD.
     // M5Unified 0.3.0 Power_Class.inl enables ALDO4 (0x90 bit 3) and sets it to 3.3 V
     // (0x95 = 28) for the TF socket. The voltage register uses 100 mV steps from 500 mV.
-    fn sd_powered(&self) -> bool { self.axp2101.regs[0x90] & 0x08 != 0 && (22..=30).contains(&(self.axp2101.regs[0x95] & 0x1f)) }
+    fn sd_powered(&self) -> bool { self.pmic.powered() && self.pmic.reg(0x90) & 0x08 != 0 && (22..=30).contains(&(self.pmic.reg(0x95) & 0x1f)) }
 
     fn write_i2c(&mut self, address: u8, data: u8) -> bool {
         if address == AXP2101_ADDRESS && self.sd.is_some() {
             let powered = self.sd_powered();
-            let ack = self.axp2101.write(data);
+            let ack = self.pmic.write(data);
             if powered && !self.sd_powered() {
                 if let Some(sd) = &mut self.sd { sd.power_off(); }
             }
@@ -173,7 +176,6 @@ impl Cores3Hw {
 
     fn device(&mut self, address: u8) -> Option<&mut dyn I2cDevice> {
         match address {
-            AXP2101_ADDRESS => Some(&mut self.axp2101),
             Aw9523::ADDRESS => Some(&mut self.aw9523),
             FT5X06_ADDRESS => Some(&mut self.touch),
             BMI270_ADDRESS => Some(&mut self.bmi270),
@@ -181,6 +183,8 @@ impl Cores3Hw {
             Gc0308::ADDRESS => Some(&mut self.camera),
             Aw88298::ADDRESS => Some(&mut self.amp),
             Es7210::ADDRESS => Some(&mut self.mic),
+            AXP2101_ADDRESS => Some(&mut self.pmic),
+            BM8563_ADDRESS => Some(&mut self.rtc),
             a => self.others.iter_mut().find(|(o, _)| *o == a).map(|(_, d)| &mut **d as &mut dyn I2cDevice),
         }
     }
@@ -231,6 +235,7 @@ pub struct Cores3 {
     sd_cs_low: bool,
     cycle: VirtualCycle,
     int_level: bool,
+    powered: bool,
     edges: Vec<BoardEdge>,
     pub gpio_events: u64,
     pub spi_bytes: u64,
@@ -243,23 +248,21 @@ impl Cores3 {
         let imu: Arc<ImuMotion> = Default::default();
         let points: Ft5x06Points = Default::default();
         let others: Vec<(u8, Box<dyn I2cDevice>)> = vec![
-            (0x51, Box::new(Reg8Device::new("bm8563", &[]))),
         ];
         let hw = Cores3Hw {
             panel: DcsPanel::new(CORES3_LCD_W, CORES3_LCD_H), aw9523: Aw9523::new(), touch: Ft5x06::new(points.clone()),
             bmi270: Bmi270::new(imu.clone(), crate::periph::CPU_HZ).with_aux_bmm150(Bmm150::new(Default::default())),
             ltr553: Ltr553::new(),
-            points, others, camera: Gc0308::default(), amp: Aw88298::new(), mic: Es7210::new(), lcd_in_reset: true, lcd_id_offset: None, panel_version: 0, sd: None,
-            // AXP2101 chip ID 0x4A at 0x03, as M5GFX's CoreS3 detector requires.
-            axp2101: Reg8Device::new("axp2101", &[(0x03, 0x4a), (0x00, 0x28)]),
+            points, others, camera: Gc0308::default(), amp: Aw88298::new(), mic: Es7210::new(), pmic: Axp2101::new(crate::periph::CPU_HZ), rtc: Bm8563::new(crate::periph::CPU_HZ), backlight: false,
+            lcd_in_reset: true, lcd_id_offset: None, panel_version: 0, sd: None,
         };
-        Cores3 { hw: Rc::new(RefCell::new(hw)), soft: SoftI2c { scl: true, sda: true, ..Default::default() }, sda_release: false, imu, lcd_cs_low: false, sd_cs_low: false, cycle: 0, int_level: true,
+        Cores3 { hw: Rc::new(RefCell::new(hw)), soft: SoftI2c { scl: true, sda: true, ..Default::default() }, sda_release: false, imu, lcd_cs_low: false, sd_cs_low: false, cycle: 0, int_level: true, powered: true,
                  edges: Vec::new(), gpio_events: 0, spi_bytes: 0 }
     }
 
     fn addresses(&self) -> Vec<u8> {
         let hw = self.hw.borrow_mut();
-        let mut v = vec![Aw9523::ADDRESS, FT5X06_ADDRESS, BMI270_ADDRESS, LTR553_ADDRESS, AXP2101_ADDRESS, Gc0308::ADDRESS, Aw88298::ADDRESS, Es7210::ADDRESS];
+        let mut v = vec![Aw9523::ADDRESS, FT5X06_ADDRESS, BMI270_ADDRESS, LTR553_ADDRESS, AXP2101_ADDRESS, BM8563_ADDRESS, Gc0308::ADDRESS, Aw88298::ADDRESS, Es7210::ADDRESS];
         v.extend(hw.others.iter().map(|(a, _)| *a));
         v
     }
@@ -334,7 +337,7 @@ impl Cores3 {
     /// panel configuration has `invert = true`), black while asleep, off or in reset.
     pub fn visible(hw: &Cores3Hw) -> Vec<u16> {
         let p = &hw.panel;
-        let blank = !p.on || p.sleeping || hw.lcd_in_reset;
+        let blank = !p.on || p.sleeping || hw.lcd_in_reset || !hw.pmic.backlight_on();
         let exchange = p.madctl & 0x08 == 0;
         p.gram.iter().map(|&px| {
             if blank { return 0; }
@@ -461,9 +464,60 @@ impl BoardModel for Cores3 {
     }
     fn set_imu_motion(&mut self, mode: u32) -> bool { self.imu.mode.store(mode, std::sync::atomic::Ordering::Relaxed); true }
     fn imu_motion(&self) -> u32 { self.imu.mode.load(std::sync::atomic::Ordering::Relaxed) }
-    fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "imu" | "als") }
-    fn board_command(&mut self, _cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
+    fn input_levels(&self) -> Vec<(u8, bool)> { vec![(PIN_CORES3_I2C_INT, self.int_level)] }
+    fn touch(&mut self, x: u16, y: u16, down: bool) {
+        {
+            let mut hw = self.hw.borrow_mut();
+            hw.points.lock().expect("CoreS3 touch mutex poisoned")[0] =
+                down.then_some((x.min(CORES3_LCD_W as u16 - 1), y.min(CORES3_LCD_H as u16 - 1)));
+            hw.sync();
+        }
+        self.update_int();
+    }
+    fn soc_powered(&self) -> Option<bool> { Some(self.hw.borrow().pmic.powered()) }
+    fn next_deadline(&self) -> Option<VirtualCycle> {
+        let hw = self.hw.borrow();
+        hw.rtc.next_deadline().into_iter().chain(hw.pmic.next_deadline()).min()
+    }
+    fn advance_to(&mut self, cycle: VirtualCycle) {
+        self.cycle = self.cycle.max(cycle);
+        let mut hw = self.hw.borrow_mut();
+        hw.rtc.advance_to(self.cycle);
+        hw.pmic.advance_to(self.cycle);
+        // CoreS3 schematic v1.0: BM8563 INT pulls down the AXP_WAKEUP net at AXP2101 IRQ.
+        let rtc_irq = hw.rtc.irq_low();
+        hw.pmic.set_irq_input(rtc_irq);
+        let powered = hw.pmic.powered();
+        if self.powered && !powered {
+            hw.aw9523.reset();
+            hw.panel.reset();
+            hw.panel.gram.fill(0);
+            self.soft = SoftI2c { scl: true, sda: true, transactions: self.soft.transactions, ..Default::default() };
+            self.sda_release = true;
+            hw.panel_version += 1;
+            hw.sync();
+        }
+        self.powered = powered;
+        drop(hw);
+        self.update_int();
+    }
+    fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "pwrkey" | "battery" | "imu" | "als") }
+    fn board_command(&mut self, cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
+        self.advance_to(cycle);
+        let mut hw = self.hw.borrow_mut();
+        let flag = |s: &str| match s { "0" => Some(false), "1" => Some(true), _ => None };
         match (verb, args) {
+            ("pwrkey", [ms]) => ms.parse().is_ok_and(|ms| hw.pmic.press_key(ms)),
+            ("battery", [mv, percent, charging] | [mv, percent, charging, _]) => {
+                let (Ok(mv), Ok(percent), Some(charging)) = (mv.parse(), percent.parse(), flag(charging)) else { return false; };
+                if mv > 0x3fff || percent > 100 { return false; }
+                if let Some(vbus) = args.get(3) {
+                    let Some(vbus) = flag(vbus) else { return false; };
+                    hw.pmic.set_vbus_mv(if vbus { 5000 } else { 0 });
+                }
+                hw.pmic.set_battery(mv, percent, charging);
+                true
+            }
             ("imu", args) if matches!(args.len(), 6 | 9) => {
                 let mut xyz = [0.0; 9];
                 for (dst, arg) in xyz.iter_mut().zip(args) {
@@ -475,30 +529,16 @@ impl BoardModel for Cores3 {
                 // Script values use board axes. M5Unified 0.3.0 IMU_Class.inl inverts
                 // the BMM150's Y/Z on CoreS3; the accel/gyro axes are already aligned.
                 let mag = (args.len() == 9).then_some([mx, -my, -mz]);
-                self.hw.borrow_mut().bmi270.set_sample([ax, ay, az], [gx, gy, gz], mag);
+                hw.bmi270.set_sample([ax, ay, az], [gx, gy, gz], mag);
                 true
             }
             ("als", [ch0, ch1, ps]) => {
                 let (Ok(ch0), Ok(ch1), Ok(ps)) = (ch0.parse(), ch1.parse(), ps.parse()) else { return false; };
-                self.hw.borrow_mut().ltr553.set_sample(ch0, ch1, ps);
+                hw.ltr553.set_sample(ch0, ch1, ps);
                 true
             }
             _ => false,
         }
-    }
-    fn input_levels(&self) -> Vec<(u8, bool)> { vec![(PIN_CORES3_I2C_INT, self.int_level)] }
-    fn touch(&mut self, x: u16, y: u16, down: bool) {
-        {
-            let mut hw = self.hw.borrow_mut();
-            hw.points.lock().expect("CoreS3 touch mutex poisoned")[0] =
-                down.then_some((x.min(CORES3_LCD_W as u16 - 1), y.min(CORES3_LCD_H as u16 - 1)));
-            hw.sync();
-        }
-        self.update_int();
-    }
-    fn advance_to(&mut self, cycle: VirtualCycle) {
-        if cycle > self.cycle { self.cycle = cycle; }
-        self.update_int();
     }
     fn take_edges(&mut self) -> Vec<BoardEdge> { std::mem::take(&mut self.edges) }
     fn set_camera_picture(&mut self, picture: Picture) -> Result<(), &'static str> { self.hw.borrow_mut().camera.set_camera_picture(picture) }
@@ -514,6 +554,9 @@ impl BoardModel for Cores3 {
         let mut report = format!("[emu] cores3: soft-i2c {} transactions; {} RAMWR, {} pixels, madctl={:#x} colmod={:#x} inverted={} on={} sleeping={} lcd_reset={} bbox={:?}; spi {} bytes; aw9523 out={:#06x} dir={:#06x}; gpio events {}",
                 self.soft.transactions, p.frames, p.pixels_written, p.madctl, p.colmod, p.inverted, p.on, p.sleeping, hw.lcd_in_reset, p.bbox(), self.spi_bytes,
                 hw.aw9523.outputs(), u16::from_le_bytes([hw.aw9523.regs[4], hw.aw9523.regs[5]]), self.gpio_events);
+        report += &format!("\n[emu] cores3 power: powered={} backlight_mv={} off_cause={:#04x} off_cycle={:?} on_cause={:#04x} on_cycle={:?}; rtc control2={:#04x} timer_expiry_cycle={:?}",
+                hw.pmic.powered(), hw.pmic.backlight_mv(), hw.pmic.off_cause(), hw.pmic.last_off, hw.pmic.on_cause(), hw.pmic.last_on,
+                hw.rtc.control2(), hw.rtc.last_timer_expiry);
         if let Some(sd) = &hw.sd { report += &format!("\n{}; ALDO4 {}", sd.report(), if hw.sd_powered() { "on" } else { "off" }); }
         report
     }

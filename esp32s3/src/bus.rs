@@ -104,6 +104,8 @@ pub struct SocBus {
     cache_resource: CacheResource,
     pub(crate) fetch_cache: xtensa_lx7::state::SharedFetchCache,
     board_edges: bool,
+    board_power: Option<bool>,
+    pub(crate) power_on_reset: bool,
     /// a USB host is on the OTG port (`attach_usb_host`): only then can the core's work fall due
     pub(crate) usb_host: bool,
 }
@@ -188,7 +190,7 @@ impl SocBus {
             ble: Default::default(),
             sram: vec![0; SRAM_SIZE], irom: vec![0; (IROM_MASK_HIGH - IROM_MASK_LOW) as usize], drom: vec![0; (DROM_MASK_HIGH - DROM_MASK_LOW) as usize],
             rtc_fast: vec![0; 8192], rtc_slow: vec![0; 8192], flash: vec![0xff; flash_size], psram: vec![0; psram_size],
-            mmu: [MMU_INVALID; MMU_ENTRIES], periph: Peripherals::new(mac), board: Box::new(crate::board::Atech14::new()), uart_pins: false, cycles: 0, last_fault: None, spi2_dma_fault: None, irq_dirty: false, ena_latency: Default::default(), gpio_events: None, debug: Default::default(), board_edges: true,
+            mmu: [MMU_INVALID; MMU_ENTRIES], periph: Peripherals::new(mac), board: Box::new(crate::board::Atech14::new()), uart_pins: false, cycles: 0, last_fault: None, spi2_dma_fault: None, irq_dirty: false, ena_latency: Default::default(), gpio_events: None, debug: Default::default(), board_edges: true, board_power: None, power_on_reset: false,
             spi2_timing: false, spi2_scheduled: None, spi2_pins: None, spi3_dma_fault: None, spi3_pins: None,
             tlb: vec![TlbEntry::EMPTY; TLB_SIZE], page_ver: Vec::new(), ver_base: [0; 7], flash_epoch: BUS_EPOCHS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) << 32, code_blk: Vec::new(), tick_pending: 0, tick_budget: 0, defer_mmio: false, mmio_deferred: false, vq_violations: 0,
             approximate_cache: None, approximate_cache_pending: 0, approximate_cache_fast_internal: false, approximate_cache_inline: false,
@@ -338,6 +340,7 @@ impl SocBus {
         }
         self.uart_pins = self.board.uses_uart_pins();
         self.board_edges = self.board.uses_gpio_edges();
+        self.board_power = self.board.soc_powered();
         for (bus, address, device) in self.board.i2c_devices() {
             self.periph.i2c[bus as usize].attach(address, device);
         }
@@ -594,6 +597,7 @@ impl SocBus {
                 for &(pin, level) in changes { events.push((self.cycles, pin, level)); }
             }
             self.board.gpio_output_at(self.cycles, changes, self.periph.gpio.enable, self.periph.gpio.out);
+            if self.board_power.is_some() { self.sync_board_power(); }
             self.periph.gpio.changes.clear();
         }
         if let Some(port) = match a { 0x60000000 => Some(0), 0x60010000 => Some(1), 0x6002e000 => Some(2), _ => None } {
@@ -930,11 +934,25 @@ impl SocBus {
             || p.usb.int_ena & (1 << 1) != 0
     }
 
+    pub(crate) fn has_board_power(&self) -> bool { self.board_power.is_some() }
+    pub(crate) fn board_power_off(&self) -> bool { self.board_power == Some(false) }
+
+    fn sync_board_power(&mut self) {
+        let powered = self.board.soc_powered();
+        if self.board_power != powered { self.irq_dirty = true; }
+        if self.board_power_off() && powered == Some(true) {
+            self.power_on_reset = true;
+            self.periph.rtc.sw_reset = true;
+            self.periph.rtc.reset_cause = crate::periph::RST_POWERON;
+        }
+        self.board_power = powered;
+    }
+
     /// Refresh the cached deadline after host-side device configuration changes.
     /// Pending elapsed cycles are retained and count toward the new threshold.
     pub fn refresh_tick_budget(&mut self) {
         let cap = if self.cadence_active() { MAX_TICK_DEFER } else { QUIET_TICK_DEFER };
-        let mut budget = self.periph.cycles_until_timer().clamp(1, cap);
+        let mut budget = if self.board_power_off() { cap } else { self.periph.cycles_until_timer().clamp(1, cap) };
         if let Some((deadline, _)) = &self.spi2_scheduled {
             let until = u64::from(self.tick_pending).saturating_add(deadline.saturating_sub(self.cycles));
             budget = budget.min(until.clamp(1, u64::from(MAX_TICK_DEFER)) as u32);
@@ -989,9 +1007,18 @@ impl SocBus {
     fn tick_impl(&mut self, cycles: u32) -> u32 {
         // Board time advances before peripheral callbacks; inputs are delivered after them.
         if self.board_edges { self.board.advance_to(self.cycles); }
+        if self.board_power_off() || self.power_on_reset {
+            self.sync_board_power();
+            return u32::from(self.irq_dirty);
+        }
+        let board_i2c = self.board_power.is_some() && self.periph.i2c.iter().any(|i2c| i2c.is_active());
         // Reads may flush before the periodic backstop. Refresh for either edge
         // of a clocked source, without breaking every block that polls MMIO.
         self.irq_dirty |= self.periph.tick(cycles as u64);
+        if board_i2c {
+            self.sync_board_power();
+            if self.board_power_off() { return 1; }
+        }
         if self.periph.uart.iter().any(|u| u.has_queued()) { self.pace_uart_input(cycles); }
         if self.uart_pins {
             for input in self.board.uart_rx(self.cycles) {

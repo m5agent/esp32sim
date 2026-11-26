@@ -176,6 +176,13 @@ impl esp_soc::SocBus for SocBus {
         self.flush_ticks();
         self.cancel_spi2_timing();
         let cause = self.periph.rtc.reset_cause;
+        let cold = std::mem::take(&mut self.power_on_reset);
+        if cold {
+            self.sram.fill(0);
+            self.psram.fill(0);
+            self.rtc_fast.fill(0);
+            self.rtc_slow.fill(0);
+        }
         let mut old = std::mem::replace(&mut self.periph, periph::Peripherals::new(mac));
         let sd_base = old.sd_cycle_base + old.clock_cycles();
         let p = &mut self.periph;
@@ -195,7 +202,8 @@ impl esp_soc::SocBus for SocBus {
         // resets it) or the PSRAM (MR2 is read-only and keeps its density).
         p.spi0.octal_flash = old.spi0.octal_flash; p.spi1.octal_flash = old.spi1.octal_flash; p.spi1.flash_cr2 = old.spi1.flash_cr2;
         p.spi0.psram_mr[2] = old.spi0.psram_mr[2]; p.spi1.psram_mr[2] = old.spi1.psram_mr[2];
-        p.rtc.ram = old.rtc.ram; p.rtc.slow_ticks = old.rtc.slow_ticks; p.rtc.reset_cause = cause;
+        if !cold { p.rtc.ram = old.rtc.ram; p.rtc.slow_ticks = old.rtc.slow_ticks; }
+        p.rtc.reset_cause = cause;
         p.usb.connected = old.usb.connected;            // the host side of the USB cable is not reset
         // The card keeps its power and its state; IDF's init resets it with CMD0. The USB-OTG
         // cable stays plugged in; the host sees the reset core's pull-up go.
@@ -217,6 +225,8 @@ impl esp_soc::SocBus for SocBus {
         cause
     }
     fn sw_reset(&self) -> bool { self.periph.rtc.sw_reset }
+    fn has_board_power(&self) -> bool { self.has_board_power() }
+    fn soc_power_off(&self) -> bool { self.board_power_off() }
     fn request_reset(&mut self, cause: u32) { self.periph.rtc.sw_reset = true; self.periph.rtc.reset_cause = cause; }
     fn reset_cause(&self) -> u32 { self.periph.rtc.reset_cause }
     fn last_fault(&self) -> Option<(u32, bool)> { self.last_fault }

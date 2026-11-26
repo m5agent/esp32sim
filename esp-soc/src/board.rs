@@ -174,6 +174,8 @@ pub trait BoardModel {
     /// parse time so an unknown verb stays a script error.
     fn board_command(&mut self, _cycle: VirtualCycle, _verb: &str, _args: &[&str]) -> bool { false }
     fn accepts_command(&self, _verb: &str) -> bool { false }
+    /// SoC supply from an external PMIC. None for boards without a switched supply.
+    fn soc_powered(&self) -> Option<bool> { None }
 }
 
 pub type Board = Box<dyn BoardModel>;
