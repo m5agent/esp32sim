@@ -9,8 +9,8 @@
 //!
 //! Modelled: blend / fill / bypass with ARGB8888, RGB888, RGB565, L8/L4 (CLUT), A8/A4 (fg),
 //! GRAY8 inputs and ARGB8888, RGB888, RGB565, GRAY8 outputs; byte and R/B swap; alpha fix /
-//! scale / invert; colour keying; and RGB scale/rotate/mirror (nearest-neighbour sampling).
-//! YUV formats are refused. P4 register fields were checked against ESP-IDF v5.4.1/v5.5.4
+//! scale / invert; colour keying; and RGB/YUV420 scale/rotate/mirror. P4 register fields
+//! were checked against ESP-IDF v5.4.1/v5.5.4
 //! soc/esp32p4 ppa_reg.h and hal/esp32p4/include/hal/ppa_ll.h.
 use crate::device::{Device, WriteEffect};
 
@@ -99,6 +99,56 @@ pub fn encode(cm: u32, px: &[Argb], gray: (u32, u32, u32)) -> Option<Vec<u8>> {
     Some(out)
 }
 
+// ESP32-P4 TRM v1.0, table 40.5-1: a pair of rows stores [U,Y0,Y1] and [V,Y2,Y3].
+const CM_YUV420: u32 = 8;
+fn decode_yuv420(data: &[u8], w: usize, h: usize, full: bool, bt709: bool) -> Option<Vec<Argb>> {
+    if (w | h) & 1 != 0 || data.len() != w * h * 3 / 2 { return None; }
+    let stride = w * 3 / 2;
+    let mut out = Vec::with_capacity(w * h);
+    for y in 0..h {
+        for x in 0..w {
+            let group = x / 2 * 3;
+            let chroma = (y & !1) * stride + group;
+            let (mut l, mut u, mut v) = (i32::from(data[y * stride + group + 1 + x % 2]),
+                                       i32::from(data[chroma]), i32::from(data[chroma + stride]));
+            if full { l = l * 220 / 256 + 16; u = u * 225 / 256 + 16; v = v * 225 / 256 + 16; }
+            let (l, u, v) = ((l - 16) * 298, u - 128, v - 128);
+            let (rv, gu, gv, bu) = if bt709 { (459, 55, 136, 541) } else { (409, 100, 208, 516) };
+            let byte = |x: i32| ((x + 128) >> 8).clamp(0, 255) as u8;
+            out.push(Argb { a: 255, r: byte(l + rv * v), g: byte(l - gu * u - gv * v), b: byte(l + bu * u) });
+        }
+    }
+    Some(out)
+}
+
+fn encode_yuv420(pixels: &[Argb], w: usize, h: usize, full: bool, bt709: bool) -> Option<Vec<u8>> {
+    if (w | h) & 1 != 0 { return None; }
+    let quantize = |value: i32, scale: i32, floor: i32, ceiling: i32| -> u8 {
+        if full { ((value - 16 * 256) * scale / 256 / 256).clamp(0, 255) as u8 }
+        else { ((value + 128) / 256).clamp(floor, ceiling) as u8 }
+    };
+    let (lr, lg, lb, ur, ug, vg, vb) = if bt709 { (47, 157, 16, 26, 86, 102, 10) }
+                                      else { (66, 129, 25, 38, 74, 94, 18) };
+    let yuv = |p: Argb| {
+        let (r, g, b) = (i32::from(p.r), i32::from(p.g), i32::from(p.b));
+        [4096 + lr * r + lg * g + lb * b, 32768 - ur * r - ug * g + 112 * b, 32768 + 112 * r - vg * g - vb * b]
+    };
+    let stride = w * 3 / 2;
+    let mut out = vec![0; stride * h];
+    for y in (0..h).step_by(2) {
+        for x in (0..w).step_by(2) {
+            let base = y * w + x;
+            let [a, b, c, d] = [base, base + 1, base + w, base + w + 1].map(|i| yuv(pixels[i]));
+            let u = (a[1] + b[1] + c[1] + d[1]) / 4;
+            let v = (a[2] + b[2] + c[2] + d[2]) / 4;
+            let off = y * stride + x * 3 / 2;
+            out[off..off + 3].copy_from_slice(&[quantize(u, 291, 16, 240), quantize(a[0], 298, 16, 235), quantize(b[0], 298, 16, 235)]);
+            out[off + stride..off + stride + 3].copy_from_slice(&[quantize(v, 291, 16, 240), quantize(c[0], 298, 16, 235), quantize(d[0], 298, 16, 235)]);
+        }
+    }
+    Some(out)
+}
+
 /// Alpha update (ppa_ll_blend_configure_rx_*_alpha): mode 1 replaces alpha with the fixed
 /// value, mode 2 scales it by value/256; INV inverts it.
 fn update_alpha(a: u8, mode: u32, fix: u32, inv: bool) -> u8 {
@@ -147,29 +197,49 @@ impl Ppa {
         let (out_w, out_h) = if rot & 1 != 0 { (h, w) } else { (w, h) };
         let cm = self.reg(0x20);
         let (rx, tx) = (cm & 15, cm >> 4 & 15);
-        let pbyte = match tx { CM_ARGB8888 => 5, CM_RGB888 => 4, CM_RGB565 => 3, _ => return Err(0x20) };
-        if !matches!(rx, CM_ARGB8888 | CM_RGB888 | CM_RGB565) { return Err(0x20); }
-        if data.len() != width * height * bits(rx).unwrap_or(0) / 8 { return Err(0x20); }
+        let pbyte = match tx { CM_ARGB8888 => 5, CM_RGB888 => 4, CM_RGB565 => 3, CM_YUV420 => 2, _ => return Err(0x20) };
         let order = self.reg(0x28);
         let alpha = self.reg(0x38);
-        let input = decode(rx, data, width * height, &self.clut[0], 0, order & 1 != 0, order & 2 != 0).ok_or(0x20u32)?;
+        let input = if rx == CM_YUV420 {
+            decode_yuv420(data, width, height, cm & (1 << 8) != 0, cm & (1 << 10) != 0)
+        } else {
+            if !matches!(rx, CM_ARGB8888 | CM_RGB888 | CM_RGB565) || data.len() != width * height * bits(rx).unwrap_or(0) / 8 { return Err(0x20); }
+            decode(rx, data, width * height, &self.clut[0], 0, order & 1 != 0, order & 2 != 0)
+        }.ok_or(0x20u32)?;
         let mut output = Vec::with_capacity(out_w * out_h);
         for y in 0..out_h {
             for x in 0..out_w {
+                let x = if scale & (1 << 28) != 0 { out_w - 1 - x } else { x };
+                let y = if scale & (1 << 29) != 0 { out_h - 1 - y } else { y };
                 let (x, y) = match rot {
                     1 => (w - 1 - y, x), // 90 degrees counterclockwise
                     2 => (w - 1 - x, h - 1 - y),
                     3 => (y, h - 1 - x),
                     _ => (x, y),
                 };
-                let x = if scale & (1 << 28) != 0 { w - 1 - x } else { x };
-                let y = if scale & (1 << 29) != 0 { h - 1 - y } else { y };
-                let mut p = input[(y * 16 / sy) * width + x * 16 / sx];
+                let (ix, iy) = (x * 16 / sx, y * 16 / sy);
+                let (fx, fy) = (x * 16 % sx, y * 16 % sy);
+                let top = iy * width;
+                let mut p = input[top + ix];
+                if fx != 0 || fy != 0 {
+                    // TRM 40.4: bilinear interpolation. Clamp both axes to the input block.
+                    let next_x = (ix + 1).min(width - 1);
+                    let bottom = (iy + 1).min(height - 1) * width;
+                    let (a, b, c, d) = (p, input[top + next_x], input[bottom + ix], input[bottom + next_x]);
+                    let mix = |a: u8, b: u8, c: u8, d: u8| {
+                        let top = a as usize * (sx - fx) + b as usize * fx;
+                        let bottom = c as usize * (sx - fx) + d as usize * fx;
+                        ((top * (sy - fy) + bottom * fy + sx * sy / 2) / (sx * sy)) as u8
+                    };
+                    p = Argb { a: mix(a.a,b.a,c.a,d.a), r: mix(a.r,b.r,c.r,d.r), g: mix(a.g,b.g,c.g,d.g), b: mix(a.b,b.b,c.b,d.b) };
+                }
                 p.a = update_alpha(p.a, alpha >> 8 & 3, alpha & 255, alpha & (1 << 10) != 0);
                 output.push(p);
             }
         }
-        let data = encode(tx, &output, (0, 0, 0)).ok_or(0x20u32)?;
+        let data = if tx == CM_YUV420 {
+            encode_yuv420(&output, out_w, out_h, cm & (1 << 9) != 0, cm & (1 << 11) != 0)
+        } else { encode(tx, &output, (0, 0, 0)) }.ok_or(0x20u32)?;
         self.regs[0x10 / 4] |= 1; // SR_EOF
         if self.dbg { eprintln!("[ppa] SRM {width}x{height} -> {out_w}x{out_h} cm={cm:#x}"); }
         Ok((data, out_w, out_h, pbyte))
@@ -317,6 +387,17 @@ mod tests {
         assert_eq!(p.run(PpaOp::Fill, &[], 0), Err(0x24));
         p.write(0x64, 1 << 27); assert_eq!(p.pending(), vec![PpaOp::Srm]); assert_eq!(p.run(PpaOp::Srm, &[], 0), Err(0x64));
     }
+    #[test]
+    fn srm_converts_packed_yuv420_in_both_directions() {
+        let mut p = Ppa::new();
+        p.write(0x20, CM_YUV420 | CM_RGB888 << 4);
+        let yuv = [128, 16, 235, 128, 235, 16];
+        assert_eq!(p.srm(&yuv, 2, 2).unwrap().0, [0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0, 0]);
+        p.write(0x20, CM_RGB888 | CM_YUV420 << 4);
+        let rgb = [0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0, 0];
+        assert_eq!(p.srm(&rgb, 2, 2).unwrap().0, yuv);
+    }
+
     #[test]
     fn blend_fixed_and_scaled_alpha_and_a8_foreground() {
         let mut p = Ppa::new();

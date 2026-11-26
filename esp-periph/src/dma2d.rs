@@ -13,9 +13,9 @@
 //!
 //! Model: a transfer completes synchronously when everything it needs has been started (both
 //! channels of an M2M pair; the PPA plus its channels). The FIFOs, burst lengths, arbitration,
-//! reorder and macro-block sizes only shape timing and are kept as storage. Colour-space
-//! conversion and scrambling in the channels are not modelled: a channel configured for them is
-//! refused (nothing moves) rather than copied unconverted.
+//! reorder and macro-block sizes only shape timing and are kept as storage. Packed three-byte
+//! colour conversion supports the programmable matrix, RGB565 expansion and quantization.
+//! Unsupported subsampling modes are refused.
 use crate::device::{Device, WriteEffect};
 use crate::ppa::{Ppa, PpaOp};
 use crate::sdmmc::SdmmcMemory;
@@ -228,9 +228,63 @@ impl Dma2d {
     fn out_error(&mut self, ch: usize) { let c = &mut self.out[ch]; c.running = false; c.raise(OUT_DSCR_ERR); }
     fn in_error(&mut self, ch: usize) { let c = &mut self.inp[ch]; c.running = false; c.raise(IN_DSCR_ERR); }
 
-    fn csc_enabled(&self, input: bool, ch: usize) -> bool {
-        if input { self.inp[ch].regs[0x4c / 4] >> 3 & 7 != 7 } else { self.out[ch].regs[0x48 / 4] >> 3 & 7 != 7 }
+    /// DMA2D_{OUT,IN}_COLOR_CONVERT/SCRAMBLE and COLOR_PARAM0..5 (IDF v5.4.1
+    /// dma2d_struct.h and dma2d_ll_{tx,rx}_configure_color_space_conv). The matrix
+    /// consumes high/middle/low bytes and uses signed fixed-point coefficients.
+    fn convert(&self, input: bool, ch: usize, data: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+        let (c, base, off) = if input { (&self.inp[ch], IN_BASE + STRIDE * ch as u32, 0x4c) }
+                             else { (&self.out[ch], STRIDE * ch as u32, 0x48) };
+        let ctrl = c.regs[off as usize / 4];
+        let (src, dst) = (ctrl >> 3 & 7, ctrl & 3);
+        if src == 7 { return Ok(data); }
+        let refuse = Refusal { ppa: false, off: base + off };
+        let src_bytes = match (input, src) { (false, 0 | 2) | (true, 1) => 2, (false, 3) | (true, 2) => 3, _ => return Err(refuse) };
+        let dst_bytes = match (input, dst) { (_, 0) => 2, (false, 2) | (true, 1) => 3, _ => return Err(refuse) };
+        let expand = !input && src == 0;
+        let proc = ctrl & 4 != 0;
+        let scramble = c.regs[off as usize / 4 + 1];
+        let orders = [[0, 1, 2], [1, 0, 2], [2, 0, 1], [0, 2, 1], [1, 2, 0], [2, 1, 0]];
+        let pre = orders.get((scramble & 7) as usize).ok_or(refuse)?;
+        let post = orders.get(if input { (scramble >> 3 & 7) as usize } else { 0 }).ok_or(refuse)?;
+        if !data.len().is_multiple_of(src_bytes) || data.len() / src_bytes * dst_bytes > STREAM_LIMIT { return Err(refuse); }
+        let sign = |v: u32, bits: u32| ((v << (32 - bits)) as i32) >> (32 - bits);
+        let coeff: [[i32; 4]; 3] = std::array::from_fn(|i| {
+            let index = off as usize / 4 + 2 + i * 2;
+            let (a, b) = (c.regs[index], c.regs[index + 1]);
+            [sign(a, 10), sign(a >> 10, 11), sign(b, 10), sign(b >> 10, 18)]
+        });
+        if src_bytes == 2 && !expand {
+            // Opaque two-byte pixels can pass through the scrambler without reinterpretation.
+            if dst == 0 || proc || pre[2] != 2 || post[2] != 2 { return Err(refuse); }
+            if pre[0] != post[0] {
+                let mut data = data;
+                for pixel in data.as_chunks_mut::<2>().0 { pixel.swap(0, 1); }
+                return Ok(data);
+            }
+            return Ok(data);
+        }
+        let mut out = Vec::with_capacity(data.len() / src_bytes * dst_bytes);
+        for bytes in data.chunks_exact(src_bytes) {
+            let p = if expand {
+                let word = u16::from_le_bytes([bytes[0], bytes[1]]);
+                let (r, g, b) = (word >> 11, word >> 5 & 63, word & 31);
+                [(b << 3 | b >> 2) as u8, (g << 2 | g >> 4) as u8, (r << 3 | r >> 2) as u8]
+            } else { [bytes[0], bytes[1], bytes[2]] };
+            let p = pre.map(|i| p[i]);
+            let p = if proc {
+                let [lo, mid, hi] = p.map(i32::from);
+                let convert = |[a, b, c, d]: [i32; 4]| ((a * hi + b * mid + c * lo + d) >> 8).clamp(0, 255) as u8;
+                [convert(coeff[2]), convert(coeff[1]), convert(coeff[0])]
+            } else { p };
+            let [lo, mid, hi] = post.map(|i| p[i]);
+            if dst_bytes == 2 {
+                let pixel = (u16::from(hi) >> 3) << 11 | (u16::from(mid) >> 2) << 5 | u16::from(lo) >> 3;
+                out.extend_from_slice(&pixel.to_le_bytes());
+            } else { out.extend_from_slice(&[lo, mid, hi]); }
+        }
+        Ok(out)
     }
+
     fn running_out(&self, peri: impl Fn(u32) -> bool) -> Option<usize> {
         // Arbitration between simultaneously armed channels is by priority, then channel number.
         // Token weights and timeouts do not affect a synchronous transfer.
@@ -250,18 +304,18 @@ impl Dma2d {
         // channel (peri_sel 4-7). TX and RX selection IDs are independent (dma2d_channel.h).
         while let Some(rx) = self.running_in(true, 0) {
             let Some(tx) = self.running_out(|p| p >= 4) else { break };
-            if self.csc_enabled(false, tx) || self.csc_enabled(true, rx) {
-                refused.push(Refusal { ppa: false, off: STRIDE * tx as u32 + 0x48 });
-                self.out[tx].running = false; self.inp[rx].running = false;
-                continue;
-            }
             match self.gather(tx, mem) {
                 Ok(g) => {
                     self.finish_out(tx, &g);
-                    if self.scatter(rx, &g.data, None, mem).is_err() { self.in_error(rx); }
-                    self.transfers.0 += 1;
+                    match self.convert(false, tx, g.data).and_then(|data| self.convert(true, rx, data)) {
+                        Ok(data) => {
+                            if self.scatter(rx, &data, None, mem).is_err() { self.in_error(rx); }
+                            self.transfers.0 += 1;
+                        }
+                        Err(r) => { refused.push(r); self.in_error(rx); }
+                    }
                 }
-                Err(_) => { self.out_error(tx); self.inp[rx].running = false; }
+                Err(_) => { self.out_error(tx); self.in_error(rx); }
             }
         }
         // PPA operations wait for their channels.
@@ -277,13 +331,17 @@ impl Dma2d {
                 let mut inputs = Vec::new();
                 let mut ok = true;
                 for &tx in &txs {
-                    if self.csc_enabled(false, tx) { refused.push(Refusal { ppa: false, off: STRIDE * tx as u32 + 0x48 }); ok = false; break; }
                     match self.gather(tx, mem) {
-                        Ok(g) => { self.finish_out(tx, &g); inputs.push(g.data); }
+                        Ok(g) => {
+                            self.finish_out(tx, &g);
+                            match self.convert(false, tx, g.data) {
+                                Ok(data) => inputs.push(data),
+                                Err(r) => { refused.push(r); ok = false; break; }
+                            }
+                        }
                         Err(_) => { self.out_error(tx); ok = false; break; }
                     }
                 }
-                if ok && self.csc_enabled(true, rx) { refused.push(Refusal { ppa: false, off: IN_BASE + STRIDE * rx as u32 + 0x4c }); ok = false; }
                 if ok {
                     let result = if op == PpaOp::Srm {
                         match shape {
@@ -293,13 +351,20 @@ impl Dma2d {
                         }
                     } else { ppa.run(op, &inputs, pixels).map(|data| (data, None)) };
                     match result {
-                        Ok((out, block)) => {
-                            if self.scatter(rx, &out, block, mem).is_err() { self.in_error(rx); }
-                            self.transfers.1 += 1;
-                        }
+                        Ok((out, block)) => match self.convert(true, rx, out) {
+                            Ok(out) => {
+                                if self.scatter(rx, &out, block, mem).is_err() { self.in_error(rx); }
+                                self.transfers.1 += 1;
+                            }
+                            Err(r) => { refused.push(r); self.in_error(rx); }
+                        },
                         Err(off) => { refused.push(Refusal { ppa: true, off }); self.in_error(rx); }
                     }
-                } else { self.inp[rx].running = false; ppa.cancel(op); }
+                } else {
+                    for tx in txs { self.out[tx].running = false; }
+                    self.in_error(rx);
+                    ppa.cancel(op);
+                }
             }
         }
         refused
@@ -491,7 +556,7 @@ mod tests {
         p.write(0x20, 2 | 1 << 4); // RGB565 -> RGB888
         p.write(0x64, 2 | 1 << 12 | 1 << 24 | 1 << 27);
         assert!(d.service(&mut p, &mut m).is_empty());
-        for (row, color) in [[255, 0, 0], [255, 0, 0], [0, 0, 255], [0, 0, 255]].into_iter().enumerate() {
+        for (row, color) in [[255, 0, 0], [255, 0, 0], [128, 0, 128], [0, 0, 255]].into_iter().enumerate() {
             let addr = 0x2000 + (row + 1) * 12 + 3;
             assert_eq!(&m.0[addr..addr + 3], &color);
             assert_eq!((m.0[addr - 1], m.0[addr + 3]), (0, 0));
@@ -503,13 +568,28 @@ mod tests {
     }
 
     #[test]
-    fn csc_on_a_channel_is_refused_not_copied() {
+    fn dma2d_csc_applies_rgb_packing_and_the_programmable_matrix() {
+        let mut d = Dma2d::new();
+        d.write(0x48, 2); // expand RGB565 and output packed RGB888
+        assert_eq!(d.convert(false, 0, vec![0x1f, 0xf8]).unwrap(), [255, 0, 255]);
+        d.write(0x48, 3 << 3); // RGB888 -> RGB565
+        assert_eq!(d.convert(false, 0, vec![0, 0, 255]).unwrap(), [0, 0xf8]);
+        d.write(0x48, 3 << 3 | 4 | 2);
+        // A simple programmed red-to-luma matrix with neutral chroma offsets.
+        d.write(0x50, 256);
+        d.write(0x5c, 128 << 18);
+        d.write(0x64, 128 << 18);
+        assert_eq!(d.convert(false, 0, vec![14, 10, 200]).unwrap(), [128, 128, 200]);
+    }
+
+    #[test]
+    fn unsupported_subsampling_is_refused() {
         let mut m = Ram(vec![0; 0x4000]);
         m.0[0x1000] = 9;
         desc(&mut m, 0x100, 4 << 14 | 1 << 30 | 1 << 31, 0, 0, 0x1000, 0);
         desc(&mut m, 0x200, 4 | 1 << 31, 0, 0, 0x2000, 0);
         let (mut d, mut p) = (Dma2d::new(), Ppa::new());
-        d.write(0x48, 0); // input_sel 0: RGB565 -> RGB888
+        d.write(0x48, 1 << 3); // input_sel 1: expand subsampled YUV422
         start(&mut d, false, 0, 0x100, 4, false); start(&mut d, true, 0, 0x200, 3, true);
         assert_eq!(d.service(&mut p, &mut m), vec![Refusal { ppa: false, off: 0x48 }]);
         assert_eq!(m.0[0x2000], 0);
