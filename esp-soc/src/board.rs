@@ -22,6 +22,14 @@ pub struct SpiPins {
     pub cs: u64,
 }
 
+/// I2S transducers wired to the same clock pins. PCM levels are digital.
+pub struct I2sCodecs {
+    pub port: usize,
+    pub bck: u8, pub ws: u8, pub mck: u8, pub dout: u8, pub din: u8,
+    pub speaker_gain: f32,
+    pub mic_lanes: [bool; 2],
+}
+
 /// What a board does with the SoC's pin-level activity.
 pub trait BoardModel {
     fn name(&self) -> &'static str;
@@ -66,6 +74,8 @@ pub trait BoardModel {
     fn gpio_events(&self) -> u64 { 0 }
     /// Devices on the I2C buses: (bus, 7-bit address, device).
     fn i2c_devices(&mut self) -> Vec<(u8, u8, Box<dyn I2cDevice>)> { Vec::new() }
+    /// Board-wired I2S codecs, with the current I2C-controlled signal gates.
+    fn i2s_codecs(&self) -> Option<I2sCodecs> { None }
     /// Give the board's camera a picture to look at (RGB888).
     fn set_camera_picture(&mut self, _p: crate::picture::Picture) -> Result<(), &'static str> { Err("no camera on this board") }
     /// Next camera frame in the sensor's register-selected wire format, with its size.

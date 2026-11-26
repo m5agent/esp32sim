@@ -2,11 +2,13 @@
 //! what the SoC model already decoded (GPIO levels, SPI bytes, RMT bit streams). A board owns
 //! them and adds what is module-specific — pin numbers, the visible window of a glass, where
 //! each LED of a chain sits physically.
+pub mod aw88298;
 pub mod bmi270;
 pub mod bmm150;
 pub mod bmp280;
 pub mod co5300;
 pub mod dcs_panel;
+pub mod es7210;
 pub mod ft5x06;
 pub mod imu_motion;
 pub mod ltr553;

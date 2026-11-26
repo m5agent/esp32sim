@@ -71,6 +71,9 @@ impl I2s {
     /// them (S31 HP_SYS_CLKRST I2Sn_RX_CTRL0 / I2Sn_RX_DIV_CTRL0, the TX words' layout).
     pub fn set_v2_rx_clock(&mut self, ctrl0: u32, div: u32) { self.v2_rx_clock = (ctrl0, div); }
     fn tx_mono(&self) -> bool { self.tx_conf & (1 << if self.v2 { 6 } else { 5 }) != 0 }
+    /// ESP-IDF v5.4.3 esp32s3 i2s_reg.h: RX_SLAVE_MOD and TX_SLAVE_MOD are bit 3.
+    pub fn rx_slave(&self) -> bool { self.rx_conf & 8 != 0 }
+    pub fn tx_slave(&self) -> bool { self.tx_conf & 8 != 0 }
     pub fn tx_running(&self) -> bool { self.tx_conf & (1 << 2) != 0 }
     /// TX or RX running.
     #[inline(always)]
@@ -97,13 +100,14 @@ impl I2s {
     pub fn write(&mut self, off: u32, v: u32) {
         match off {
             0x14 => self.int_ena = v, 0x18 => self.int_raw &= !v,
-            0x20 => { self.rx_conf = v; if v & 3 != 0 { self.reset_rx_phase(); } self.streaming = (self.rx_conf | self.tx_conf) & 4 != 0; }
+            0x20 => { self.rx_conf = v; if v & 3 != 0 { self.reset_rx_phase(); } self.streaming = (self.rx_conf | self.tx_conf) & 4 != 0; self.update_shared_rate(); }
             0x24 => { self.tx_conf = v; self.update_rate(); self.streaming = (self.rx_conf | self.tx_conf) & 4 != 0; }
             0x2c => { self.tx_conf1 = v; self.ram.write(off, v); self.update_rate(); }
             0x34 | 0x3c if self.v2 => self.ram.write(off, v),
             0x34 => { self.tx_clkm_conf = v; self.ram.write(off, v); self.update_rate(); }
             0x3c => { self.tx_clkm_div_conf = v; self.ram.write(off, v); self.update_rate(); }
             0x54 => { self.tx_tdm_ctrl = v; self.ram.write(off, v); self.update_rate(); }
+            0x28 | 0x30 | 0x38 => { self.ram.write(off, v); self.update_shared_rate(); }
             _ => self.ram.write(off, v),
         }
     }
@@ -117,6 +121,9 @@ impl I2s {
     /// Returns None while the clock is off or unprogrammed, so the default stays in force.
     pub fn derive_rate(&self) -> Option<u32> {
         if self.v2 { return self.v2_rate(self.v2_clock, self.tx_conf, self.tx_conf1); }
+        if self.tx_conf & (1 << 27 | 1 << 3) == (1 << 27 | 1 << 3) && !self.rx_slave() {
+            return self.rx_master_rate();
+        }
         Self::clock_rate(self.tx_clkm_conf, self.tx_clkm_div_conf, self.tx_conf1, 2 * (((self.tx_conf1 >> 18) & 0x3f) as u64 + 1))
     }
     /// v2 frame rate from the clock/reset block's words, the BCK divider in CONF 26:21 and
@@ -151,6 +158,9 @@ impl I2s {
         let fs = (src * a + denom / 2) / denom;
         if !(1_000..=400_000).contains(&fs) { return None; }
         Some(fs as u32)
+    }
+    fn update_shared_rate(&mut self) {
+        if !self.v2 && self.tx_conf & (1 << 27 | 1 << 3) == (1 << 27 | 1 << 3) { self.update_rate(); }
     }
     fn update_rate(&mut self) {
         if let Some(fs) = self.derive_rate() { self.sample_rate = fs; }

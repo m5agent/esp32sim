@@ -317,12 +317,29 @@ impl SocBus {
         Ok(())
     }
 
+    /// CoreS3 clock routes: IDF v5.4.3 esp32s3 gpio_sig_map.h. The master side of a
+    /// full-duplex I2S1 bus supplies both BCK and WS on the shared pins.
+    fn i2s1_clock_wired(&self, codecs: &esp_soc::board::I2sCodecs, rx_master: bool) -> bool {
+        let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
+        let (bck, ws) = if rx_master { (31, 32) } else { (28, 29) };
+        routes.matrix_output(codecs.bck as usize, bck) && routes.matrix_output(codecs.ws as usize, ws)
+    }
+
     fn dma_i2s_rx(&mut self, cycles: u64, port: u32) {
         let Some(ch) = self.periph.gdma.in_channel_for(3 + port) else { return };
-        let signals = esp_periph::i2s::RxSignals { data: if port == 0 { 25 } else { 30 }, clock: if port == 0 { [26, 27] } else { [31, 32] }, input_select_bit: 7, output_mask: 0x3ff };
+        let mut signals = esp_periph::i2s::RxSignals { data: if port == 0 { 25 } else { 30 }, clock: if port == 0 { [26, 27] } else { [31, 32] }, input_select_bit: 7, output_mask: 0x3ff };
+        let lanes = self.board.i2s_codecs().filter(|codecs| codecs.port == port as usize).map_or([true; 2], |codecs| {
+            let rx_master = !self.periph.i2s1.rx_slave();
+            if !rx_master { signals.clock = [28, 29]; }
+            let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
+            if self.i2s1_clock_wired(&codecs, rx_master)
+                && routes.matrix_input(30) == Some(codecs.din) && routes.matrix_output(codecs.mck as usize, 21) {
+                codecs.mic_lanes
+            } else { [false; 2] }
+        });
         let mut bank = self.periph.i2s0.take_pcm_bank();
         let i2s = if port == 0 { &mut self.periph.i2s0 } else { &mut self.periph.i2s1 };
-        let bytes = i2s.receive(cycles, self.cycles, port == 0, &self.periph.gpio, signals, bank.as_deref_mut());
+        let bytes = i2s.receive_with_lanes((cycles, self.cycles), port == 0, &self.periph.gpio, signals, bank.as_deref_mut(), lanes);
         let eof = i2s.read(0x64);
         self.periph.i2s0.restore_pcm_bank(bank);
         let _ = self.scatter_dma_in(ch, &bytes, Some(eof), false);
@@ -387,7 +404,18 @@ impl SocBus {
             self.periph.gdma.out[ch].buf_pos += take as u32;
             need -= take;
         }
-        if !samples.is_empty() { let i2s = if which == 0 { &mut self.periph.i2s0 } else { &mut self.periph.i2s1 }; i2s.frames_out += samples.len() as u64; i2s.pcm.extend_from_slice(&samples); }
+        if samples.is_empty() { return; }
+        if let Some(codecs) = self.board.i2s_codecs() {
+            if which != codecs.port { return; }
+            let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
+            let gain = if self.i2s1_clock_wired(&codecs, self.periph.i2s1.tx_slave())
+                && routes.matrix_output(codecs.dout as usize, 30) { codecs.speaker_gain } else { 0.0 };
+            if gain == 0.0 { samples.fill(0); }
+            else if gain != 1.0 { for sample in &mut samples { *sample = (f32::from(*sample) * gain).round() as i16; } }
+        }
+        let i2s = if which == 0 { &mut self.periph.i2s0 } else { &mut self.periph.i2s1 };
+        i2s.frames_out += samples.len() as u64;
+        i2s.pcm.extend_from_slice(&samples);
     }
 
     fn fail_dma_out(&mut self, ch: usize) {
