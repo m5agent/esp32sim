@@ -317,7 +317,7 @@ impl SocBus {
         Ok(())
     }
 
-    // ESP-IDF v5.4.3 gpio_sig_map.h: I2S0 BCK/WS TX 22/24 and RX 26/27;
+    // ESP-IDF v5.4.2 gpio_sig_map.h: I2S0 BCK/WS TX 22/24 and RX 26/27;
     // I2S1 TX 28/29 and RX 31/32. The master supplies both clocks in duplex mode.
     fn i2s_clock_signals(port: usize, rx_master: bool) -> [usize; 2] {
         match (port, rx_master) { (0, false) => [22, 24], (0, true) => [26, 27],
