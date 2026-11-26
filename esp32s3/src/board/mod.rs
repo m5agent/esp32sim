@@ -15,6 +15,7 @@ pub use esp_soc::board::{Board, BoardEdge, BoardModel, NoBoard, VirtualCycle};
 pub mod atech14;
 pub mod cardputer_adv;
 mod cardputer_adv_ir;
+mod cardputer_adv_cap;
 pub mod cores3;
 use esp_soc::devices::soft_i2c;
 pub mod stopwatch;

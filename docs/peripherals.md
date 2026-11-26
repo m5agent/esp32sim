@@ -31,7 +31,7 @@ ESP32-S3 peripheral MMIO reads and writes must be aligned 32-bit accesses. Byte 
 | WiFi MAC | 0x60033000 | partial | TX queues, RX descriptor ring, interrupt events, TSF, filters — enough for scan/auth/assoc/data with the unmodified blob (docs/wifi-plan.md) |
 | RNG | 0x6003B000 | full | random words |
 | regi2c / I2C_MST (PLL, RF analog) | 0x6000E000 | stub | reads back what was written; BBPLL and pkdet calibration-done bits set |
-| GP-SPI2 / GP-SPI3 master | 0x60024000 / 0x60025000 | partial | CPU-driven command/address/data phases; board MISO responses (host 2 or 3 to the board model); bounded GDMA TX descriptor completion (SPI2 on GDMA trigger 0, SPI3 on trigger 1; the experimental wire timing is SPI2's only); RX DMA is not modeled |
+| GP-SPI2 / GP-SPI3 master | 0x60024000 / 0x60025000 | partial | CPU-driven command/address/data phases; board MISO responses (host 2 or 3 to the board model); bounded GDMA TX/RX descriptor completion (SPI2 on GDMA trigger 0, SPI3 on trigger 1; experimental wire timing for SPI2 DMA TX) |
 | PCNT | 0x60017000 | partial | 4 units × 2 channels, pos/neg/ctrl modes via the GPIO matrix, limits/thresholds/zero events, counter reset/pause (`esp-periph/src/pcnt.rs`, also on the C6, the P4 and the classic ESP32's eight units); the glitch filter (FILTER_EN/FILTER_THRES, which IDF's `pcnt_unit_set_glitch_filter` sets: every edge counts), the P4's step counter (CHANGE_CONF) and reset-pad inputs — |
 | LEDC | 0x60019000 | partial | timers, fractional dividers, duty latching, hardware fades (DUTY_SCALE every DUTY_CYCLE periods, DUTY_NUM steps, DUTY_CHNG_END at the last; the C6 and P4 run up to 16 gamma ranges), interrupts and GPIO-matrix output on the S3, C3, C6, P4 and classic ESP32; HPOINT and the overflow counter — |
 | MCPWM0/1 | 0x6001E000/2C000 | partial | up-counting timers, compare latching, simple generator actions, interrupts and GPIO-matrix output (the same model on the C6, both P4 groups and both classic groups); sync, capture, fault, carrier and dead time — |
@@ -48,6 +48,36 @@ ops; FFT/GPIO/s32 corners decode but are not executed).
 [M5PM1 and M5IOE1](m5-i2c.md) implement the StopWatch firmware's register
 accesses, battery inputs, observable shutdown request and OLED/touch power-reset
 signals. They are reusable devices, not a registered StopWatch board.
+
+## Cardputer-ADV CAP accessories
+
+Use `--board m5stack-cardputer-adv --cap lora1262`, `--cap lora868` or
+`--cap cc1101` to attach a CAP to the EXT connector. The two LoRa names use
+the same SX1262 and GPS wiring. The CC1101 CAP shares SPI with its ST25R3916
+reader. All three share the clock and data wires with the microSD socket and
+use their own chip selects.
+
+For a packet link, launch two native sessions with swapped `--cap-peer IN:OUT`
+ports. The link uses nonblocking IPv4 loopback UDP. Each datagram contains a
+one-byte radio type followed by ten channel bytes and the raw packet payload.
+A host peer can replay the entire datagram from the configured source port.
+The receiver accepts a packet while listening on a matching configuration.
+
+| Type | Ten channel bytes in wire order |
+| --- | --- |
+| 1 (SX1262) | Four SetRfFrequency bytes, four LoRa SetModulationParams bytes, two sync word register bytes |
+| 2 (CC1101) | FREQ2/1/0, MDMCFG4 low nibble, MDMCFG3, MDMCFG2 masked with `0x77`, SYNC1/0, two zero bytes |
+
+A board script can send a complete NMEA sentence, including its checksum, at
+a virtual time using `6.5 cap-gps $GNGGA,...*hh`. The source adds CRLF and
+sends the bytes at 115200 baud to GPIO15 (guest UART RX). Space successive
+sentences far enough apart to let the previous sentence finish. On the
+CC1101 CAP, `7.0 cap-tag 04314253` injects a synthetic four-byte NFC-A UID.
+Seven-byte UIDs also work. Use `cap-tag none` to remove the tag.
+
+The radios model packet, FIFO and IRQ behavior. The link does not model RF
+propagation, collisions or airtime. NFC supports polling, UID selection and
+halt for a single injected tag. GPS uses host-supplied sentences.
 
 ## Host ADC inputs
 

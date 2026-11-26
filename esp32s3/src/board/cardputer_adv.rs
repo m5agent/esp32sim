@@ -9,6 +9,7 @@ use esp_soc::board::{BoardEdge, BoardModel, I2sCodecs, SpiPins, VirtualCycle};
 use esp_soc::pins::PinRoutes;
 use esp_soc::devices::{Bmi270, DcsPanel, SpiBitBang, BMI270_ADDRESS, es8311::Es8311, imu_motion::ImuMotion, tca8418::Tca8418};
 
+use super::cardputer_adv_cap::Cap;
 use super::cardputer_adv_ir::NecReceiver;
 use super::soft_i2c::{SoftI2c, SoftOp};
 use crate::periph::CPU_HZ;
@@ -80,6 +81,7 @@ pub struct CardputerAdv {
     codec: Es8311,
     soft_codec: Es8311,
     sd: Option<Box<SpiSdCard>>,
+    cap: Option<Box<Cap>>,
     sd_cs_low: bool,
     key_int_high: bool,
     soft: SoftI2c,
@@ -106,9 +108,14 @@ impl CardputerAdv {
                lcd_bl: false, lcd_version: 0, lcd_gpio_reads: 0, lcd_spi_bytes: 0, lcd_spi2_bytes: 0,
                keyboard: Default::default(), key_up: Vec::new(), key_int_high: true,
                imu: Rc::new(RefCell::new(Bmi270::new(motion.clone(), CPU_HZ))), motion,
-               codec, soft_codec, sd: None, sd_cs_low: false,
+               codec, soft_codec, sd: None, cap: None, sd_cs_low: false,
                soft: SoftI2c::idle(), soft_acks: 0, sda_drive: Some(true), scl_drive: Some(true),
                lcd_drive: None, released: 0, cycle: 0, edges: Vec::new(), ir: Default::default(), ir_pwm: false }
+    }
+
+    pub fn with_cap(mut self, name: &str, peer: Option<(u16, u16)>) -> Result<Self, String> {
+        self.cap = Some(Box::new(Cap::new(name, peer)?));
+        Ok(self)
     }
 
     fn lcd_byte(&mut self, byte: u8) {
@@ -227,7 +234,11 @@ impl CardputerAdv {
 impl BoardModel for CardputerAdv {
     fn name(&self) -> &'static str { "m5stack-cardputer-adv" }
     fn named_pin(&self, name: &str) -> Option<u8> { matches!(name, "btn" | "g0").then_some(BUTTON) }
-    fn input_levels(&self) -> Vec<(u8, bool)> { vec![(SDA, !self.soft.pull_low), (SCL, true), (KEY_INT, self.key_int_high)] }
+    fn input_levels(&self) -> Vec<(u8, bool)> {
+        let mut levels = vec![(SDA, !self.soft.pull_low), (SCL, true), (KEY_INT, self.key_int_high)];
+        if let Some(cap) = &self.cap { levels.extend(cap.levels(self.cycle)); }
+        levels
+    }
     fn observes_gpio_pads(&self) -> bool { true }
     fn gpio_waveform_at(&mut self, cycle: VirtualCycle, routes: PinRoutes<'_>) {
         self.cycle = cycle;
@@ -240,6 +251,7 @@ impl BoardModel for CardputerAdv {
         }
         self.gpio_lcd(enabled, output);
         self.gpio_i2c(enabled, output);
+        if let Some(cap) = &mut self.cap { cap.gpio(cycle, &routes); }
         if let Some(sd) = &mut self.sd {
             let selected = routes.software_pad_output(TF_CS) == Some(false);
             if self.sd_cs_low && !selected { sd.deselect(); }
@@ -258,10 +270,17 @@ impl BoardModel for CardputerAdv {
         }
         self.ir_pwm = ir.is_some();
     }
+    fn uses_uart_pins(&self) -> bool { self.cap.as_ref().is_some_and(|cap| cap.uses_uart()) }
+    fn uart_rx(&mut self, cycle: VirtualCycle) -> Vec<esp_soc::uart::UartInput> {
+        self.cap.as_mut().map_or_else(Vec::new, |cap| cap.uart_rx(cycle))
+    }
     fn uses_spi_pins(&self) -> bool { true }
     fn has_spi_sd_slot(&self) -> bool { true }
     fn insert_spi_sd(&mut self, card: SdCard) { self.sd = Some(Box::new(SpiSdCard::new(card))); }
     fn spi_transfer_pins(&mut self, host: u8, pins: SpiPins, tx: &[u8], rx_len: usize) -> Vec<u8> {
+        if let Some(cap) = &mut self.cap {
+            if let Some(rx) = cap.spi(self.cycle, pins, tx, rx_len) { return rx; }
+        }
         if let Some(sd) = &mut self.sd {
             let now_ns = (u128::from(self.cycle) * 1_000_000_000 / u128::from(CPU_HZ)).min(u128::from(u64::MAX)) as u64;
             if let Some(rx) = pins.transfer_sd(TF, sd, tx, rx_len, now_ns) { return rx; }
@@ -299,11 +318,15 @@ impl BoardModel for CardputerAdv {
     fn default_analog_inputs(&self) -> &'static [(u8, f32)] { &[(10, 1.85)] }
     fn set_imu_motion(&mut self, mode: u32) -> bool { self.motion.mode.store(mode, Ordering::Relaxed); true }
     fn imu_motion(&self) -> u32 { self.motion.mode.load(Ordering::Relaxed) }
-    fn next_deadline(&self) -> Option<VirtualCycle> { self.key_up.iter().map(|&(_, _, due)| due).min() }
+    fn next_deadline(&self) -> Option<VirtualCycle> {
+        self.key_up.iter().map(|&(_, _, due)| due)
+            .chain(self.cap.as_ref().and_then(|cap| cap.deadline(self.cycle))).min()
+    }
     fn advance_to(&mut self, cycle: VirtualCycle) {
         self.cycle = cycle;
         self.motion.cycle.store(cycle, Ordering::Relaxed);
-        if self.next_deadline().is_some_and(|due| due <= cycle) {
+        if let Some(cap) = &mut self.cap { cap.advance(cycle); }
+        if self.key_up.iter().any(|&(_, _, due)| due <= cycle) {
             let mut keyboard = self.keyboard.borrow_mut();
             self.key_up.retain(|&(row, col, due)| {
                 if due <= cycle { keyboard.key(row, col, false); }
@@ -312,6 +335,7 @@ impl BoardModel for CardputerAdv {
         }
     }
     fn take_edges(&mut self) -> Vec<BoardEdge> {
+        if let Some(cap) = &mut self.cap { cap.edges(self.cycle, &mut self.edges); }
         let high = !self.keyboard.borrow().int_low();
         if high != self.key_int_high {
             self.key_int_high = high;
@@ -323,7 +347,9 @@ impl BoardModel for CardputerAdv {
         let pins = std::mem::take(&mut self.released);
         [SDA, SCL, LCD_DATA].into_iter().filter(|&pin| pins & (1 << pin) != 0).collect()
     }
-    fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "key" | "imu") }
+    fn accepts_command(&self, verb: &str) -> bool {
+        matches!(verb, "key" | "imu") || (self.cap.is_some() && matches!(verb, "cap-gps" | "cap-tag"))
+    }
     fn board_command(&mut self, cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
         if verb == "imu" {
             if args.len() != 6 { return false; }
@@ -337,7 +363,7 @@ impl BoardModel for CardputerAdv {
             self.imu.borrow_mut().set_sample([ax, ay, az], [gx, gy, gz], None);
             return true;
         }
-        if verb != "key" { return false; }
+        if verb != "key" { return self.cap.as_mut().is_some_and(|cap| cap.command(cycle, verb, args)); }
         let (name, ms) = match args {
             [name] => (name, 100u32),
             [name, ms] => { let Ok(ms) = ms.parse::<u32>() else { return false; }; (name, ms.max(1)) }
@@ -366,6 +392,7 @@ impl BoardModel for CardputerAdv {
             for &(address, command) in &self.ir.recent { report += &format!(" address=0x{address:04x}/command=0x{command:02x}"); }
         }
         if let Some(sd) = &self.sd { report += &format!("\n{}", sd.report()); }
+        if let Some(cap) = &self.cap { report.push('\n'); report.push_str(&cap.report()); }
         report
     }
 }
