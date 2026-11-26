@@ -108,6 +108,7 @@ impl<R: Revision> Soc for Esp32p4<R> {
     const ROM_ELF: &'static str = R::ROM_ELF;
     const CPU_HZ: u64 = periph::CPU_HZ;
     const CORES: usize = 2;
+    const CORE0_CAN_HOLD: bool = true;
     const IDLE_CHUNK: u64 = 64;
     const ROM_BOOT_DEFAULT: bool = true;
     /// 12-byte (dst_start, dst_end, rom_src) entries, as on the C6.
@@ -148,13 +149,17 @@ impl<R: Revision> Soc for Esp32p4<R> {
     fn check_image(image: &[u8]) -> Result<(), String> { check_image::<R>(image) }
     /// Core 1 runs once HP_SYS_CLKRST gives it its clock and releases its reset.
     fn core_state(bus: &SocBus, core: usize) -> CoreState {
-        if core == 0 || bus.periph.hp_clkrst.core1_released() { CoreState::Running } else { CoreState::Reset }
+        if core == 1 && !bus.periph.hp_clkrst.core1_released() { CoreState::Reset }
+        else if bus.periph.hp_sys.stalled & (1 << core) != 0 { CoreState::Held }
+        else { CoreState::Running }
     }
 }
 
 impl esp_soc::SocBus for SocBus {
     fn cycles(&self) -> u64 { self.cycles }
     fn next_deadline(&self) -> Option<u64> {
+        if self.board_power == Some(false) { return self.board.next_deadline().map(|due| due.saturating_sub(self.cycles)); }
+        if let Some(left) = self.periph.lp.sleep_cycles_left() { return Some(left); }
         let c = self.periph.cycles_until_timer();
         // Only while UART input is queued or an INT_ENA latency is pending (one flag test otherwise).
         let uart = if self.uart_busy { self.uart_deadline() } else { None };
@@ -199,23 +204,26 @@ impl esp_soc::SocBus for SocBus {
     /// registers behind regi2c kept.
     fn reboot(&mut self, mac: [u8; 6]) -> u32 {
         let cause = self.periph.lp.reset_cause;
+        let cold = std::mem::take(&mut self.cold_reboot);
+        if cold || cause == periph::RST_DEEP_SLEEP { self.l2mem.fill(0); self.tcm.fill(0); self.psram.fill(0); }
+        if cold { self.lp_ram.fill(0); }
         let mut old = std::mem::replace(&mut self.periph, periph::Peripherals::new(mac, self.wafer));
         let p = &mut self.periph;
         // The analog blocks behind regi2c (the PLLs' dividers among them) keep their registers
         // through a digital reset: IDF's esp_restart leaves the CPLL on (esp_system/port/soc/esp32p4/
         // system_internal.c), and a bootloader that finds HP_ROOT on the CPLL reads its dividers.
-        p.ana_mst.ana = std::mem::take(&mut old.ana_mst.ana);
+        if !cold { p.ana_mst.ana = std::mem::take(&mut old.ana_mst.ana); }
         p.cycle_base = self.cycles;
         p.efuse = old.efuse;
         p.misc.log_unknown = old.misc.log_unknown;
         p.usb.connected = old.usb.connected;
-        p.lp = old.lp;
+        if !cold { p.lp = old.lp; }
         p.lp.sw_reset = false;
         p.lp.reset_cause = cause;
         // ASSIST_DEBUG's PDEBUGPC: the requesting core at its reset store, the other where it was;
         // core 1 still held in reset records nothing (silicon prints no `Core1 Saved PC` then)
         let request = self.reset_request.take();
-        for core in 0..2 {
+        for core in 0..if cold || cause == periph::RST_DEEP_SLEEP { 0 } else { 2 } {
             p.assist_debug.saved_pc[core] = match request {
                 Some((c, pc)) if c == core => pc,
                 _ if core == 1 && !old.hp_clkrst.core1_released() => 0,
@@ -224,7 +232,7 @@ impl esp_soc::SocBus for SocBus {
         }
         p.spi0.0.jedec = old.spi0.0.jedec;
         p.spi1.jedec = old.spi1.jedec;
-        p.psram1.psram_mr = old.psram1.psram_mr;      // the PSRAM keeps its mode registers
+        if !cold { p.psram1.psram_mr = old.psram1.psram_mr; }      // the PSRAM keeps its mode registers
         p.gpio.g.strap = old.gpio.g.strap;
         p.gpio.g.restore_external(&old.gpio.g);         // the board still drives its inputs
         p.i2s0.pcm = std::mem::take(&mut old.i2s0.pcm); p.i2s0.frames_out = old.i2s0.frames_out;
@@ -251,6 +259,8 @@ impl esp_soc::SocBus for SocBus {
         cause
     }
     fn note_core_pcs(&mut self, pcs: &[u32]) { for (s, &pc) in self.core_pcs.iter_mut().zip(pcs) { *s = pc; } }
+    fn has_board_power(&self) -> bool { self.board_power.is_some() }
+    fn soc_power_off(&self) -> bool { self.board_power == Some(false) || self.periph.lp.sleeping }
     fn sw_reset(&self) -> bool { self.periph.lp.sw_reset }
     fn request_reset(&mut self, cause: u32) { self.periph.lp.sw_reset = true; self.periph.lp.reset_cause = cause; }
     fn reset_cause(&self) -> u32 { self.periph.lp.reset_cause }
@@ -294,7 +304,7 @@ impl esp_soc::SocBus for SocBus {
     fn board_command(&mut self, verb: &str, args: &[&str]) -> bool {
         let ok = match (verb, args) {
             ("usb-hid", ["keyboard" | "gamepad"]) => self.periph.usb_otg.attach_hid(self.cycles, args[0] == "gamepad"),
-            ("usb-msc", []) => self.periph.usb_otg.attach_msc(self.cycles),
+            ("usb-msc", [] | ["fs"]) => self.periph.usb_otg.attach_msc(self.cycles, !args.is_empty()),
             ("usb-report", bytes) => bytes.iter().map(|byte| u8::from_str_radix(byte, 16)).collect::<Result<Vec<_>, _>>()
                 .is_ok_and(|report| self.periph.usb_otg.hid_report(&report)),
             ("usb-key", [usage]) => u8::from_str_radix(usage, 16)
@@ -375,6 +385,18 @@ mod tests {
         h[15..17].copy_from_slice(&min.to_le_bytes());
         h[17..19].copy_from_slice(&max.to_le_bytes());
         h
+    }
+
+    #[test]
+    fn pmu_software_stalls_select_each_hart_independently() {
+        let mut bus = SocBus::new(0x1000, [0; 6], (1, 0));
+        let state = |bus: &SocBus| Esp32p4::<RevLt3>::core_state(bus, 0);
+        bus.periph.write32(0x5011_5200, 0x8686_0000);
+        assert_eq!(bus.periph.read32(0x500e_5064), 3);
+        assert!(matches!(state(&bus), CoreState::Held));
+        bus.periph.write32(0x5011_5200, 0xff86_0000);
+        assert_eq!(bus.periph.read32(0x500e_5064), 2);
+        assert!(matches!(state(&bus), CoreState::Running));
     }
 
     /// A chip reset rebuilds the peripherals; the board's touch controller and codec stay on I2C1,

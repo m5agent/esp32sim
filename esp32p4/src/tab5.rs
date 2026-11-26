@@ -90,6 +90,11 @@ pub struct Tab5 {
     rails: Rc<RefCell<Reg8Device>>,
     charger: Rc<RefCell<Reg8Device>>,
     rtc: Rc<RefCell<Rx8130>>,
+    powered: bool,
+    power_off_line: bool,
+    rtc_irq: bool,
+    off_at: Option<u64>,
+    on_at: Option<u64>,
     battery: Rc<RefCell<Ina226>>,
     imu: Rc<RefCell<Bmi270>>,
     motion: Arc<ImuMotion>,
@@ -123,7 +128,7 @@ impl Tab5 {
         }
         Self { panel, screen: Vec::new(), sleeping: true, on: false, page: 0,
                scans: 0, version: 0, reads: 0, contacts, bus, soft: SoftI2c::idle(),
-               edges: Vec::new(), released: Vec::new(), touch_irq: true, goodix_pending, backlight: None, mic, dac, rails, charger, rtc, battery, imu, motion, sd_spi: None }
+               edges: Vec::new(), released: Vec::new(), touch_irq: true, goodix_pending, backlight: None, mic, dac, rails, charger, rtc, powered: true, power_off_line: false, rtc_irq: false, off_at: None, on_at: None, battery, imu, motion, sd_spi: None }
     }
 
     fn contact(&mut self, cycle: VirtualCycle, id: usize, x: u16, y: u16, down: bool) -> bool {
@@ -213,9 +218,34 @@ impl BoardModel for Tab5 {
         self.bus.iter().map(|(addr, device)| (0, *addr, Box::new(device.clone()) as Box<dyn I2cDevice>)).collect()
     }
     fn input_levels(&self) -> Vec<(u8, bool)> { vec![(INT, self.touch_irq)] }
+    fn soc_powered(&self) -> Option<bool> { Some(self.powered) }
+    fn next_deadline(&self) -> Option<VirtualCycle> {
+        if self.powered { None } else { self.rtc.borrow().next_irq_check() }
+    }
     fn advance_to(&mut self, cycle: VirtualCycle) {
         self.motion.cycle.store(cycle, std::sync::atomic::Ordering::Relaxed);
-        self.rtc.borrow_mut().advance(cycle);
+        let mut rtc = self.rtc.borrow_mut();
+        rtc.advance(cycle);
+        let rtc_irq = rtc.irq();
+        drop(rtc);
+        // Tab5 schematic: IOE 0x44 P4 (PWROFF_PLUSE) and U30 nIRQ feed the
+        // standby power supervisor U28 through its nINT_STAT_TRIG network.
+        // Model the observed power latch at the line transitions.
+        let ioe = self.charger.borrow();
+        let power_off = ioe.regs[3] & ioe.regs[5] & !ioe.regs[7] & 0x10 != 0;
+        drop(ioe);
+        if self.powered && power_off && !self.power_off_line {
+            self.powered = false;
+            self.off_at = Some(cycle);
+            self.sleeping = true;
+            self.on = false;
+            self.page = 0;
+        } else if !self.powered && rtc_irq && !self.rtc_irq {
+            self.powered = true;
+            self.on_at = Some(cycle);
+        }
+        self.power_off_line = power_off;
+        self.rtc_irq = rtc_irq;
         if self.panel == Panel::Ili9881c && !self.touch_irq && !self.goodix_pending.get() {
             self.touch_irq = true;
             self.edges.push(BoardEdge { cycle, pin: INT, level: true });
@@ -297,8 +327,9 @@ impl BoardModel for Tab5 {
     fn display_frames(&self) -> u64 { self.scans }
     fn display_version(&self) -> u64 { self.version }
     fn report(&self) -> String {
-        let display = format!("[emu] {}: DSI scans={} reads={} on={} sleep={} software I2C transactions={} backlight PWM={:?}",
+        let mut display = format!("[emu] {}: DSI scans={} reads={} on={} sleep={} software I2C transactions={} backlight PWM={:?}",
                 self.name(), self.scans, self.reads, self.on, self.sleeping, self.soft.transactions, self.backlight);
+        if let Some(off) = self.off_at { display += &format!("\n[emu] Tab5 power: off_cycle={off} rtc_on_cycle={:?} powered={}", self.on_at, self.powered); }
         if let Some(sd) = &self.sd_spi { format!("{display}\n{}", sd.report()) } else { display }
     }
 }

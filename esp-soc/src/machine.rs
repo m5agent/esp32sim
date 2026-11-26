@@ -655,7 +655,7 @@ impl<S: Soc> Machine<S> {
                 if self.bus.sw_reset() { self.drain_console(); return Stop::SwReset; }
                 continue;
             }
-            for (i, state) in on.iter_mut().enumerate().take(S::CORES).skip(1) {
+            for (i, state) in on.iter_mut().enumerate().take(S::CORES).skip(usize::from(!S::CORE0_CAN_HOLD)) {
                 *state = match S::core_state(&self.bus, i) {
                     CoreState::Reset => { self.core_held[i] = true; false }
                     CoreState::Held => false,
@@ -952,7 +952,7 @@ impl<S: Soc> Machine<S> {
                 // batch-s1: the accesses may have moved a device deadline or a core's run state. Re-bound
                 // from this round's start (core 0 already counted it in `n`); the loop top would re-plan.
                 open = false;
-                if (1..S::CORES).any(|i| on[i] != (S::core_state(&self.bus, i) == CoreState::Running)) { break; }
+                if (usize::from(!S::CORE0_CAN_HOLD)..S::CORES).any(|i| on[i] != (S::core_state(&self.bus, i) == CoreState::Running)) { break; }
                 k = self.bb_quanta(k * q, *n - q);
                 self.bus.set_defer(true);
             }

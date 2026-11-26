@@ -81,6 +81,7 @@ pub trait Soc: 'static {
     /// Optional function-entry substitutions, resolved from a guest ELF by the chip.
     fn function_hooks(_bus: &Self::Bus) -> &[u32] { &[] }
     fn function_hook(_core: &mut Self::Core, _bus: &mut Self::Bus) -> bool { false }
+    const CORE0_CAN_HOLD: bool = false;
     fn core_state(_bus: &Self::Bus, _core: usize) -> CoreState { CoreState::Running }
     /// Core `core` took interrupt `irq` (the number its `Trap::Interrupt` carries): the place for
     /// what the interrupt controller does on acceptance, such as clearing an edge-triggered

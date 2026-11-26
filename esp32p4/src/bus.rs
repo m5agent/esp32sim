@@ -196,6 +196,8 @@ pub struct SocBus {
     /// wafer version the efuses report, kept across a reset
     pub wafer: (u32, u32),
     pub board: esp_soc::Board,
+    pub(crate) board_power: Option<bool>,
+    pub(crate) cold_reboot: bool,
     pub cycles: u64,
     pub last_fault: Option<(u32, bool)>,
     /// a peripheral write may have moved an interrupt line: re-derive before the next instruction
@@ -225,7 +227,7 @@ impl SocBus {
             flash: vec![0xff; flash_size], psram: Vec::new(),
             mmu_flash: Box::new([0; MMU_ENTRIES]), mmu_psram: Box::new([0; MMU_ENTRIES]), mmu_flash_index: 0, mmu_psram_index: 0,
             code_ver: vec![CODE_EPOCH.fetch_add(1 << 20, std::sync::atomic::Ordering::Relaxed); CODE_PAGES],
-            periph: Peripherals::new(mac, wafer), wafer, board: Box::new(esp_soc::NoBoard),
+            periph: Peripherals::new(mac, wafer), wafer, board: Box::new(esp_soc::NoBoard), board_power: None, cold_reboot: false,
             cycles: 0, last_fault: None, irq_dirty: true, ena_latency: Default::default(), uart_busy: false, gpio_events: None, debug: Default::default(), cur_core: 0, reservation: [None; 2], reset_request: None, core_pcs: [0; 2],
         }
     }
@@ -385,6 +387,7 @@ impl SocBus {
         let old_ena = ena_port.map_or(0, |i| self.periph.uart[i].int_ena);
         let resetting = self.periph.lp.sw_reset;
         self.periph.write32(a, v);
+        if a == crate::periph::PMU_SLEEP_REQ && self.board_power.is_some() { self.periph.request_deep_sleep(v); }
         match a >> 12 {
             crate::dsi::HOST_BLOCK => {
                 self.periph.dsi.deliver(&mut *self.board);
@@ -450,6 +453,12 @@ impl SocBus {
 
     /// The board's I2C devices on I2C1 (bus 0 of `BoardModel::i2c_devices`).
     pub fn attach_board_devices(&mut self) {
+        self.board_power = self.board.soc_powered();
+        // Original Tab5 models the 4.00a HS identity measured on P4 in TinyUSB
+        // 0.21.0~2 dwc2_info.py and required by ESP-IDF 858a988d usb_dwc_hal.c.
+        if matches!(self.board.name(), "m5stack-tab5" | "m5stack-tab5-st7123") && self.wafer.0 < 3 {
+            self.periph.usb_otg.cfg.gsnpsid = 0x4f54_400a;
+        }
         for (bus, address, device) in self.board.i2c_devices() {
             if bus == 0 { self.periph.i2c1.attach(address, device); }
         }
@@ -705,7 +714,23 @@ impl SocBus {
         // board time first, its input edges after the peripherals (as the S3 bus does)
         let edges = self.board.uses_gpio_edges();
         if edges { self.board.advance_to(self.cycles); }
+        if let Some(previous) = self.board_power {
+            let powered = self.board.soc_powered().unwrap_or(true);
+            self.board_power = Some(powered);
+            if !powered { return; }
+            if !previous {
+                self.cold_reboot = true;
+                self.periph.lp.reset_cause = esp_periph::RST_POWERON;
+                self.periph.lp.sw_reset = true;
+                self.irq_dirty = true;
+                return;
+            }
+        }
         self.periph.tick(cycles as u64);
+        if self.periph.lp.sleeping {
+            self.periph.lp.wake_from_timer();
+            return;
+        }
         if self.uart_busy { self.pace_uart_input(cycles); }
         if !self.periph.gpio.g.input_changes.is_empty() { self.pcnt_edges(); }
         if edges { self.irq_dirty |= esp_soc::gpio::drain_board_inputs(&mut *self.board, &mut self.periph.gpio.g, &mut self.gpio_events, self.cycles); }

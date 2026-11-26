@@ -279,10 +279,17 @@ The P4 launcher defaults to 16 MiB flash and 32 MiB PSRAM for either profile.
 | Touch | GPIO 23 and I2C1. `touch X Y 1` presses and `touch X Y 0` releases in native panel coordinates. The ST7123 also accepts `contact ID X Y 0\|1` for each slot 0–4. GT911 currently exposes one contact. |
 | PI4IOE5V6408 pair | GPIO 31/32 software I²C and I2C1 share the expanders’ register state. |
 | Backlight | GPIO 22 LEDC PWM is sampled in the board report. Frame capture represents the panel's digital pixels. |
+| RTC and board power | RX8130 nIRQ powers the board back on after the 0x44 expander’s P4 output pulses the standby supervisor. When the P4 itself enters timer deep sleep, LP_TIMER restores the digital domain independently of the external RTC. |
+| USB host | Original Tab5 presents the 4.00a HS DWC2 identity. Script `usb-msc fs` attaches a full-speed drive with 64-byte bulk endpoints. `usb-msc` selects the high-speed drive. |
 | ESP32-C6 | `--coproc` connects SDIO slot 1 to CLK 12, CMD 13, D0–D3 11/10/9/8 and defaults EN to GPIO 15. Supply the matching ESP-Hosted firmware. |
 
-See [the bring-up inventory](tab5-bringup.md) for the remaining board and SoC
-paths, including DMA2D blits, USB host, and peripherals beyond display/touch.
+Arduino 3.2.5 (IDF `858a988d`) pins ESP-Hosted 2.0.13 and esp-wifi-remote 0.13.0 in its
+P4 dependencies lock. Build the matching C6 SDIO slave with Bluetooth disabled for these WLAN examples.
+Use `--wifi` to attach an AP for station and scan tests, or `--wifi-sta` to attach a station for SoftAP.
+For reproducible RTC SNTP use `--net none,epoch=<seconds>`; the guest's DNS and NTP requests stay in
+the virtual network and the time comes from that epoch plus elapsed virtual time.
+
+See [the bring-up inventory](tab5-bringup.md) for board and SoC implementation details.
 
 ## `xiao-esp32c6` — Seeed Studio XIAO ESP32-C6 (ESP32-C6)
 

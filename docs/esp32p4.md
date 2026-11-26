@@ -502,8 +502,9 @@ a bus reset sets USBRST and clears USBActEP but on endpoint 0, its end ENUMDNE a
 chirp allowed; SOFs count from enumeration; early suspend (ESUSP) and suspend (USBSUSP, SUSPSTS),
 then resume (WKUINT). `--debug usb_otg` prints every transaction and bus event.
 
-**Identity.** GSNPSID is 4.30a: `usb_dwc_struct.h` describes "the High Speed v4.30a instance"
-and `hal/usb_dwc_hal.c` accepts 4.00a and 4.30a. GHWCFG1-4 are the values TinyUSB 0.21.0~2
+**Identity.** The default HS GSNPSID is 4.30a: `usb_dwc_struct.h` describes "the High Speed v4.30a instance"
+and `hal/usb_dwc_hal.c` accepts 4.00a and 4.30a. Tab5 rev < 3 presents 4.00a,
+matching the IDF `858a988d` USB HAL and the TinyUSB P4 measurement. GHWCFG1-4 are the values TinyUSB 0.21.0~2
 recorded from silicon (`dwc2_info.py`, `ESP32-P4`): internal DMA, a UTMI+/ULPI HS PHY, 15 device
 endpoints besides endpoint 0, 16 host channels, dynamic FIFOs, per-endpoint interrupts, FIFO
 queue depths of 4, 8 IN endpoints, one control endpoint, dedicated TX FIFOs, descriptor DMA, all
@@ -701,7 +702,7 @@ class (`mscd_reset`). A 5 ms timeout cuts a live transfer, which is what opens t
 **Open points**, each a guess where the sources disagree or say nothing:
 
 - GSNPSID: TinyUSB's `dwc2_info.py` lists 0x4F54400A (4.00a) for the P4, against IDF's 4.30a.
-  TinyUSB's own reset takes either path, and 4.30a's is the one modelled.
+  The Tab5 and default P4 profiles exercise the respective software reset paths.
 - GHWCFG2 and GHWCFG3 differ from `usb_dwc_cfg.h` in single point (0 against
   OTG20_SINGLE_POINT 1), the FS PHY type (3 against 2), the counter widths (16 and 7 bits against 17
   and 8), synchronous reset and battery charger support; the registers keep TinyUSB's values, the

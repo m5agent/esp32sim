@@ -285,10 +285,10 @@ impl Dwc2 {
         if self.log { eprintln!("[usb-hcd] attach {} mode={} port={:#x}", if gamepad { "gamepad" } else { "keyboard" }, self.host_mode(), self.host.as_ref().map_or(0, |host| host.read(0x440, 0))); }
         true
     }
-    pub fn attach_msc(&mut self, now: u64) -> bool {
+    pub fn attach_msc(&mut self, now: u64, full_speed: bool) -> bool {
         if !self.cfg.high_speed || self.link.is_some() { return false; }
         self.now = now;
-        self.host.get_or_insert_with(Default::default).attach_msc();
+        self.host.get_or_insert_with(Default::default).attach_msc(full_speed);
         true
     }
     pub fn hid_report(&mut self, data: &[u8]) -> bool {

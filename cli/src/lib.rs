@@ -319,7 +319,7 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
         if let Err(e) = esp_soc::wifi::sta::StaConfig::parse(spec) { usage_error(&format!("--wifi-sta: {e}")); }
         if !o.wifi.is_empty() { usage_error("--wifi-sta and --wifi together (a virtual access point and a virtual station at once) are not modelled yet"); }
         if o.net_given { usage_error("--net configures the network behind --wifi's access point; with --wifi-sta the network is the guest's own"); }
-        if matches!(o.chip.as_str(), "p4" | "esp32p4") { usage_error("--wifi-sta: the P4 has no WiFi of its own, and its co-processor's station is not modelled"); }
+        if matches!(o.chip.as_str(), "p4" | "esp32p4") && o.coproc.is_none() { usage_error("--wifi-sta: the P4 needs a WiFi co-processor (--coproc)"); }
     }
     if !o.hostfwd.is_empty() && !matches!(o.net.split(',').next(), Some("nat" | "user")) { usage_error("--hostfwd requires --net nat"); }
     for spec in &o.hostfwd {
@@ -507,8 +507,9 @@ fn setup_coproc(o: &Opts, spec: &cosim::CoprocSpec) -> esp32c6::Machine {
     if !o.wifi.is_empty() {
         let net_log = m.bus.debug.has("net");
         attach_wifi(&mut m.bus, o, net_log);
-        attach_net_tap(&mut m, o);
     }
+    attach_wifi_station(&mut m.bus, o);
+    attach_net_tap(&mut m, o);
     let rom = spec.rom.as_ref().map(PathBuf::from).or_else(|| find_rom(<esp32c6::C6 as Soc>::ROM_ELF))
         .unwrap_or_else(|| usage_error("--coproc: no esp32c6_rev0_rom.elf found (rom=FILE)"));
     let image = std::fs::read(&rom).unwrap_or_else(|e| usage_error(&format!("--coproc rom {}: {e}", rom.display())));
