@@ -18,7 +18,9 @@ pub enum ScriptAction { Gpio(u8, bool), Serial(String), Uart(usize, String), Sto
     /// `waituart0 <timeout_s> <text>`: hold the rest of the script until UART0 prints `text` (or the
     /// timeout passes), then shift every later action by the time actually waited. Fields: text,
     /// timeout in cycles, the cycle the script placed it at.
-    WaitUart0(String, u64, u64) }
+    WaitUart0(String, u64, u64),
+    /// A board-specific verb and its arguments (`BoardModel::board_command`).
+    Board(String, Vec<String>) }
 
 /// The stop conditions that are not observers.
 pub struct Debug { pub stop_on_unimplemented: bool, pub stop_after_exceptions: u64 }
@@ -1107,6 +1109,11 @@ impl<S: Soc> Machine<S> {
                 ScriptAction::Stop => { self.max_cycles = 0; stopped = true; }
                 ScriptAction::TouchPad(pin, touched) => self.bus.set_touch_input(pin, touched),
                 ScriptAction::Touch(x, y, d) => { self.bus.touch_input(x, y, d); }
+                ScriptAction::Board(verb, args) => {
+                    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                    if !self.bus.board_command(&verb, &args) { eprintln!("[script] board refused {verb} {args:?}"); }
+                    *self.bus.irq_dirty() = true;
+                }
                 ScriptAction::Poke(a, v) => { let _ = self.bus.write32_unpriced(a, v); }
                 ScriptAction::Analog(pin, mut src) => {
                     // a waveform plays from when it is applied: a `waituart0` before it moves `t`, so the start moves too
@@ -1240,6 +1247,7 @@ impl<S: Soc> Machine<S> {
                 "waituart0" => { let mut p = rest.splitn(2, char::is_whitespace); let to: f64 = p.next().and_then(|x| x.parse().ok()).ok_or_else(|| format!("line {}: waituart0 <timeout_s> <text>", ln + 1))?;
                                  let text = p.next().unwrap_or("").trim().to_string(); if text.is_empty() { return Err(format!("line {}: waituart0 needs text", ln + 1)); }
                                  ev.push((c, ScriptAction::WaitUart0(text, (to * hz) as u64, c))); }
+                v if board.accepts_command(v) => ev.push((c, ScriptAction::Board(v.to_string(), rest.split_whitespace().map(str::to_string).collect()))),
                 _ => return Err(format!("line {}: unknown command {}", ln + 1, cmd)),
             }
         }

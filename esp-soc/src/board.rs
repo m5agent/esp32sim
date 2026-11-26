@@ -155,6 +155,12 @@ pub trait BoardModel {
     /// Whether `camera_frame_with_clock` currently returns one whole JPEG file (its length
     /// is the file's) rather than `w`x`h` raw pixels. Queried only by capture adapters.
     fn camera_frame_is_jpeg(&self) -> bool { false }
+    /// A board-specific host input from an action script line `<t> <verb> <args...>` the generic
+    /// parser does not know (a PMIC key, injected sensor values). Called at the scripted time with
+    /// the board's current bus cycle; false = not this board's verb. `accepts_command` is asked at
+    /// parse time so an unknown verb stays a script error.
+    fn board_command(&mut self, _cycle: VirtualCycle, _verb: &str, _args: &[&str]) -> bool { false }
+    fn accepts_command(&self, _verb: &str) -> bool { false }
 }
 
 pub type Board = Box<dyn BoardModel>;

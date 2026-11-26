@@ -216,6 +216,8 @@ pub trait SocBus: Bus {
     fn has_touch_pad(&self, _pin: u8) -> bool { false }
     /// Deliver host touch at the bus's current time horizon.
     fn touch_input(&mut self, x: u16, y: u16, down: bool) { self.board().touch(x, y, down); }
+    /// A board-specific script verb. Chips that track bus time pass the current cycle; this default passes 0.
+    fn board_command(&mut self, verb: &str, args: &[&str]) -> bool { self.board().board_command(0, verb, args) }
     fn gpio_input(&self) -> u64;
     /// GPIO latch, enable and IO_MUX pulls. None for an unavailable pin or unsupported chip.
     /// Pulls describe the programmed bits; they do not change the input level.

@@ -14,7 +14,9 @@
 //!   AUX bus), 0x51 BM8563, 0x23 LTR553, 0x36 AW88298, 0x40 ES7210, 0x21 GC0308 (SCCB).
 //! - Touch INT -> AW9523 P1_2 -> AW9523 INTN -> GPIO 21 (active low). M5GFX only reads the touch
 //!   controller while GPIO 21 is low and clears INTN by reading AW9523 input registers 0x00/0x01.
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
 
 use esp_periph::i2c::{I2cDevice, Reg8Device};
 use esp_soc::board::{BoardEdge, BoardModel, VirtualCycle};
@@ -137,11 +139,11 @@ impl Cores3Hw {
 }
 
 /// One address on the shared internal bus, attached to a controller with the CoreS3's pins.
-struct Port { hw: Arc<Mutex<Cores3Hw>>, address: u8 }
+struct Port { hw: Rc<RefCell<Cores3Hw>>, address: u8 }
 
 impl Port {
     fn with<R>(&self, f: impl FnOnce(&mut dyn I2cDevice) -> R) -> R {
-        let mut hw = self.hw.lock().expect("CoreS3 hardware mutex poisoned");
+        let mut hw = self.hw.borrow_mut();
         let r = f(hw.device(self.address).expect("CoreS3 port names an attached device"));
         hw.sync();
         r
@@ -168,7 +170,7 @@ struct SoftI2c { scl: bool, sda: bool, mode: SoftMode, shift: u8, bits: u8, addr
 enum SoftMode { #[default] Idle, Addr, AckSlot { read: bool }, Recv, Send, MasterAck }
 
 pub struct Cores3 {
-    pub hw: Arc<Mutex<Cores3Hw>>,
+    pub hw: Rc<RefCell<Cores3Hw>>,
     soft: SoftI2c,
     sda_release: bool,
     pub imu: Arc<ImuMotion>,
@@ -201,12 +203,12 @@ impl Cores3 {
             panel: DcsPanel::new(CORES3_LCD_W, CORES3_LCD_H), aw9523: Aw9523::new(), touch: Ft5x06::new(points.clone()),
             points, others, lcd_in_reset: true, panel_version: 0,
         };
-        Cores3 { hw: Arc::new(Mutex::new(hw)), soft: SoftI2c { scl: true, sda: true, ..Default::default() }, sda_release: false, imu, lcd_cs_low: false, sd_cs_low: false, cycle: 0, int_level: true,
+        Cores3 { hw: Rc::new(RefCell::new(hw)), soft: SoftI2c { scl: true, sda: true, ..Default::default() }, sda_release: false, imu, lcd_cs_low: false, sd_cs_low: false, cycle: 0, int_level: true,
                  edges: Vec::new(), gpio_events: 0, spi_bytes: 0 }
     }
 
     fn addresses(&self) -> Vec<u8> {
-        let hw = self.hw.lock().expect("CoreS3 hardware mutex poisoned");
+        let hw = self.hw.borrow_mut();
         let mut v = vec![Aw9523::ADDRESS, FT5X06_ADDRESS];
         v.extend(hw.others.iter().map(|(a, _)| *a));
         v
@@ -218,7 +220,7 @@ impl Cores3 {
         self.soft.scl = scl; self.soft.sda = sda;
         let before = self.soft.pull_low;
         if scl && old_scl && sda != old_sda {
-            let mut hw = self.hw.lock().expect("CoreS3 hardware mutex poisoned");
+            let mut hw = self.hw.borrow_mut();
             if self.soft.mode != SoftMode::Idle { if let Some(d) = hw.device(self.soft.addr) { d.stop(); } }
             hw.sync();
             self.soft.pull_low = false; self.soft.bits = 0; self.soft.shift = 0;
@@ -230,7 +232,7 @@ impl Cores3 {
                 _ => {}
             }
         } else if !scl && old_scl {
-            let mut hw = self.hw.lock().expect("CoreS3 hardware mutex poisoned");
+            let mut hw = self.hw.borrow_mut();
             match self.soft.mode {
                 SoftMode::Addr if self.soft.bits == 8 => {
                     let (addr, read) = (self.soft.shift >> 1, self.soft.shift & 1 != 0);
@@ -270,7 +272,7 @@ impl Cores3 {
     }
 
     fn update_int(&mut self) {
-        let low = self.hw.lock().expect("CoreS3 hardware mutex poisoned").aw9523.intn_low();
+        let low = self.hw.borrow_mut().aw9523.intn_low();
         if self.int_level == low {
             self.int_level = !low;
             self.edges.push(BoardEdge { cycle: self.cycle, pin: PIN_CORES3_I2C_INT, level: self.int_level });
@@ -296,7 +298,7 @@ impl Cores3 {
 impl BoardModel for Cores3 {
     fn name(&self) -> &'static str { "m5stack-cores3" }
     fn gpio_changes(&mut self, changes: &[(u8, bool)]) {
-        let mut hw = self.hw.lock().expect("CoreS3 hardware mutex poisoned");
+        let mut hw = self.hw.borrow_mut();
         for &(pin, level) in changes {
             self.gpio_events += 1;
             match pin {
@@ -321,7 +323,7 @@ impl BoardModel for Cores3 {
     fn gpio_events(&self) -> u64 { self.gpio_events }
     fn spi_transfer(&mut self, host: u8, tx: &[u8], rx_len: usize) -> Vec<u8> {
         if host == 2 && self.lcd_cs_low {
-            let mut hw = self.hw.lock().expect("CoreS3 hardware mutex poisoned");
+            let mut hw = self.hw.borrow_mut();
             hw.sync();
             if !hw.lcd_in_reset {
                 let before = hw.panel.pixels_written;
@@ -340,13 +342,13 @@ impl BoardModel for Cores3 {
         v
     }
     fn display(&self) -> Option<(u32, u32, Vec<u16>, u64)> {
-        let hw = self.hw.lock().expect("CoreS3 hardware mutex poisoned");
+        let hw = self.hw.borrow_mut();
         Some((CORES3_LCD_W as u32, CORES3_LCD_H as u32, Self::visible(&hw), hw.panel_version))
     }
-    fn display_version(&self) -> u64 { self.hw.lock().expect("CoreS3 hardware mutex poisoned").panel_version }
-    fn display_frames(&self) -> u64 { self.hw.lock().expect("CoreS3 hardware mutex poisoned").panel.frames }
+    fn display_version(&self) -> u64 { self.hw.borrow_mut().panel_version }
+    fn display_frames(&self) -> u64 { self.hw.borrow_mut().panel.frames }
     fn gram(&self) -> Option<(Vec<u16>, usize, usize)> {
-        let hw = self.hw.lock().expect("CoreS3 hardware mutex poisoned");
+        let hw = self.hw.borrow_mut();
         Some((hw.panel.gram.clone(), hw.panel.cols, hw.panel.rows))
     }
     fn set_imu_motion(&mut self, mode: u32) -> bool { self.imu.mode.store(mode, std::sync::atomic::Ordering::Relaxed); true }
@@ -354,7 +356,7 @@ impl BoardModel for Cores3 {
     fn input_levels(&self) -> Vec<(u8, bool)> { vec![(PIN_CORES3_I2C_INT, self.int_level)] }
     fn touch(&mut self, x: u16, y: u16, down: bool) {
         {
-            let mut hw = self.hw.lock().expect("CoreS3 hardware mutex poisoned");
+            let mut hw = self.hw.borrow_mut();
             hw.points.lock().expect("CoreS3 touch mutex poisoned")[0] =
                 down.then_some((x.min(CORES3_LCD_W as u16 - 1), y.min(CORES3_LCD_H as u16 - 1)));
             hw.sync();
@@ -368,7 +370,7 @@ impl BoardModel for Cores3 {
     fn take_edges(&mut self) -> Vec<BoardEdge> { std::mem::take(&mut self.edges) }
     fn named_pin(&self, _name: &str) -> Option<u8> { None }
     fn report(&self) -> String {
-        let hw = self.hw.lock().expect("CoreS3 hardware mutex poisoned");
+        let hw = self.hw.borrow_mut();
         let p = &hw.panel;
         format!("[emu] cores3: soft-i2c {} transactions; {} RAMWR, {} pixels, madctl={:#x} colmod={:#x} inverted={} on={} sleeping={} lcd_reset={} bbox={:?}; spi {} bytes; aw9523 out={:#06x} dir={:#06x}; gpio events {}",
                 self.soft.transactions, p.frames, p.pixels_written, p.madctl, p.colmod, p.inverted, p.on, p.sleeping, hw.lcd_in_reset, p.bbox(), self.spi_bytes,

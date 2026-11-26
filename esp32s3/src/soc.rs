@@ -121,6 +121,12 @@ impl esp_soc::SocBus for SocBus {
         self.board.touch_at(self.cycles, x, y, down);
         if self.board.next_deadline().is_some() { self.refresh_tick_budget(); }
     }
+    fn board_command(&mut self, verb: &str, args: &[&str]) -> bool {
+        self.flush_ticks();
+        let ok = self.board.board_command(self.cycles, verb, args);
+        self.refresh_tick_budget();
+        ok
+    }
     fn misc(&mut self) -> &mut Misc { &mut self.periph.misc }
     fn load_bytes(&mut self, addr: u32, data: &[u8]) -> Result<(), String> { SocBus::load_bytes(self, addr, data) }
     fn write_flash(&mut self, offset: usize, data: &[u8]) -> Result<(), String> {
