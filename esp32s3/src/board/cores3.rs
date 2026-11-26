@@ -14,6 +14,7 @@
 //!   AUX bus), 0x51 BM8563, 0x23 LTR553, 0x36 AW88298, 0x40 ES7210, 0x21 GC0308 (SCCB).
 //! - Touch INT -> AW9523 P1_2 -> AW9523 INTN -> GPIO 21 (active low). M5GFX only reads the touch
 //!   controller while GPIO 21 is low and clears INTN by reading AW9523 input registers 0x00/0x01.
+use super::soft_i2c::{SoftI2c, SoftOp};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -215,17 +216,6 @@ impl I2cDevice for Port {
     fn stop(&mut self) { self.with(|d| d.stop()) }
 }
 
-/// A bit-level slave on the internal bus pins for software (GPIO) I2C masters: M5GFX's board
-/// detection bit-bangs SDA 12 / SCL 11 (lgfx `soft_i2c.inl`) before any controller is set up.
-/// The lines are open drain with external pull-ups: a master level is low only while the pin is an
-/// enabled output with a low latch. The slave pulls SDA low by driving the pad input low and
-/// releases it again, so the line the master reads is the wired AND of both. Start and stop are
-/// SDA edges while SCL is high; data is sampled on SCL rising edges and changed after falling ones.
-#[derive(Default)]
-struct SoftI2c { scl: bool, sda: bool, mode: SoftMode, shift: u8, bits: u8, addr: u8, out: u8, master_ack: bool, pull_low: bool, pub transactions: u64 }
-#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
-enum SoftMode { #[default] Idle, Addr, AckSlot { read: bool }, Recv, Send, MasterAck }
-
 pub struct Cores3 {
     pub hw: Rc<RefCell<Cores3Hw>>,
     soft: SoftI2c,
@@ -256,7 +246,7 @@ impl Cores3 {
             points, others, camera: Gc0308::default(), amp: Aw88298::new(), mic: Es7210::new(), pmic: Axp2101::new(crate::periph::CPU_HZ), rtc: Bm8563::new(crate::periph::CPU_HZ), backlight: false,
             lcd_in_reset: true, lcd_id_offset: None, panel_version: 0, sd: None,
         };
-        Cores3 { hw: Rc::new(RefCell::new(hw)), soft: SoftI2c { scl: true, sda: true, ..Default::default() }, sda_release: false, imu, lcd_cs_low: false, sd_cs_low: false, cycle: 0, int_level: true, powered: true,
+        Cores3 { hw: Rc::new(RefCell::new(hw)), soft: SoftI2c::idle(), sda_release: false, imu, lcd_cs_low: false, sd_cs_low: false, cycle: 0, int_level: true, powered: true,
                  edges: Vec::new(), gpio_events: 0, spi_bytes: 0 }
     }
 
@@ -269,61 +259,22 @@ impl Cores3 {
 
     /// Master levels on the internal bus changed: run the slave and update its SDA drive.
     fn soft_i2c(&mut self, scl: bool, sda: bool) {
-        let (old_scl, old_sda) = (self.soft.scl, self.soft.sda);
-        self.soft.scl = scl; self.soft.sda = sda;
         let before = self.soft.pull_low;
-        if scl && old_scl && sda != old_sda {
+        self.soft.levels(scl, sda, |op| {
             let mut hw = self.hw.borrow_mut();
-            if self.soft.mode != SoftMode::Idle { if let Some(d) = hw.device(self.soft.addr) { d.stop(); } }
-            hw.sync();
-            self.soft.pull_low = false; self.soft.bits = 0; self.soft.shift = 0;
-            self.soft.mode = if sda { SoftMode::Idle } else { self.soft.transactions += 1; SoftMode::Addr };
-        } else if scl && !old_scl {
-            match self.soft.mode {
-                SoftMode::Addr | SoftMode::Recv => { self.soft.shift = self.soft.shift << 1 | sda as u8; self.soft.bits += 1; }
-                SoftMode::MasterAck => self.soft.master_ack = !sda,
-                _ => {}
+            match op {
+                SoftOp::Start(addr, read) => hw.device(addr).is_some_and(|d| d.start(read)) as u8,
+                SoftOp::Write(addr, byte) => hw.write_i2c(addr, byte) as u8,
+                SoftOp::Read(addr) => hw.device(addr).map_or(0xff, |d| d.read()),
+                SoftOp::Stop(addr) => { if let Some(d) = hw.device(addr) { d.stop(); } 0 }
+                SoftOp::Sync => { hw.sync(); 0 }
             }
-        } else if !scl && old_scl {
-            let mut hw = self.hw.borrow_mut();
-            match self.soft.mode {
-                SoftMode::Addr if self.soft.bits == 8 => {
-                    let (addr, read) = (self.soft.shift >> 1, self.soft.shift & 1 != 0);
-                    let ack = hw.device(addr).map(|d| d.start(read)).unwrap_or(false);
-                    self.soft.addr = addr; self.soft.pull_low = ack;
-                    self.soft.mode = if ack { SoftMode::AckSlot { read } } else { SoftMode::Idle };
-                }
-                SoftMode::Recv if self.soft.bits == 8 => {
-                    let b = self.soft.shift;
-                    let ack = hw.write_i2c(self.soft.addr, b);
-                    self.soft.pull_low = ack;
-                    self.soft.mode = if ack { SoftMode::AckSlot { read: false } } else { SoftMode::Idle };
-                }
-                SoftMode::AckSlot { read } => {
-                    self.soft.bits = 0; self.soft.shift = 0; self.soft.pull_low = false;
-                    if read { Self::load_byte(&mut self.soft, &mut hw); } else { self.soft.mode = SoftMode::Recv; }
-                }
-                SoftMode::Send => {
-                    if self.soft.bits < 8 { self.soft.pull_low = self.soft.out & (0x80 >> self.soft.bits) == 0; self.soft.bits += 1; }
-                    else { self.soft.pull_low = false; self.soft.mode = SoftMode::MasterAck; }
-                }
-                SoftMode::MasterAck => {
-                    if self.soft.master_ack { Self::load_byte(&mut self.soft, &mut hw); } else { self.soft.pull_low = false; self.soft.mode = SoftMode::Idle; }
-                }
-                _ => {}
-            }
-            hw.sync();
-        }
+        });
         if self.soft.pull_low != before {
             if self.soft.pull_low { self.edges.push(BoardEdge { cycle: self.cycle, pin: PIN_CORES3_I2C_SDA, level: false }); self.sda_release = false; }
             else { self.sda_release = true; }
         }
     }
-    fn load_byte(soft: &mut SoftI2c, hw: &mut Cores3Hw) {
-        soft.out = hw.device(soft.addr).map(|d| d.read()).unwrap_or(0xff);
-        soft.pull_low = soft.out & 0x80 == 0; soft.bits = 1; soft.mode = SoftMode::Send;
-    }
-
     fn update_int(&mut self) {
         let low = self.hw.borrow_mut().aw9523.intn_low();
         if self.int_level == low {
@@ -494,7 +445,9 @@ impl BoardModel for Cores3 {
             hw.aw9523.reset();
             hw.panel.reset();
             hw.panel.gram.fill(0);
-            self.soft = SoftI2c { scl: true, sda: true, transactions: self.soft.transactions, ..Default::default() };
+            let transactions = self.soft.transactions;
+            self.soft = SoftI2c::idle();
+            self.soft.transactions = transactions;
             self.sda_release = true;
             hw.panel_version += 1;
             hw.sync();

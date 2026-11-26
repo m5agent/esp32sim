@@ -16,6 +16,7 @@ pub mod ft5x06;
 pub mod imu_motion;
 pub mod ltr553;
 pub mod spi_bitbang;
+pub mod tca8418;
 pub mod ws2812;
 
 pub use axp2101::{Axp2101, AXP2101_ADDRESS};

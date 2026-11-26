@@ -22,13 +22,13 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!();
     eprintln!("  --rom F               the chip's mask ROM ELF; default: $ESP32SIM_ROM_DIR, then ~/.espressif/tools/esp-rom-elfs/*/");
     eprintln!("                        (Espressif's, not in the tarball: tools/fetch-rom-elfs.sh DIR downloads all of them)");
-    eprintln!("  --board NAME          board model (S3: atech14, waveshare-lcd4b, waveshare-amoled18-v2, waveshare-cam, stopwatch, m5stack-cores3, none;");
+    eprintln!("  --board NAME          board model (S3: atech14, waveshare-lcd4b, waveshare-amoled18-v2, waveshare-cam, stopwatch, m5stack-cores3, m5stack-cardputer-adv, none;");
     eprintln!("                        C6: waveshare-c6-lcd147, xiao-esp32c6, none; P4: waveshare-p4-lcd35, none; S31: mosaico, none;");
     eprintln!("                        classic: ttgo-tdisplay, cyd, ulanzi-tc001, ai-thinker-cam, esp32dev, none)");
-    eprintln!("  --flash-mb N, --psram-mb N   memory sizes (S3 default 8 / 2, C3, C6 and classic 4 / 0, P4 16 / 0, S31 2, mosaico 16 / 16)");
+    eprintln!("  --flash-mb N, --psram-mb N   memory sizes (S3 default 8 / 2, Cardputer-ADV 8 / 0, C3, C6 and classic 4 / 0, P4 16 / 0, S31 2, mosaico 16 / 16)");
     eprintln!("  --max-seconds S       stop after S emulated seconds (always give one: the run returns)");
     eprintln!("  --console usb|uart0|both|none   which consoles to print (uart0 shows the ROM and bootloader)");
-    eprintln!("  --imu-motion N        scripted IMU motion: 0 at rest, 1 the 30 s tilt/flip/shake script (amoled18-v2, mosaico)");
+    eprintln!("  --imu-motion N        scripted IMU motion: 0 at rest, 1 the 30 s tilt/flip/shake script (amoled18-v2, m5stack-cardputer-adv, mosaico)");
     eprintln!("  --wifi ssid=…,psk=…   a virtual access point with DHCP, DNS, NTP and NAT to the host network");
     eprintln!("  --wifi-sta ssid=…,psk=…   a virtual station that joins the guest's own access point (not the P4)");
     eprintln!("  --pcap F              write the station's Ethernet frames (both ways) to pcap F (needs --wifi or --wifi-sta)");
@@ -521,7 +521,7 @@ fn setup_s3(o: &Opts) -> esp32s3::Machine {
         if invalid { usage_error(message); }
     }
     let mut m = esp32s3::machine(o.mac.unwrap_or([0x44, 0x1b, 0xf6, 0x75, 0xdc, 0xe0]));
-    m.bus.board = esp32s3::board::make_board(&o.board).unwrap_or_else(|| { eprintln!("unknown board '{}' (atech14, waveshare-cam, waveshare-lcd4b, waveshare-amoled18-v2, stopwatch, m5stack-cores3, none)", o.board); std::process::exit(2) });
+    m.bus.board = esp32s3::board::make_board(&o.board).unwrap_or_else(|| { eprintln!("unknown board '{}' (atech14, waveshare-cam, waveshare-lcd4b, waveshare-amoled18-v2, stopwatch, m5stack-cores3, m5stack-cardputer-adv, none)", o.board); std::process::exit(2) });
     if o.measured_te {
         assert_eq!(m.bus.board.name(), "waveshare-amoled18-v2", "--measured-te requires the AMOLED V2 board");
         m.bus.board = Box::new(esp32s3::board::WaveshareAmoled18V2::with_measured_te());
@@ -540,7 +540,7 @@ fn setup_s3(o: &Opts) -> esp32s3::Machine {
     m.bus.periph.lcd_cam.frame_cycles = (esp32s3::periph::CPU_HZ as f64 / o.cam_fps) as u64;
     let stopwatch = matches!(m.bus.board.name(), "stopwatch" | "m5stack-cores3");
     let flash_mb = o.flash_mb.unwrap_or(if stopwatch { 16 } else { 8 });
-    let psram_mb = o.psram_mb.unwrap_or(if stopwatch { 8 } else { 2 });
+    let psram_mb = o.psram_mb.unwrap_or(match m.bus.board.name() { "m5stack-cardputer-adv" => 0, _ if stopwatch => 8, _ => 2 });
     if flash_mb != 8 { m.bus.set_flash_size(flash_mb << 20); }
     if psram_mb != 2 { m.bus.set_psram_size(psram_mb << 20).unwrap(); }
     if o.flash_octal { m.bus.set_flash_octal(true); }

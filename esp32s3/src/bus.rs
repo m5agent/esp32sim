@@ -104,6 +104,7 @@ pub struct SocBus {
     cache_resource: CacheResource,
     pub(crate) fetch_cache: xtensa_lx7::state::SharedFetchCache,
     board_edges: bool,
+    board_ledc: bool,
     board_power: Option<bool>,
     pub(crate) power_on_reset: bool,
     /// a USB host is on the OTG port (`attach_usb_host`): only then can the core's work fall due
@@ -190,7 +191,7 @@ impl SocBus {
             ble: Default::default(),
             sram: vec![0; SRAM_SIZE], irom: vec![0; (IROM_MASK_HIGH - IROM_MASK_LOW) as usize], drom: vec![0; (DROM_MASK_HIGH - DROM_MASK_LOW) as usize],
             rtc_fast: vec![0; 8192], rtc_slow: vec![0; 8192], flash: vec![0xff; flash_size], psram: vec![0; psram_size],
-            mmu: [MMU_INVALID; MMU_ENTRIES], periph: Peripherals::new(mac), board: Box::new(crate::board::Atech14::new()), uart_pins: false, cycles: 0, last_fault: None, spi2_dma_fault: None, irq_dirty: false, ena_latency: Default::default(), gpio_events: None, debug: Default::default(), board_edges: true, board_power: None, power_on_reset: false,
+            mmu: [MMU_INVALID; MMU_ENTRIES], periph: Peripherals::new(mac), board: Box::new(crate::board::Atech14::new()), uart_pins: false, cycles: 0, last_fault: None, spi2_dma_fault: None, irq_dirty: false, ena_latency: Default::default(), gpio_events: None, debug: Default::default(), board_edges: true, board_ledc: false, board_power: None, power_on_reset: false,
             spi2_timing: false, spi2_scheduled: None, spi2_pins: None, spi3_dma_fault: None, spi3_pins: None,
             tlb: vec![TlbEntry::EMPTY; TLB_SIZE], page_ver: Vec::new(), ver_base: [0; 7], flash_epoch: BUS_EPOCHS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) << 32, code_blk: Vec::new(), tick_pending: 0, tick_budget: 0, defer_mmio: false, mmio_deferred: false, vq_violations: 0,
             approximate_cache: None, approximate_cache_pending: 0, approximate_cache_fast_internal: false, approximate_cache_inline: false,
@@ -335,12 +336,13 @@ impl SocBus {
 
     /// Attach fresh peripheral-side devices and restore the levels driven by the persistent board.
     pub fn attach_board_devices(&mut self) {
-        if self.board.uses_gpio_waveform() {
+        if self.board.observes_gpio_pads() {
             self.board.gpio_waveform_at(self.cycles, esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux));
         }
         self.periph.rtc.analog.set_defaults(self.board.default_analog_inputs());
         self.uart_pins = self.board.uses_uart_pins();
         self.board_edges = self.board.uses_gpio_edges();
+        self.board_ledc = self.board.observes_ledc();
         self.board_power = self.board.soc_powered();
         for (bus, address, device) in self.board.i2c_devices() {
             self.periph.i2c[bus as usize].attach(address, device);
@@ -597,7 +599,7 @@ impl SocBus {
         self.periph.write32(a, v);
         // Only an SDMMC register write starts a command, only a USB-OTG one can make the cable's work due.
         if matches!(a >> 12, 0x60028 | 0x60080) && (self.periph.sdmmc.pending() || self.periph.usb_otg.pending()) { self.run_dma_hosts(); }
-        if matches!(a & !0xfff, 0x6000_4000 | 0x6000_9000) && self.board.uses_gpio_waveform() {
+        if matches!(a & !0xfff, 0x6000_4000 | 0x6000_9000) && self.board.observes_gpio_pads() {
             self.board.gpio_waveform_at(self.cycles, esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux));
         }
         if old_gpio_out != self.periph.gpio.out || old_gpio_enable != self.periph.gpio.enable {
@@ -1024,6 +1026,10 @@ impl SocBus {
         // Reads may flush before the periodic backstop. Refresh for either edge
         // of a clocked source, without breaking every block that polls MMIO.
         self.irq_dirty |= self.periph.tick(cycles as u64);
+        if self.board_ledc {
+            let p = &self.periph;
+            self.board.ledc_output_at(self.cycles, &|pin| p.ledc.output(&p.gpio, pin));
+        }
         if board_i2c {
             self.sync_board_power();
             if self.board_power_off() { return 1; }

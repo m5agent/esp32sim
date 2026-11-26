@@ -200,6 +200,11 @@ pub trait BoardModel {
     fn accepts_command(&self, _verb: &str) -> bool { false }
     /// SoC supply from an external PMIC. None for boards without a switched supply.
     fn soc_powered(&self) -> Option<bool> { None }
+    /// Observe software pad routing without requesting instruction-sized GPIO timing.
+    fn observes_gpio_pads(&self) -> bool { self.uses_gpio_waveform() }
+    /// Observe routed LEDC PWM frequency and duty after the peripheral advances.
+    fn observes_ledc(&self) -> bool { false }
+    fn ledc_output_at(&mut self, _cycle: VirtualCycle, _pwm: &dyn Fn(u8) -> Option<(f64, u32)>) {}
 }
 
 pub type Board = Box<dyn BoardModel>;
