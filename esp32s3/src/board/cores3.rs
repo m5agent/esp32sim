@@ -7,7 +7,7 @@
 //! - LCD: SCLK 36, MOSI 37, CS 3 (software GPIO), D/C 35. GPIO 35 doubles as MISO: M5GFX's
 //!   `Panel_M5StackCoreS3_T::cs_control` routes it to the GPIO output (D/C) while CS is low and
 //!   releases it to FSPIQ while CS is high. LCD reset is AW9523 P1_1; backlight is AXP2101 DLDO1.
-//! - microSD shares SCLK/MOSI/MISO with CS 4.
+//! - microSD shares SCLK/MOSI/MISO with CS 4, powered by AXP2101 ALDO4. TF_SW -> AW9523 P0_4.
 //! - Internal I2C: SDA 12, SCL 11 (M5GFX probes it on I2C_NUM_1; M5Unified's `In_I2C` may take
 //!   either controller, so the devices answer on both when routed to these pins).
 //!   0x34 AXP2101, 0x58 AW9523B, 0x38 FT6336U (FT5x06 register set), 0x69 BMI270 (+BMM150 on its
@@ -19,7 +19,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use esp_periph::i2c::{I2cDevice, Reg8Device};
-use esp_soc::board::{BoardEdge, BoardModel, VirtualCycle};
+use esp_periph::sdmmc::{SdCard, SpiSdCard};
+use esp_soc::board::{BoardEdge, BoardModel, SpiPins, VirtualCycle};
 use esp_soc::devices::{Bmi270, Bmm150, DcsPanel, Ft5x06, Ft5x06Points, Ltr553, BMI270_ADDRESS, FT5X06_ADDRESS, LTR553_ADDRESS};
 use esp_soc::devices::imu_motion::ImuMotion;
 
@@ -29,6 +30,9 @@ pub const PIN_CORES3_LCD_CS: u8 = 3;
 pub const PIN_CORES3_LCD_DC: u8 = 35;
 pub const PIN_CORES3_SD_CS: u8 = 4;
 pub const PIN_CORES3_I2C_INT: u8 = 21;
+const PIN_SPI_SCLK: u8 = 36;
+const PIN_SPI_MOSI: u8 = 37;
+const AXP2101_ADDRESS: u8 = 0x34;
 
 pub const CORES3_LCD_W: usize = 320;
 pub const CORES3_LCD_H: usize = 240;
@@ -56,6 +60,7 @@ impl Default for Aw9523 { fn default() -> Self { Self::new() } }
 
 impl Aw9523 {
     pub const ADDRESS: u8 = 0x58;
+    const P0_TF_SW: u16 = 1 << 4;
     pub const P1_LCD_RST: u16 = 1 << 9;
     pub const P1_TOUCH_INT: u16 = 1 << 10;
 
@@ -123,6 +128,8 @@ pub struct Cores3Hw {
     bmi270: Bmi270,
     ltr553: Ltr553,
     pub others: Vec<(u8, Box<dyn I2cDevice>)>,
+    axp2101: Reg8Device,
+    sd: Option<Box<SpiSdCard>>,
     lcd_in_reset: bool,
     lcd_id_offset: Option<usize>,
     pub panel_version: u64,
@@ -139,8 +146,26 @@ impl Cores3Hw {
         let ext = self.aw9523.external;
         self.aw9523.external = if touched { ext & !Aw9523::P1_TOUCH_INT } else { ext | Aw9523::P1_TOUCH_INT };
     }
+    // Sch_M5_CoreS3_v1.0 sheets 1 and 5 connect ALDO4 to VDD_3V3_SD.
+    // M5Unified 0.3.0 Power_Class.inl enables ALDO4 (0x90 bit 3) and sets it to 3.3 V
+    // (0x95 = 28) for the TF socket. The voltage register uses 100 mV steps from 500 mV.
+    fn sd_powered(&self) -> bool { self.axp2101.regs[0x90] & 0x08 != 0 && (22..=30).contains(&(self.axp2101.regs[0x95] & 0x1f)) }
+
+    fn write_i2c(&mut self, address: u8, data: u8) -> bool {
+        if address == AXP2101_ADDRESS && self.sd.is_some() {
+            let powered = self.sd_powered();
+            let ack = self.axp2101.write(data);
+            if powered && !self.sd_powered() {
+                if let Some(sd) = &mut self.sd { sd.power_off(); }
+            }
+            return ack;
+        }
+        self.device(address).is_some_and(|device| device.write(data))
+    }
+
     fn device(&mut self, address: u8) -> Option<&mut dyn I2cDevice> {
         match address {
+            AXP2101_ADDRESS => Some(&mut self.axp2101),
             Aw9523::ADDRESS => Some(&mut self.aw9523),
             FT5X06_ADDRESS => Some(&mut self.touch),
             BMI270_ADDRESS => Some(&mut self.bmi270),
@@ -165,7 +190,12 @@ impl Port {
 impl I2cDevice for Port {
     fn pins(&self) -> Option<(u8, u8)> { Some((PIN_CORES3_I2C_SDA, PIN_CORES3_I2C_SCL)) }
     fn start(&mut self, read: bool) -> bool { self.with(|d| d.start(read)) }
-    fn write(&mut self, b: u8) -> bool { self.with(|d| d.write(b)) }
+    fn write(&mut self, b: u8) -> bool {
+        let mut hw = self.hw.borrow_mut();
+        let ack = hw.write_i2c(self.address, b);
+        hw.sync();
+        ack
+    }
     fn read(&mut self) -> u8 { self.with(|d| d.read()) }
     fn stop(&mut self) { self.with(|d| d.stop()) }
 }
@@ -202,8 +232,6 @@ impl Cores3 {
         let imu: Arc<ImuMotion> = Default::default();
         let points: Ft5x06Points = Default::default();
         let others: Vec<(u8, Box<dyn I2cDevice>)> = vec![
-            // AXP2101 chip ID 0x4A at 0x03, as M5GFX's CoreS3 detector requires.
-            (0x34, Box::new(Reg8Device::new("axp2101", &[(0x03, 0x4a), (0x00, 0x28)]))),
             (0x51, Box::new(Reg8Device::new("bm8563", &[]))),
             (0x36, Box::new(Reg8Device::new("aw88298", &[]))),
             (0x40, Box::new(Reg8Device::new("es7210", &[(0x3d, 0x72), (0x3e, 0x06)]))),
@@ -213,7 +241,9 @@ impl Cores3 {
             panel: DcsPanel::new(CORES3_LCD_W, CORES3_LCD_H), aw9523: Aw9523::new(), touch: Ft5x06::new(points.clone()),
             bmi270: Bmi270::new(imu.clone(), crate::periph::CPU_HZ).with_aux_bmm150(Bmm150::new(Default::default())),
             ltr553: Ltr553::new(),
-            points, others, lcd_in_reset: true, lcd_id_offset: None, panel_version: 0,
+            points, others, lcd_in_reset: true, lcd_id_offset: None, panel_version: 0, sd: None,
+            // AXP2101 chip ID 0x4A at 0x03, as M5GFX's CoreS3 detector requires.
+            axp2101: Reg8Device::new("axp2101", &[(0x03, 0x4a), (0x00, 0x28)]),
         };
         Cores3 { hw: Rc::new(RefCell::new(hw)), soft: SoftI2c { scl: true, sda: true, ..Default::default() }, sda_release: false, imu, lcd_cs_low: false, sd_cs_low: false, cycle: 0, int_level: true,
                  edges: Vec::new(), gpio_events: 0, spi_bytes: 0 }
@@ -221,7 +251,7 @@ impl Cores3 {
 
     fn addresses(&self) -> Vec<u8> {
         let hw = self.hw.borrow_mut();
-        let mut v = vec![Aw9523::ADDRESS, FT5X06_ADDRESS, BMI270_ADDRESS, LTR553_ADDRESS];
+        let mut v = vec![Aw9523::ADDRESS, FT5X06_ADDRESS, BMI270_ADDRESS, LTR553_ADDRESS, AXP2101_ADDRESS];
         v.extend(hw.others.iter().map(|(a, _)| *a));
         v
     }
@@ -254,7 +284,7 @@ impl Cores3 {
                 }
                 SoftMode::Recv if self.soft.bits == 8 => {
                     let b = self.soft.shift;
-                    let ack = hw.device(self.soft.addr).map(|d| d.write(b)).unwrap_or(false);
+                    let ack = hw.write_i2c(self.soft.addr, b);
                     self.soft.pull_low = ack;
                     self.soft.mode = if ack { SoftMode::AckSlot { read: false } } else { SoftMode::Idle };
                 }
@@ -319,7 +349,6 @@ impl BoardModel for Cores3 {
                     if level { hw.lcd_id_offset = None; }
                 }
                 PIN_CORES3_LCD_DC => hw.panel.dc = level,
-                PIN_CORES3_SD_CS => self.sd_cs_low = !level,
                 _ => {}
             }
         }
@@ -329,6 +358,11 @@ impl BoardModel for Cores3 {
         if !changes.is_empty() { self.gpio_changes(changes); }
         let level = |pin: u8| enabled >> pin & 1 == 0 || output >> pin & 1 != 0;
         let (scl, sda) = (level(PIN_CORES3_I2C_SCL), level(PIN_CORES3_I2C_SDA));
+        let sd_cs_low = !level(PIN_CORES3_SD_CS);
+        if self.sd_cs_low && !sd_cs_low {
+            if let Some(sd) = &mut self.hw.borrow_mut().sd { sd.deselect(); }
+        }
+        self.sd_cs_low = sd_cs_low;
         // SDA and SCL never change in the same register write of a bit-banged master; if they do,
         // take SCL first so a data change is not seen as a start or stop.
         if scl != self.soft.scl { let s = self.soft.sda; self.soft_i2c(scl, s); }
@@ -361,6 +395,38 @@ impl BoardModel for Cores3 {
             }
         }
         vec![0xff; rx_len]
+    }
+    fn uses_spi_pins(&self) -> bool { self.hw.borrow().sd.is_some() }
+    fn has_spi_sd_slot(&self) -> bool { true }
+    fn insert_spi_sd(&mut self, card: SdCard) {
+        let mut hw = self.hw.borrow_mut();
+        hw.sd = Some(Box::new(SpiSdCard::new(card)));
+        // TF_SW has a pull-up and closes to ground on insertion (schematic sheet 5).
+        hw.aw9523.external &= !Aw9523::P0_TF_SW;
+    }
+    fn spi_transfer_pins(&mut self, host: u8, pins: SpiPins, tx: &[u8], rx_len: usize) -> Vec<u8> {
+        if pins.sclk & (1 << PIN_SPI_SCLK) == 0 { return vec![0xff; rx_len]; }
+        let has_mosi = pins.mosi & (1 << PIN_SPI_MOSI) != 0;
+        let lcd_selected = pins.cs & (1 << PIN_CORES3_LCD_CS) != 0;
+        if lcd_selected && has_mosi { self.spi_transfer(host, tx, 0); }
+        let mut rx = vec![0xff; rx_len];
+        let mut hw = self.hw.borrow_mut();
+        let powered = hw.sd_powered();
+        if let Some(sd) = &mut hw.sd {
+            if pins.cs & (1 << PIN_CORES3_SD_CS) == 0 { sd.deselect(); }
+            else if powered {
+                let miso = pins.miso == Some(PIN_CORES3_LCD_DC) && !lcd_selected;
+                let now_ns = (u128::from(self.cycle) * 1_000_000_000 / u128::from(crate::periph::CPU_HZ)).min(u128::from(u64::MAX)) as u64;
+                for i in 0..tx.len().max(rx_len) {
+                    let mosi = if has_mosi { tx.get(i).copied().unwrap_or(0xff) } else { 0xff };
+                    let out = sd.exchange(mosi, now_ns);
+                    if miso {
+                        if let Some(b) = rx.get_mut(i) { *b = out; }
+                    }
+                }
+            }
+        }
+        rx
     }
     fn i2c_devices(&mut self) -> Vec<(u8, u8, Box<dyn I2cDevice>)> {
         let mut v: Vec<(u8, u8, Box<dyn I2cDevice>)> = Vec::new();
@@ -425,9 +491,63 @@ impl BoardModel for Cores3 {
     fn report(&self) -> String {
         let hw = self.hw.borrow_mut();
         let p = &hw.panel;
-        format!("[emu] cores3: soft-i2c {} transactions; {} RAMWR, {} pixels, madctl={:#x} colmod={:#x} inverted={} on={} sleeping={} lcd_reset={} bbox={:?}; spi {} bytes; aw9523 out={:#06x} dir={:#06x}; gpio events {}",
+        let mut report = format!("[emu] cores3: soft-i2c {} transactions; {} RAMWR, {} pixels, madctl={:#x} colmod={:#x} inverted={} on={} sleeping={} lcd_reset={} bbox={:?}; spi {} bytes; aw9523 out={:#06x} dir={:#06x}; gpio events {}",
                 self.soft.transactions, p.frames, p.pixels_written, p.madctl, p.colmod, p.inverted, p.on, p.sleeping, hw.lcd_in_reset, p.bbox(), self.spi_bytes,
-                hw.aw9523.outputs(), u16::from_le_bytes([hw.aw9523.regs[4], hw.aw9523.regs[5]]), self.gpio_events)
+                hw.aw9523.outputs(), u16::from_le_bytes([hw.aw9523.regs[4], hw.aw9523.regs[5]]), self.gpio_events);
+        if let Some(sd) = &hw.sd { report += &format!("\n{}; ALDO4 {}", sd.report(), if hw.sd_powered() { "on" } else { "off" }); }
+        report
+    }
+}
+
+#[cfg(test)]
+mod sd_tests {
+    use super::*;
+    use esp_periph::sdmmc::MemStore;
+
+    fn power(pmic: &mut dyn I2cDevice, enabled: bool) {
+        assert!(pmic.start(false) && pmic.write(0x95) && pmic.write(28));
+        pmic.stop();
+        assert!(pmic.start(false) && pmic.write(0x90) && pmic.write(u8::from(enabled) << 3));
+        pmic.stop();
+    }
+
+    #[test]
+    fn tf_socket_needs_power_cs_and_routed_pins() {
+        let mut board = Cores3::new();
+        let pins = SpiPins { sclk: 1 << PIN_SPI_SCLK, mosi: 1 << PIN_SPI_MOSI, miso: Some(PIN_CORES3_LCD_DC), cs: 1 << PIN_CORES3_SD_CS };
+        let cmd0 = [0x40, 0, 0, 0, 0, 0x95];
+        let exchange = |b: &mut Cores3, pins, tx: &[u8], rx| b.spi_transfer_pins(2, pins, tx, rx);
+        assert_eq!(exchange(&mut board, pins, &[], 2), [0xff; 2]);
+        assert_ne!(board.hw.borrow().aw9523.inputs() & Aw9523::P0_TF_SW, 0);
+
+        board.insert_spi_sd(SdCard::new(Box::new(MemStore(vec![0; 512 << 10]))).unwrap());
+        assert_eq!(board.hw.borrow().aw9523.inputs() & Aw9523::P0_TF_SW, 0);
+        let mut pmic = board.i2c_devices().into_iter().find(|&(bus, addr, _)| bus == 0 && addr == AXP2101_ADDRESS).unwrap().2;
+        exchange(&mut board, pins, &cmd0, 0);
+        assert_eq!(exchange(&mut board, pins, &[], 2), [0xff; 2]);
+
+        power(&mut *pmic, true);
+        for unrouted in [SpiPins { cs: 0, ..pins }, SpiPins { sclk: 0, ..pins }, SpiPins { mosi: 0, ..pins }] {
+            exchange(&mut board, unrouted, &cmd0, 0);
+            assert_eq!(exchange(&mut board, pins, &[], 2), [0xff; 2]);
+        }
+        exchange(&mut board, SpiPins { miso: None, ..pins }, &cmd0, 0);
+        assert_eq!(exchange(&mut board, pins, &[], 2), [0xff, 1]);
+        exchange(&mut board, pins, &cmd0, 0);
+        assert_eq!(exchange(&mut board, SpiPins { miso: Some(34), ..pins }, &[], 2), [0xff; 2]);
+        assert_eq!(exchange(&mut board, pins, &[], 2), [0xff; 2]);
+
+        board.gpio_output_at(1, &[], pins.cs, 0);
+        exchange(&mut board, pins, &cmd0[..3], 0);
+        board.gpio_output_at(2, &[], pins.cs, pins.cs);
+        board.gpio_output_at(3, &[], pins.cs, 0);
+        exchange(&mut board, pins, &cmd0, 0);
+        assert_eq!(exchange(&mut board, pins, &[], 2), [0xff, 1]);
+
+        power(&mut *pmic, false);
+        power(&mut *pmic, true);
+        exchange(&mut board, pins, &[0x7a, 0, 0, 0, 0, 1], 0); // CMD58 before CMD0
+        assert_eq!(exchange(&mut board, pins, &[], 2), [0xff; 2]);
     }
 }
 
