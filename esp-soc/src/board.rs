@@ -114,6 +114,9 @@ pub trait BoardModel {
     fn display(&self) -> Option<(u32, u32, Vec<u16>, u64)> { None }
     /// Completed display frames (for the UI's statistics line).
     fn display_frames(&self) -> u64 { 0 }
+    /// Rotation in degrees for presenting a portrait application. The display pixels
+    /// themselves always remain in the board's glass coordinates.
+    fn display_rotation(&self) -> i8 { 0 }
     /// Cheap change counter of the display (`display().3` without building the frame).
     fn display_version(&self) -> u64 { 0 }
     /// Prefer waiting one push interval for a quiet pixel stream. The UI still publishes on

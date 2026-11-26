@@ -359,6 +359,13 @@ impl BoardModel for CardputerAdv {
     }
     fn display(&self) -> Option<(u32, u32, Vec<u16>, u64)> { Some((WIDTH as u32, HEIGHT as u32, self.visible(), self.display_version())) }
     fn display_frames(&self) -> u64 { self.lcd.frames }
+    fn display_rotation(&self) -> i8 {
+        // Without MADCTL.MV, logical +X follows the physical Y axis. The
+        // glass reverses columns and MADCTL.MX reverses them a second time.
+        if !self.lcd.on || self.lcd.madctl & 0x20 != 0 { 0 }
+        else if self.lcd.madctl & 0x40 != 0 { 90 }
+        else { -90 }
+    }
     fn display_version(&self) -> u64 { self.lcd_version + self.lcd.pixels_written }
     fn gram(&self) -> Option<(Vec<u16>, usize, usize)> { Some((self.lcd.gram.clone(), self.lcd.cols, self.lcd.rows)) }
     fn report(&self) -> String {
