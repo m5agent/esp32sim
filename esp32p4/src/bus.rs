@@ -140,6 +140,24 @@ impl esp_periph::sdmmc::SdmmcMemory for DmaView<'_> {
     }
 }
 
+// The shared GDMA receive walk uses the CPU Bus interface. Supply only DMA-visible memory.
+impl Bus for DmaView<'_> {
+    fn read8(&mut self, addr: u32) -> Result<u8, Fault> {
+        let mut bytes = [0; 1]; esp_periph::sdmmc::SdmmcMemory::read(self, addr, &mut bytes)?; Ok(bytes[0])
+    }
+    fn read16(&mut self, addr: u32) -> Result<u16, Fault> {
+        let mut bytes = [0; 2]; esp_periph::sdmmc::SdmmcMemory::read(self, addr, &mut bytes)?; Ok(u16::from_le_bytes(bytes))
+    }
+    fn read32(&mut self, addr: u32) -> Result<u32, Fault> {
+        let mut bytes = [0; 4]; esp_periph::sdmmc::SdmmcMemory::read(self, addr, &mut bytes)?; Ok(u32::from_le_bytes(bytes))
+    }
+    fn write8(&mut self, addr: u32, v: u8) -> Result<(), Fault> { esp_periph::sdmmc::SdmmcMemory::write(self, addr, &[v]) }
+    fn write16(&mut self, addr: u32, v: u16) -> Result<(), Fault> { esp_periph::sdmmc::SdmmcMemory::write(self, addr, &v.to_le_bytes()) }
+    fn write32(&mut self, addr: u32, v: u32) -> Result<(), Fault> { esp_periph::sdmmc::SdmmcMemory::write(self, addr, &v.to_le_bytes()) }
+    fn fetch(&mut self, addr: u32) -> Result<[u8; 4], Fault> { self.read32(addr).map(u32::to_le_bytes) }
+    fn note_code_page(&mut self, _index: u32) {}
+}
+
 /// An AXI-GDMA OUT channel's view of memory: descriptors and buffers in L2MEM or PSRAM.
 struct AxiOut<'a> { mem: DmaView<'a>, channel: &'a mut esp_periph::gdma::GdmaOutCh }
 impl esp_periph::gdma::OutMemory for AxiOut<'_> {
@@ -489,10 +507,40 @@ impl SocBus {
         }
         self.irq_dirty = true;
         // a frame cut short by the chain's end, an error or the step budget is dropped
-        let samples: Vec<i16> = stream.chunks_exact(bpf)
-            .map(|f| if sample_bytes == 1 { (f[0] as i8 as i16) << 8 } else { i16::from_le_bytes([f[sample_bytes - 2], f[sample_bytes - 1]]) })
-            .collect();
+        // ESP-IDF v5.5.4 gpio_sig_map.h I2S0 output BCK/MCLK/WS/SD = 25/26/27/28.
+        let connected = self.board.i2s_codecs().filter(|codec| codec.port == port as usize).is_none_or(|codec| {
+            let gpio = &self.periph.gpio;
+            codec.speaker_gain > 0.0 && gpio.out_signal(codec.bck) == 25 && gpio.out_signal(codec.ws) == 27 &&
+                gpio.out_signal(codec.dout) == 28 && codec.mck.is_none_or(|pin| gpio.out_signal(pin) == 26)
+        });
+        let samples: Vec<i16> = stream.chunks_exact(bpf).map(|f| {
+            if !connected { 0 }
+            else if sample_bytes == 1 { (f[0] as i8 as i16) << 8 }
+            else { i16::from_le_bytes([f[sample_bytes - 2], f[sample_bytes - 1]]) }
+        }).collect();
         if !samples.is_empty() { i.frames_out += samples.len() as u64; i.pcm.extend_from_slice(&samples); }
+    }
+
+    fn i2s0_rx(&mut self, cycles: u64) {
+        let Some(ch) = self.periph.ahb_dma.gdma.in_channel_for(3) else { return };
+        // IDF v5.5.4 gpio_sig_map.h I2S0 RX data = 28, RX master BCK/WS = 29/30.
+        let gpio = &self.periph.gpio;
+        let clock = if self.periph.i2s0.rx_slave() { [25, 27] } else { [29, 30] };
+        let lanes = self.board.i2s_codecs().map_or([true; 2], |codec| {
+            if gpio.g.func_in_sel[28] & 0xbf == 0x80 | u32::from(codec.din) &&
+               gpio.out_signal(codec.bck) == clock[0] && gpio.out_signal(codec.ws) == clock[1] &&
+               codec.mck.is_none_or(|pin| gpio.out_signal(pin) == 26) { codec.mic_lanes } else { [false; 2] }
+        });
+        let signals = esp_periph::i2s::RxSignals { data: 28, clock: clock.map(|id| id as usize), input_select_bit: 7, output_mask: 0x1ff };
+        let i2s = &mut self.periph.i2s0;
+        let bytes = i2s.receive_with_lanes((cycles, self.cycles), false, &gpio.g, signals, None, lanes);
+        if !bytes.is_empty() {
+            let eof = i2s.read(0x64) & 0xfff;
+            let mut mem = DmaView { l2mem: &mut self.l2mem, psram: &mut self.psram, mmu: &self.mmu_psram, ver: &mut self.code_ver };
+            self.periph.ahb_dma.gdma.inp[ch].receive(&mut mem, &bytes, Some(eof), false, |_| false, &mut self.irq_dirty);
+            i2s.bytes_in += bytes.len() as u64;
+        }
+        i2s.recycle_rx_buffer(bytes);
     }
 
     /// GPSPI2's transmit DMA through the AXI-GDMA (trigger 1): one finite gather per transaction,
@@ -654,7 +702,10 @@ impl SocBus {
         if self.periph.spi2.dma_tx_pending.is_some() { self.spi2_dma_tx(); }
         if self.periph.spi2.has_pending_transfer() || !self.periph.gpio.g.changes.is_empty() { self.deliver_board_events(false); }
         if self.periph.dw_dma.due.is_some_and(|due| due <= self.cycles) { self.scan_dsi(); }
-        if self.periph.i2s0.poll_active() { self.i2s_tx(0, cycles as u64); }
+        if self.periph.i2s0.poll_active() {
+            self.i2s_tx(0, cycles as u64);
+            if self.periph.i2s0.rx_running() { self.i2s0_rx(cycles as u64); }
+        }
         if self.periph.i2s1.poll_active() { self.i2s_tx(1, cycles as u64); }
         if self.periph.usb_otg.pending() { self.run_usb(); }
         if self.periph.sdmmc.timed { self.sd_time(); }

@@ -766,7 +766,7 @@ impl Peripherals {
         let fx = mmio::write32(self, addr, v);
         if addr == 0x500e_609c { self.ledc_clock(v); }
         if addr == 0x500e_6094 { self.mcpwm_clock(v); }
-        if (0x500e_604c..=0x500e_6050).contains(&addr) { self.i2s0_clock(); }
+        if (0x500e_6044..=0x500e_6050).contains(&addr) { self.i2s0_clock(); }
         if (0x500e_6054..=0x500e_605c).contains(&addr) { self.i2s1_clock(); }
         if fx.contains(WriteEffect::SPI_EXEC | WriteEffect::PERIPH_RESET) {
             if fx.contains(WriteEffect::PERIPH_RESET) {
@@ -787,6 +787,9 @@ impl Peripherals {
         let ctrl0 = c13 >> 10 & 0x7ff;
         let div = (c13 >> 21 & 0x1ff) | (c14 & 0x7ffff) << 9;
         self.i2s0.set_v2_clock(ctrl0, div);
+        // CTRL11..13: RX_CLK_EN/SRC, and RX_DIV_N/X/Y/Z/YN1 (same IDF header).
+        let [c11, c12] = [0x44, 0x48].map(|off| Device::read(&mut self.hp_clkrst, off));
+        self.i2s0.set_v2_rx_clock(c11 >> 24 & 7 | (c12 & 255) << 3, (c12 >> 8 & 0x3ffff) | (c13 & 0x3ff) << 18);
     }
 
     /// HP_SYS_CLKRST PERI_CLK_CTRL15-17, I2S1's TX clock (register/hw_ver3/soc/hp_sys_clkrst_reg.h:

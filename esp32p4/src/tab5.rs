@@ -1,6 +1,7 @@
 //! M5Stack Tab5 display/touch and internal I²C wiring (M5GFX 0.3.0, board_detect/m5/esp32p4*).
 use esp_periph::i2c::{I2cDevice, Reg8Device};
-use esp_soc::board::{BoardEdge, VirtualCycle};
+use esp_soc::board::{BoardEdge, I2sCodecs, VirtualCycle};
+use esp_soc::devices::es7210::Es7210;
 use esp_soc::devices::gt911::{Gt911, TouchState};
 use esp_soc::devices::soft_i2c::{SoftI2c, SoftOp};
 use esp_soc::BoardModel;
@@ -81,14 +82,23 @@ pub struct Tab5 {
     touch_irq: bool,
     goodix_pending: Rc<Cell<bool>>,
     backlight: Option<(f64, u32)>,
+    mic: Rc<RefCell<Es7210>>,
+    dac: Rc<RefCell<Reg8Device>>,
+    rails: Rc<RefCell<Reg8Device>>,
 }
 impl Tab5 {
     pub fn new(panel: Panel) -> Self {
         let (contacts, goodix): (Points, Arc<Mutex<TouchState>>) = (Default::default(), Default::default());
         // The two PI4IOE5V6408s retain direction and output latches across
         // transactions, including when the guest switches from bit-bang to I2C1.
-        let pi4io = || DevicePort::new(Reg8Device::new("pi4ioe5v6408", &[(1, 0xa0), (3, 0xff)]));
-        let mut bus = vec![(0x43, pi4io()), (0x44, pi4io())];
+        let pi4io = || Reg8Device::new("pi4ioe5v6408", &[(1, 0xa0), (3, 0xff)]);
+        let rails = Rc::new(RefCell::new(pi4io()));
+        let mic = Rc::new(RefCell::new(Es7210::new()));
+        // ES8388 control registers used by M5Unified 0.3.0's Tab5 speaker callback.
+        // Reset starts with CHIPPOWER/DACPOWER down and DACCONTROL3 muted.
+        let dac = Rc::new(RefCell::new(Reg8Device::new("es8388", &[(2, 0xc3), (4, 0xc0), (25, 4)])));
+        let mut bus = vec![(0x43, DevicePort(rails.clone())), (0x44, DevicePort::new(pi4io())),
+                           (Es7210::ADDRESS, DevicePort(mic.clone())), (0x10, DevicePort(dac.clone()))];
         let goodix_pending = Rc::new(Cell::new(false));
         match panel {
             Panel::Ili9881c => bus.push((0x14, DevicePort::new(Gt911::new(goodix.clone(), WIDTH as u16, HEIGHT as u16).with_pending(goodix_pending.clone())))),
@@ -96,7 +106,7 @@ impl Tab5 {
         }
         Self { panel, screen: Vec::new(), sleeping: true, on: false, page: 0,
                scans: 0, version: 0, reads: 0, contacts, goodix, bus, soft: SoftI2c::idle(),
-               edges: Vec::new(), released: Vec::new(), touch_irq: true, goodix_pending, backlight: None }
+               edges: Vec::new(), released: Vec::new(), touch_irq: true, goodix_pending, backlight: None, mic, dac, rails }
     }
 
     fn contact(&mut self, cycle: VirtualCycle, id: usize, x: u16, y: u16, down: bool) -> bool {
@@ -125,6 +135,19 @@ impl Tab5 {
 impl BoardModel for Tab5 {
     fn name(&self) -> &'static str {
         match self.panel { Panel::Ili9881c => "m5stack-tab5", Panel::St7123 => "m5stack-tab5-st7123" }
+    }
+    fn i2s_codecs(&self) -> Option<I2sCodecs> {
+        let rails = self.rails.borrow();
+        let dac = self.dac.borrow();
+        // Tab5 M5Unified 0.3.0 enables amp through expander 0x43 bit 1 and
+        // routes the ES8388 and ES7210 to opposite directions of I2S0.
+        // PI4IOE5V6408 DS40583: DIR=1 selects an output, HIZ=1 disconnects it.
+        // ES8388 rev. 5.0 §6.1.3: only the DAC power-down bits gate playback.
+        let enabled = rails.regs[3] & 2 != 0 && rails.regs[5] & 2 != 0 && rails.regs[7] & 2 == 0 &&
+                      dac.regs[2] & 0x55 == 0 && dac.regs[4] & 0xc0 == 0 && dac.regs[4] & 0x3c != 0 &&
+                      dac.regs[25] & 4 == 0;
+        Some(I2sCodecs { port: 0, mic_port: 0, bck: 27, ws: 29, mck: Some(30), dout: 26, din: 28,
+                        speaker_gain: if enabled { 1.0 } else { 0.0 }, mic_lanes: self.mic.borrow().lanes() })
     }
     fn observes_gpio_pads(&self) -> bool { true }
     fn gpio_output_at(&mut self, cycle: VirtualCycle, _: &[(u8, bool)], enabled: u64, output: u64) {

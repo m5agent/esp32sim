@@ -306,6 +306,9 @@ impl esp_soc::SocBus for SocBus {
         self.irq_dirty |= ok;
         ok
     }
+    fn i2s_input(&mut self, port: usize) -> Option<&mut esp_periph::i2s::PcmInput> {
+        (port == 0).then(|| self.periph.i2s0.rx_input())
+    }
     fn audio(&self) -> (&[i16], u32) {
         let port = if self.periph.i2s0.frames_out == 0 { &self.periph.i2s1 } else { &self.periph.i2s0 };
         (&port.pcm, port.sample_rate)
