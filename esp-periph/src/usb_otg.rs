@@ -1,6 +1,6 @@
 //! The USB 2.0 On-The-Go controller: Synopsys' DesignWare Hi-Speed USB 2.0 OTG core (DWC2) as a
-//! device with buffer DMA, as the ESP32-P4's high-speed port (0x50000000, UTMI+ PHY) has it and
-//! the ESP32-S3's full-speed port (0x60080000) has a smaller copy of it, and the cable to a host
+//! device with buffer DMA on the ESP32-P4 high-speed port (0x50000000, UTMI+ PHY) and with buffer
+//! DMA or Slave FIFOs on the ESP32-S3 full-speed port (0x60080000), and the cable to a host
 //! (`link`).
 //!
 //! Registers: IDF v5.5.3 components/soc/esp32p4/include/soc/usb_dwc_struct.h (the v4.30a HS
@@ -9,8 +9,9 @@
 //! dwc2_type.h, dwc2_common.c and dcd_dwc2.c. What differs between instances is `Dwc2Config`.
 //!
 //! The core answers transactions the link asks of it (a SETUP, an IN token, an OUT data packet)
-//! at once from its endpoint registers, moving the payload through DMA; the link decides when
-//! they happen. Slave mode (the data FIFOs from 0x1000) and host mode are not modelled.
+//! from its endpoint registers, moving the payload through DMA or the data FIFOs; the link
+//! decides when they happen. Host mode is not modelled.
+mod fifo;
 pub mod link;
 pub use link::{BusEvent, Completion, Handshake, InReply, LinkFault, LinkStats, Outcome, PortStatus, Request, Speed, UsbFunction, UsbLink, UsbTiming};
 use crate::device::{Device, WriteEffect};
@@ -67,7 +68,7 @@ impl Dwc2Config {
     /// OTG_TX_DINEP_DFIFO_DEPTH_n 256; GHWCFG2.NumDevEps 6 and GHWCFG4.INEps 4 agree), the
     /// full-speed PHY (OTG_HSPHY_INTERFACE 0, OTG_FSPHY_INTERFACE 1).
     pub const fn esp32s3_fs(hz: u64) -> Self {
-        Dwc2Config { gsnpsid: 0x4F54_400A, ghwcfg: [0, 0x224D_D930, 0x00C8_04B5, 0xD3F0_A030], eps: 7, in_eps: 5, xfer_bits: 16, pkt_bits: 7,
+        Dwc2Config { gsnpsid: 0x4F54_400A, ghwcfg: [0, 0x224D_D930, 0x00C8_04B5, 0xD3F0_A030], eps: 7, in_eps: fifo::TX_FIFOS, xfer_bits: 16, pkt_bits: 7,
                      fifo_words: 256, tx_fifo_words: 256, high_speed: false, hz }
     }
 }
@@ -86,6 +87,9 @@ pub mod reg {
     pub const DIEP0: u32 = 0x900; pub const DOEP0: u32 = 0xb00; pub const EP_STRIDE: u32 = 0x20;
     pub const EPCTL: u32 = 0x00; pub const EPINT: u32 = 0x08; pub const EPTSIZ: u32 = 0x10; pub const EPDMA: u32 = 0x14; pub const DTXFSTS: u32 = 0x18; pub const EPDMAB: u32 = 0x1c;
     pub const PCGCCTL: u32 = 0xe00;
+    /// TinyUSB dwc2_type.h: fifo[16][0x400], starting at 0x1000.
+    pub const DFIFO0: u32 = 0x1000; pub const DFIFO_STRIDE: u32 = 0x1000;
+    pub const S3_DFIFO_LAST: u32 = DFIFO0 + DFIFO_STRIDE * super::fifo::TX_FIFOS as u32 - 1;
 }
 
 /// GOTGCTL: the overrides of the session signals, the connector ID and the session-valid inputs.
@@ -114,6 +118,7 @@ pub mod grstctl {
 /// GINTSTS / GINTMSK bits.
 pub mod gint {
     pub const OTGINT: u32 = 1 << 2; pub const SOF: u32 = 1 << 3; pub const GINAKEFF: u32 = 1 << 6; pub const BOUTNAKEFF: u32 = 1 << 7;
+    pub const RXFLVL: u32 = 1 << 4; pub const NPTXFE: u32 = 1 << 5;
     pub const ESUSP: u32 = 1 << 10; pub const USBSUSP: u32 = 1 << 11; pub const USBRST: u32 = 1 << 12; pub const ENUMDNE: u32 = 1 << 13;
     pub const IEPINT: u32 = 1 << 18; pub const OEPINT: u32 = 1 << 19; pub const RSTDET: u32 = 1 << 23; pub const SRQINT: u32 = 1 << 30;
     pub const WKUINT: u32 = 1 << 31;
@@ -165,6 +170,7 @@ pub struct Dwc2 {
     dcfg: u32, dctl: u32, diepmsk: u32, doepmsk: u32, daintmsk: u32, diepempmsk: u32,
     ep_in: [Ep; 16], ep_out: [Ep; 16],
     ram: RegRam,
+    fifo: Option<Box<fifo::Fifo>>,
     /// what the cable presents: B-session valid, the speed the last bus reset ended in, SOFs since
     vbus: bool,
     speed: Option<Speed>,
@@ -195,7 +201,7 @@ impl Dwc2 {
     pub fn new(cfg: Dwc2Config) -> Self {
         let mut d = Dwc2 { cfg, gotgctl: 0, gotgint: 0, gahbcfg: 0, gusbcfg: 0, grstctl: 0, gintsts: 0, gintmsk: 0, grxfsiz: 0, gnptxfsiz: 0, gdfifocfg: 0,
             dieptxf: [0; 15], pcgcctl: 0, dcfg: 0, dctl: 0, diepmsk: 0, doepmsk: 0, daintmsk: 0, diepempmsk: 0,
-            ep_in: [Ep::default(); 16], ep_out: [Ep::default(); 16], ram: RegRam::new(), vbus: false, speed: None, sof_since: None,
+            ep_in: [Ep::default(); 16], ep_out: [Ep::default(); 16], ram: RegRam::new(), fifo: None, vbus: false, speed: None, sof_since: None,
             sof_ack: 0, suspended: false, setup_phase: false, setup_stash: None, pullup_seen: false, now: 0, link: None, pending: false,
             held: false, phy: true, frame: 0, stats: Dwc2Stats::default(), log: false };
         d.set_speed(None);
@@ -233,6 +239,7 @@ impl Dwc2 {
         self.ep_in[0].ctl = epctl::USBAEP;
         self.ep_out[0].ctl = epctl::USBAEP;
         self.setup_phase = false; self.setup_stash = None;
+        self.fifo = None;
         self.stats.resets += 1;
     }
 
@@ -333,19 +340,77 @@ impl Dwc2 {
         e.tsiz = (e.tsiz & !(xm | pm << PKTCNT_SHIFT)) | (xfer & xm) | (pkt & pm) << PKTCNT_SHIFT;
     }
 
-    /// The bytes of IN endpoint `ep`'s TX FIFO (DIEPCTLn.TxFNum selects DIEPTXFn; endpoint 0 has GNPTXFSIZ).
-    fn tx_fifo_bytes(&self, ep: usize) -> usize {
-        let n = if ep == 0 { 0 } else { (self.ep_in[ep].ctl & epctl::TXFNUM) >> 22 } as usize;
+    /// The S3 full-speed port exposes the Slave-mode data windows on its bus.
+    pub fn slave_mode(&self) -> bool { !self.cfg.high_speed && self.gahbcfg & GAHBCFG_DMAEN == 0 && self.gusbcfg & gusbcfg::FHMOD == 0 }
+
+    fn tx_fifo_num(&self, ep: usize) -> usize { if ep == 0 { 0 } else { ((self.ep_in[ep].ctl & epctl::TXFNUM) >> 22) as usize } }
+
+    /// DIEPCTLn.TxFNum selects DIEPTXFn; endpoint 0 uses GNPTXFSIZ.
+    fn tx_fifo_depth(&self, n: usize) -> usize {
         let f = if n == 0 { self.gnptxfsiz } else { self.dieptxf[n - 1] };
-        (f >> 16) as usize * 4
+        let depth = f >> 16;
+        let depth = if self.slave_mode() { depth.min(self.cfg.fifo_words.saturating_sub(f & 0xffff)) } else { depth };
+        depth as usize
+    }
+
+    fn tx_fifo_bytes(&self, ep: usize) -> usize { self.tx_fifo_depth(self.tx_fifo_num(ep)) * 4 }
+
+    fn tx_fifo_used(&self, n: usize) -> usize {
+        self.fifo.as_ref().and_then(|f| f.tx.get(n)).map_or(0, fifo::TxFifo::words)
+    }
+
+    fn tx_fifo_space(&self, n: usize) -> usize { self.tx_fifo_depth(n).saturating_sub(self.tx_fifo_used(n)) }
+
+    fn tx_fifo_empty_level(&self, n: usize) -> bool {
+        let depth = self.tx_fifo_depth(n);
+        let limit = if self.gahbcfg & fifo::EMPTY_LEVEL != 0 { 0 } else { depth / 2 };
+        depth != 0 && self.tx_fifo_used(n) <= limit
+    }
+
+    fn write_fifo(&mut self, n: usize, v: u32) {
+        if n >= self.cfg.in_eps { return; }
+        // A window addresses a FIFO number; DIEPCTL.TXFNUM binds that FIFO to an IN endpoint.
+        let Some(ep) = (0..self.cfg.in_eps).find(|&ep| self.ep_in[ep].ctl & epctl::EPENA != 0 && self.tx_fifo_num(ep) == n) else { return };
+        let (remaining, pkt) = self.tsiz(ep, false);
+        let mps = self.mps(ep, false);
+        if remaining == 0 || pkt == 0 || mps == 0 { return; }
+        if self.tx_fifo_space(n) == 0 { self.stats.fifo_errors += 1; return; }
+        let count = self.fifo.get_or_insert_with(Box::default).tx[n].push(v, mps, remaining as usize);
+        // In Slave mode DIEPTSIZ.XferSize counts bytes still to write to the FIFO. PktCnt is
+        // retired by the bus. TinyUSB uses XferSize to know when to turn off DIEPEMPMSK.
+        self.set_tsiz(ep, false, remaining - count as u32, pkt);
+    }
+
+    fn queue_rx(&mut self, ep: usize, kind: u32, data1: bool, data: &[u8], done: u32) -> bool {
+        let capacity = self.grxfsiz.min(self.cfg.fifo_words) as usize;
+        let status = fifo::rx_status(ep, data1, kind, data.len());
+        let completion = if done != 0 { fifo::rx_status(ep, false, done, 0) } else { 0 };
+        self.fifo.get_or_insert_with(Box::default).receive(capacity, status, data, completion)
+    }
+
+    fn read_rx_status(&mut self, pop: bool) -> u32 {
+        let Some(fifo) = &mut self.fifo else { return 0 };
+        if !pop { return fifo.rx_status(); }
+        let status = fifo.pop_rx_status();
+        let n = (status & 15) as usize;
+        match status >> 17 & 15 {
+            fifo::SETUP_DONE => self.ep_out[n].int |= epint::SETUP,
+            fifo::OUT_DONE => self.ep_out[n].int |= epint::XFRC,
+            _ => {}
+        }
+        status
     }
 
     /// DAINT: an endpoint's bit is set while its interrupt register has a bit DIEPMSK/DOEPMSK lets
     /// through (TXFE goes through DIEPEMPMSK); DAINTMSK does not gate it.
     fn daint(&self) -> u32 {
         let mut v = 0;
+        let slave = self.slave_mode();
         for n in 0..self.cfg.eps {
-            let i = self.ep_in[n].int;
+            let mut i = self.ep_in[n].int;
+            if slave && self.diepempmsk & (1 << n) != 0 && self.ep_in[n].ctl & epctl::EPENA != 0 && self.tx_fifo_empty_level(self.tx_fifo_num(n)) {
+                i |= epint::TXFE;
+            }
             if i & self.diepmsk & 0x7f7f != 0 || (i & epint::TXFE != 0 && self.diepempmsk & (1 << n) != 0) { v |= 1 << n; }
             if self.ep_out[n].int & self.doepmsk & 0xffff != 0 { v |= 1 << (16 + n); }
         }
@@ -360,6 +425,10 @@ impl Dwc2 {
         let d = self.daint() & self.daintmsk;
         if d & 0xffff != 0 { v |= gint::IEPINT; }
         if d >> 16 != 0 { v |= gint::OEPINT; }
+        if self.slave_mode() {
+            if self.fifo.as_ref().is_some_and(|f| f.rx_status() != 0) { v |= gint::RXFLVL; }
+            if self.tx_fifo_empty_level(0) { v |= gint::NPTXFE; }
+        }
         if self.sof_due() { v |= gint::SOF; }
         v
     }
@@ -426,7 +495,11 @@ impl Dwc2 {
         } else {
             self.grstctl = 0;
         }
-        // The flushes finish at once (the model keeps no FIFO contents); TxFNum reads back.
+        if let Some(fifo) = &mut self.fifo {
+            if v & grstctl::RXFFLSH != 0 { fifo.flush_rx(); }
+            if v & grstctl::TXFFLSH != 0 { fifo.flush_tx(((v & grstctl::TXFNUM) >> 6) as usize); }
+        }
+        // The flush strobes clear immediately; TxFNum reads back.
         self.grstctl = (self.grstctl & (grstctl::CSRST | grstctl::CSRSTDONE)) | (v & grstctl::TXFNUM) | grstctl::AHBIDL;
     }
 
@@ -436,6 +509,9 @@ impl Dwc2 {
         if v & dctl::CGINAK != 0 { d &= !dctl::GINSTS; }
         if v & dctl::SGONAK != 0 { d |= dctl::GONSTS; }
         if v & dctl::CGONAK != 0 { d &= !dctl::GONSTS; }
+        if d & dctl::GONSTS != 0 && self.dctl & dctl::GONSTS == 0 && self.slave_mode() {
+            self.queue_rx(0, fifo::GLOBAL_OUT_NAK, false, &[], 0);
+        }
         let wake = d & dctl::RWUSIG != 0 && self.dctl & dctl::RWUSIG == 0;
         self.dctl = d;
         if d & dctl::GONSTS != 0 { for n in 1..self.cfg.eps { self.finish_disable(n, true); } }
@@ -492,6 +568,7 @@ impl UsbFunction for Dwc2 {
         self.sof_since = None;
         self.setup_phase = false;
         self.setup_stash = None;
+        self.fifo = None;
         // USB reset clears USBActEP on every endpoint but 0.
         for e in self.ep_in.iter_mut().chain(self.ep_out.iter_mut()) { e.ctl &= !epctl::USBAEP; }
         self.ep_in[0].ctl |= epctl::USBAEP;
@@ -521,8 +598,18 @@ impl UsbFunction for Dwc2 {
         for e in [&mut self.ep_in[0], &mut self.ep_out[0]] { e.ctl = (e.ctl & !epctl::STALL) | epctl::NAKSTS; }
         self.ep_in[0].pid = true;
         self.ep_out[0].pid = true;
-        self.setup_phase = true;
-        if self.ep_out[0].ctl & epctl::EPENA != 0 { self.deliver_setup(mem, pkt); } else { self.setup_stash = Some(pkt); }
+        if self.slave_mode() {
+            if self.queue_rx(0, fifo::SETUP_DATA, false, &pkt, fifo::SETUP_DONE) {
+                let o = &mut self.ep_out[0];
+                if o.tsiz >> STUPCNT_SHIFT & 3 != 0 { o.tsiz -= 1 << STUPCNT_SHIFT; }
+                o.ctl &= !epctl::EPENA;
+            } else {
+                self.stats.fifo_errors += 1;
+            }
+        } else {
+            self.setup_phase = true;
+            if self.ep_out[0].ctl & epctl::EPENA != 0 { self.deliver_setup(mem, pkt); } else { self.setup_stash = Some(pkt); }
+        }
         if self.log { eprintln!("[usb_otg] SETUP {:02x?}", pkt); }
     }
 
@@ -539,18 +626,39 @@ impl UsbFunction for Dwc2 {
             self.stats.naks += 1;
             return InReply::Nak;
         }
-        let len = (xfer as usize).min(mps).min(max);
-        let mut data = vec![0u8; len];
-        if len > 0 && mem.read(e.dma, &mut data).is_err() {
-            self.ep_in[n].int |= epint::AHBERR;
-            self.stats.dma_faults += 1;
-            return InReply::Nak;
-        }
+        let slave = self.slave_mode();
+        let data = if slave {
+            let fifo_num = self.tx_fifo_num(n);
+            let tx = self.fifo.as_mut().and_then(|f| f.tx.get_mut(fifo_num));
+            let queued = tx.as_ref().map_or(0, |f| f.bytes);
+            let len = (xfer as usize + queued).min(mps);
+            if len == 0 {
+                Vec::new()
+            } else {
+                // The link must accept a whole packet, including when the guest has filled
+                // only part of the FIFO so far.
+                let Some(data) = tx.filter(|_| len <= max).and_then(|f| f.take_packet(len)) else {
+                    self.stats.naks += 1;
+                    return InReply::Nak;
+                };
+                data
+            }
+        } else {
+            let len = (xfer as usize).min(mps).min(max);
+            let mut data = vec![0u8; len];
+            if len > 0 && mem.read(e.dma, &mut data).is_err() {
+                self.ep_in[n].int |= epint::AHBERR;
+                self.stats.dma_faults += 1;
+                return InReply::Nak;
+            }
+            data
+        };
+        let len = data.len();
         let pid = e.pid;
         let x = &mut self.ep_in[n];
-        x.dma = x.dma.wrapping_add(len as u32);
+        if !slave { x.dma = x.dma.wrapping_add(len as u32); }
         if x.ctl & epctl::EPTYP != epctl::EPTYP_ISO { x.pid = !x.pid; }
-        self.set_tsiz(n, false, xfer - len as u32, pkt - 1);
+        self.set_tsiz(n, false, if slave { xfer } else { xfer - len as u32 }, pkt - 1);
         if pkt == 1 { let x = &mut self.ep_in[n]; x.int |= epint::XFRC; x.ctl &= !epctl::EPENA; }
         self.stats.packets_in += 1;
         self.stats.bytes_in += len as u64;
@@ -581,19 +689,29 @@ impl UsbFunction for Dwc2 {
         }
         let mps = self.mps(n, true);
         let len = data.len().min(xfer as usize);
-        if len > 0 && mem.write(e.dma, &data[..len]).is_err() {
+        let slave = self.slave_mode();
+        // A short packet or the last of the count ends the transfer; the endpoint then NAKs.
+        let done = pkt == 1 || data.len() < mps;
+        if slave {
+            if !self.queue_rx(n, fifo::OUT_DATA, data1, &data[..len], if done { fifo::OUT_DONE } else { 0 }) {
+                self.stats.naks += 1;
+                return Handshake::Nak;
+            }
+        } else if len > 0 && mem.write(e.dma, &data[..len]).is_err() {
             self.ep_out[n].int |= epint::AHBERR;
             self.stats.dma_faults += 1;
             return Handshake::Nak;
         }
         let x = &mut self.ep_out[n];
         if data.len() > len { x.int |= epint::BBLEERR; }
-        x.dma = x.dma.wrapping_add(len as u32);
+        if !slave { x.dma = x.dma.wrapping_add(len as u32); }
         if x.ctl & epctl::EPTYP != epctl::EPTYP_ISO { x.pid = !x.pid; }
         self.set_tsiz(n, true, xfer - len as u32, pkt - 1);
-        // A short packet or the last of the count ends the transfer; the endpoint then NAKs.
-        let done = pkt == 1 || data.len() < mps;
-        if done { let x = &mut self.ep_out[n]; x.int |= epint::XFRC; x.ctl = (x.ctl & !epctl::EPENA) | epctl::NAKSTS; }
+        if done {
+            let x = &mut self.ep_out[n];
+            if !slave { x.int |= epint::XFRC; }
+            x.ctl = (x.ctl & !epctl::EPENA) | epctl::NAKSTS;
+        }
         self.stats.packets_out += 1;
         self.stats.bytes_out += len as u64;
         if self.log { eprintln!("[usb_otg] OUT{} {} bytes DATA{}{}", n, data.len(), data1 as u8, if done { ", transfer complete" } else { "" }); }
@@ -613,11 +731,10 @@ impl Device for Dwc2 {
                 // control OUT 0's packet size is control IN 0's
                 EPCTL if n == 0 && out => (e.ctl & !3) | (self.ep_in[0].ctl & 3),
                 EPCTL => e.ctl | if n > 0 { (e.pid as u32) << 16 } else { 0 },
-                // TXFE: the TX FIFO is empty between transactions
-                EPINT => e.int | if out { 0 } else { epint::TXFE },
+                EPINT => e.int | if !out && (!self.slave_mode() || self.tx_fifo_empty_level(self.tx_fifo_num(n))) { epint::TXFE } else { 0 },
                 EPTSIZ => e.tsiz,
                 EPDMA => e.dma,
-                DTXFSTS if !out => (self.tx_fifo_bytes(n) / 4) as u32,
+                DTXFSTS if !out => self.tx_fifo_space(self.tx_fifo_num(n)) as u32,
                 _ => 0,
             };
         }
@@ -630,11 +747,12 @@ impl Device for Dwc2 {
             GRSTCTL => self.grstctl,
             GINTSTS => self.gintsts_now(),
             GINTMSK => self.gintmsk,
+            GRXSTSR | GRXSTSP if self.slave_mode() => self.read_rx_status(off == GRXSTSP),
             GRXSTSR | GRXSTSP => 0,
             GRXFSIZ => self.grxfsiz,
             GNPTXFSIZ => self.gnptxfsiz,
-            // non-periodic TX queue: four free entries, the FIFO empty
-            GNPTXSTS => 4 << 16 | self.gnptxfsiz >> 16,
+            // The packet link leaves room in the non-periodic request queue.
+            GNPTXSTS => 4 << 16 | self.tx_fifo_space(0) as u32,
             GSNPSID => self.cfg.gsnpsid,
             0x044..=0x050 => self.cfg.ghwcfg[((off - GHWCFG1) / 4) as usize],
             GDFIFOCFG => self.gdfifocfg,
@@ -649,6 +767,7 @@ impl Device for Dwc2 {
             DIEPEMPMSK => self.diepempmsk,
             DEACHINT => 0,
             PCGCCTL => self.pcgcctl,
+            DFIFO0..=S3_DFIFO_LAST if self.slave_mode() => self.fifo.as_mut().map_or(0, |f| f.pop_rx_data()),
             _ => self.ram.read(off),
         }
     }
@@ -676,7 +795,10 @@ impl Device for Dwc2 {
         match off {
             GOTGCTL => { self.gotgctl = v & gotgctl::RW; self.notify_pullup(); }
             GOTGINT => self.gotgint &= !v,
-            GAHBCFG => self.gahbcfg = v & 0x01e0_01bf,
+            GAHBCFG => {
+                self.gahbcfg = v & 0x01e0_01bf;
+                if !self.slave_mode() { self.fifo = None; }
+            }
             GUSBCFG => { self.gusbcfg = v; self.notify_pullup(); }
             GRSTCTL => self.write_grstctl(v),
             GINTSTS => { self.gintsts &= !(v & gint::W1C); if v & gint::SOF != 0 { self.sof_ack = self.now; } }
@@ -693,6 +815,7 @@ impl Device for Dwc2 {
             DAINTMSK => self.daintmsk = v,
             DIEPEMPMSK => self.diepempmsk = v & 0xffff,
             PCGCCTL => self.pcgcctl = v,
+            DFIFO0..=S3_DFIFO_LAST if self.slave_mode() => self.write_fifo(((off - DFIFO0) / DFIFO_STRIDE) as usize, v),
             _ => self.ram.write(off, v),
         }
         WriteEffect::NONE

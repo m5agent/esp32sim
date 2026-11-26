@@ -164,3 +164,30 @@ fn the_dma_reaches_internal_sram_only() {
     assert_ne!(b.page_ver[vbase + page], before);
     assert_eq!(b.read32(0x3FC9_0000).unwrap(), 0x0403_0201);
 }
+
+#[test]
+fn usb_slave_fifo_windows_route_words_and_update_the_irq() {
+    use esp_periph::usb_otg::{epctl, gint, reg, GAHBCFG_DMAEN, GAHBCFG_GINT, PKTCNT_SHIFT};
+
+    let mut b = bus();
+    let diep1 = USB_OTG + reg::DIEP0 + reg::EP_STRIDE;
+    let fifo1 = USB_OTG + reg::DFIFO0 + reg::DFIFO_STRIDE;
+    let irq = |b: &SocBus| b.periph.misc.optional_sources[1] & (1 << (crate::periph::SRC_USB_OTG % 32)) != 0;
+    b.write32(USB_OTG + reg::GAHBCFG, GAHBCFG_GINT | 1 << 7).unwrap();
+    b.write32(USB_OTG + reg::GINTMSK, gint::IEPINT).unwrap();
+    b.write32(USB_OTG + reg::DIEPTXF1, 16 << 16 | 224).unwrap();
+    b.write32(USB_OTG + reg::DAINTMSK, 1 << 1).unwrap();
+    b.write32(diep1 + reg::EPTSIZ, 4 | 1 << PKTCNT_SHIFT).unwrap();
+    b.write32(diep1 + reg::EPCTL, 64 | 1 << 22 | epctl::EPENA | epctl::USBAEP).unwrap();
+    b.write32(USB_OTG + reg::DIEPEMPMSK, 1 << 1).unwrap();
+    assert!(irq(&b));
+    b.write32(fifo1 + 4, 0x0102_0304).unwrap();
+    assert_eq!(b.read32(diep1 + reg::DTXFSTS).unwrap(), 15);
+    assert_eq!(b.read32(diep1 + reg::EPTSIZ).unwrap(), 1 << PKTCNT_SHIFT);
+    assert!(!irq(&b));
+
+    b.write32(USB_OTG + reg::GAHBCFG, GAHBCFG_DMAEN).unwrap();
+    b.write32(fifo1 + 4, 0x0a0b_0c0d).unwrap();
+    assert_eq!(b.read32(fifo1 + 4).unwrap(), 0x0a0b_0c0d);
+    assert_eq!(b.read32(diep1 + reg::DTXFSTS).unwrap(), 16);
+}

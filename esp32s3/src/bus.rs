@@ -511,6 +511,14 @@ impl SocBus {
         }
         let a = addr & !3;
         if a >> 12 == 0x60028 { return self.sdmmc_read(addr); }
+        // Popping a receive status can lower RXFLVL or raise a completion interrupt.
+        if a == 0x6008_0020 && self.periph.usb_otg.slave_mode() {
+            let before = self.periph.usb_otg.irq();
+            let v = self.periph.read32(addr);
+            esp_periph::Dispatch::refresh_optional(&mut self.periph, crate::periph::USB_OTG_BLOCK);
+            self.irq_dirty |= before != self.periph.usb_otg.irq();
+            return v;
+        }
         let Some(port) = UART_FIFOS.iter().position(|&f| f == a) else { return self.periph.read32(addr) };
         // RXFIFO_FULL follows the FIFO level (`Uart::read`): the mask ROM's shared UART handler reads one FIFO and never
         // clears the interrupt, so a falling level must reach the CPU.

@@ -626,3 +626,107 @@ fn an_injected_vbus_loss_ends_a_transfer_in_flight() {
     assert_ne!(b.rd(reg::GOTGINT) & GOTGINT_SEDET, 0, "session end");
     assert_eq!(b.rd(reg::GOTGCTL) & gotgctl::BSESVLD, 0);
 }
+
+#[test]
+fn slave_setup_and_out_status_pop_drive_the_endpoint_interrupts() {
+    let mut b = Bench::with(Dwc2Config::esp32s3_fs(HZ));
+    b.wr(reg::GAHBCFG, GAHBCFG_GINT);
+    b.wr(reg::GINTMSK, gint::RXFLVL | gint::OEPINT);
+    b.wr(reg::DAINTMSK, 3 << 16);
+    b.wr(reg::DOEPMSK, epint::SETUP | epint::XFRC);
+
+    let setup = [0x80, 6, 0, 1, 0, 0, 64, 0];
+    b.d.setup(&mut b.mem, setup); // EP0 takes SETUP even with EPENA and DMAEN clear.
+    let setup_status = 6 << 17 | 8 << 4;
+    assert!(b.d.irq());
+    assert_eq!(b.rd(reg::GRXSTSR), setup_status);
+    assert_eq!(b.rd(reg::GRXSTSP), setup_status);
+    assert_eq!(b.rd(reg::DFIFO0), 0x0100_0680);
+    assert_eq!(b.rd(reg::DFIFO0), 0x0040_0000);
+    assert_eq!(b.rd(out_reg(0, reg::EPINT)), 0);
+    assert_eq!(b.rd(reg::GRXSTSP), 4 << 17);
+    assert_eq!(b.rd(reg::GINTSTS) & (gint::RXFLVL | gint::OEPINT), gint::OEPINT);
+    assert_eq!(b.rd(out_reg(0, reg::EPINT)), epint::SETUP);
+    b.wr(out_reg(0, reg::EPINT), epint::SETUP);
+    assert!(!b.d.irq());
+
+    b.wr(reg::GRXFSIZ, 2);
+    b.wr(out_reg(1, reg::EPTSIZ), 16 | 2 << PKTCNT_SHIFT);
+    b.wr(out_reg(1, reg::EPCTL), 8 | epctl::USBAEP | epctl::EPENA | epctl::CNAK | epctl::SD1PID);
+    assert_eq!(b.d.token_out(&mut b.mem, 1, true, &[1, 2, 3]), Handshake::Nak);
+    assert_eq!(b.rd(out_reg(1, reg::EPTSIZ)), 16 | 2 << PKTCNT_SHIFT);
+    b.wr(reg::GRXFSIZ, 3);
+    assert_eq!(b.d.token_out(&mut b.mem, 1, true, &[1, 2, 3]), Handshake::Ack);
+    assert_eq!(b.rd(out_reg(1, reg::EPTSIZ)), 13 | 1 << PKTCNT_SHIFT);
+    assert_eq!(b.rd(reg::GRXSTSP), 2 << 17 | 2 << 15 | 3 << 4 | 1);
+    assert_eq!(b.rd(reg::DFIFO0), 0x0003_0201);
+    assert_eq!(b.rd(out_reg(1, reg::EPINT)), 0);
+    assert_eq!(b.rd(reg::GRXSTSP), 3 << 17 | 1);
+    assert_eq!(b.rd(out_reg(1, reg::EPINT)), epint::XFRC);
+    assert_eq!(b.rd(reg::GINTSTS) & gint::RXFLVL, 0);
+    assert_eq!(b.d.stats.dma_faults, 0);
+}
+
+#[test]
+fn slave_tx_fifo_refills_between_packets_and_handles_padding_and_zlp() {
+    let mut b = Bench::with(Dwc2Config::esp32s3_fs(HZ));
+    b.wr(reg::GAHBCFG, GAHBCFG_GINT | fifo::EMPTY_LEVEL);
+    b.wr(reg::GINTMSK, gint::IEPINT);
+    b.wr(reg::DAINTMSK, 1 << 1);
+    b.wr(reg::DIEPMSK, epint::XFRC);
+    b.wr(reg::DIEPTXF1, 2 << 16 | 64);
+    let tx = reg::DFIFO0 + reg::DFIFO_STRIDE;
+    // Two packets, with a non-word-aligned max packet size and a short final packet.
+    b.wr(in_reg(1, reg::EPTSIZ), 8 | 2 << PKTCNT_SHIFT);
+    b.wr(in_reg(1, reg::EPCTL), 5 | 1 << 22 | epctl::USBAEP | epctl::EPENA | epctl::CNAK);
+    b.wr(reg::DIEPEMPMSK, 1 << 1);
+    assert!(b.d.irq());
+    b.wr(tx, 0x0403_0201);
+    assert_eq!(b.d.token_in(&mut b.mem, 1, 5), InReply::Nak);
+    assert!(!b.d.irq());
+    b.wr(reg::GAHBCFG, GAHBCFG_GINT); // Half-empty threshold.
+    assert!(b.d.irq());
+    b.wr(tx + 4, 0xdead_be05);
+    assert_eq!(b.rd(in_reg(1, reg::DTXFSTS)), 0);
+    assert_eq!(b.rd(in_reg(1, reg::EPTSIZ)), 3 | 2 << PKTCNT_SHIFT);
+    assert!(!b.d.irq());
+    assert_eq!(b.d.token_in(&mut b.mem, 1, 5), InReply::Data(vec![1, 2, 3, 4, 5], false));
+    assert_eq!(b.rd(in_reg(1, reg::DTXFSTS)), 2);
+    assert!(b.d.irq());
+    b.wr(tx, 0xee08_0706);
+    assert_eq!(b.rd(in_reg(1, reg::EPTSIZ)), 1 << PKTCNT_SHIFT);
+    b.wr(reg::DIEPEMPMSK, 0);
+    assert!(!b.d.irq());
+    assert_eq!(b.d.token_in(&mut b.mem, 1, 5), InReply::Data(vec![6, 7, 8], true));
+    assert!(b.d.irq());
+    b.wr(in_reg(1, reg::EPINT), epint::XFRC);
+    b.wr(in_reg(1, reg::EPTSIZ), 1 << PKTCNT_SHIFT);
+    b.wr(in_reg(1, reg::EPCTL), 5 | 1 << 22 | epctl::USBAEP | epctl::EPENA | epctl::CNAK);
+    assert_eq!(b.d.token_in(&mut b.mem, 1, 5), InReply::Data(vec![], false));
+    assert_eq!(b.d.stats.dma_faults, 0);
+}
+
+#[test]
+fn slave_fifo_flush_and_global_nak_use_level_interrupts() {
+    let mut b = Bench::with(Dwc2Config::esp32s3_fs(HZ));
+    b.wr(reg::GAHBCFG, GAHBCFG_GINT | fifo::EMPTY_LEVEL);
+    b.wr(reg::GNPTXFSIZ, 16 << 16 | 240);
+    b.wr(reg::GINTMSK, gint::NPTXFE | gint::RXFLVL);
+    assert_eq!(b.rd(reg::GINTSTS) & gint::NPTXFE, gint::NPTXFE);
+    b.wr(in_reg(0, reg::EPTSIZ), 4 | 1 << PKTCNT_SHIFT);
+    b.wr(in_reg(0, reg::EPCTL), epctl::EPENA | epctl::CNAK);
+    b.wr(reg::DFIFO0, 0x1234_5678);
+    assert_eq!(b.rd(reg::GNPTXSTS) & 0xffff, 15);
+    assert_eq!(b.rd(reg::GINTSTS) & gint::NPTXFE, 0);
+    b.wr(reg::GRSTCTL, grstctl::TXFFLSH);
+    assert_eq!(b.rd(reg::GNPTXSTS) & 0xffff, 16);
+    assert_eq!(b.rd(reg::GINTSTS) & gint::NPTXFE, gint::NPTXFE);
+
+    b.wr(reg::DCTL, dctl::SGONAK);
+    assert_eq!(b.rd(reg::GRXSTSR), 1 << 17);
+    b.d.setup(&mut b.mem, [0xaa; 8]);
+    b.wr(reg::GRSTCTL, grstctl::RXFFLSH);
+    assert_eq!(b.rd(reg::GRXSTSP), 0);
+    assert_eq!(b.rd(reg::DFIFO0), 0);
+    assert_eq!(b.rd(reg::GINTSTS) & gint::RXFLVL, 0);
+}
