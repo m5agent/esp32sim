@@ -38,6 +38,11 @@ impl PinRoutes<'_> {
         let enabled = (self.gpio.enable & (1u64 << pin) != 0) ^ (route & (signal * 8) != 0);
         enabled.then(|| (self.gpio.out & (1u64 << pin) != 0) ^ (route & (signal * 2) != 0))
     }
+    /// Digital drive after open-drain release. GPIO_PINn.PAD_DRIVER is bit 2
+    /// (ESP-IDF v5.4, components/soc/esp32s3/register/soc/gpio_reg.h).
+    pub fn software_pad_output(&self, pin: u8) -> Option<bool> {
+        self.software_output(pin).filter(|&high| !high || self.gpio.pin[usize::from(pin)] & (1 << 2) == 0)
+    }
     pub fn valid_pin(&self, pin: usize) -> bool { pin < 64 && self.chip.valid & (1u64 << pin) != 0 }
     fn mux(&self, pin: usize) -> u32 { self.mux.read(4 + 4 * pin as u32) }
     pub fn function(&self, pin: usize, function: u32) -> bool { self.valid_pin(pin) && self.mux(pin) & (7 << 12) == function << 12 }
