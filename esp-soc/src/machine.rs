@@ -567,11 +567,11 @@ impl<S: Soc> Machine<S> {
         if self.bus.board_ref().uses_gpio_waveform() {
             if self.has_timing_model() { return Stop::CostModelLifecycle { kind: LifecycleKind::Attach, reason: GPIO_WAVEFORM_TIMING_ERROR.into() }; }
             let quantum = std::mem::replace(&mut self.quantum, 1);
-            let stop = self.run_unmodeled::<false>(max_insns);
+            let stop = self.run_unmodeled_for_board::<false>(max_insns);
             self.quantum = quantum;
             return stop;
         }
-        if self.cost.is_some() { self.run_modeled(max_insns) } else if self.approximate_jit_frontiers { self.run_approximate_jit_frontiers(max_insns) } else if self.approximate_jit_timing.is_some() { self.run_unmodeled::<true>(max_insns) } else { self.run_unmodeled::<false>(max_insns) }
+        if self.cost.is_some() { self.run_modeled(max_insns) } else if self.approximate_jit_frontiers { self.run_approximate_jit_frontiers(max_insns) } else if self.approximate_jit_timing.is_some() { self.run_unmodeled_for_board::<true>(max_insns) } else { self.run_unmodeled_for_board::<false>(max_insns) }
     }
 
     /// The complete unmodelled core-0 quantum a browser-side straight-line block may retire at
@@ -591,6 +591,7 @@ impl<S: Soc> Machine<S> {
             || !self.fn_probes.is_empty()
             || self.script.pos < self.script.events.len()
             || self.bus.sw_reset()
+            || self.bus.soc_power_off()
             || self.bus.block_break()
             || self.cores[0].waiting()
             || self.cores[0].irq_pending()
@@ -612,7 +613,13 @@ impl<S: Soc> Machine<S> {
         None
     }
 
-    fn run_unmodeled<const APPROXIMATE: bool>(&mut self, max_insns: u64) -> Stop {
+    fn run_unmodeled_for_board<const APPROXIMATE: bool>(&mut self, max_insns: u64) -> Stop {
+        // Instantiate the power checks only for a board that can cut the SoC supply.
+        if self.bus.has_board_power() { self.run_unmodeled::<APPROXIMATE, true>(max_insns) }
+        else { self.run_unmodeled::<APPROXIMATE, false>(max_insns) }
+    }
+
+    fn run_unmodeled<const APPROXIMATE: bool, const BOARD_POWER: bool>(&mut self, max_insns: u64) -> Stop {
         assert!(self.quantum != 0, "scheduling quantum must be nonzero");
         let (cpi, max_quantum) = if APPROXIMATE { self.approximate_jit_timing.unwrap() } else { (1, self.quantum as u32) };
         self.stub_bloom = self.stubs.keys().chain(S::function_hooks(&self.bus)).fold(0, |m, &pc| m | pc_bit(pc));
@@ -624,22 +631,30 @@ impl<S: Soc> Machine<S> {
         // Per-instruction observers need the slow hooks; only exact-PC trap observers use bounded fragments.
         let blocks = !self.probes.contains(Wants::INSN);
         let slow_path = self.probes.contains(Wants::NO_IDLE_SKIP);
-        let can_defer = !APPROXIMATE && self.vq_max > 1 && self.bus.can_defer();
+        let can_defer = !BOARD_POWER && !APPROXIMATE && self.vq_max > 1 && self.bus.can_defer();
         // EX177: round batching needs the same deferral guard, several cores and a loop whose
         // boundaries do nothing a bound cannot see. Real-time pacing and observers keep it off.
-        let can_batch = !APPROXIMATE && self.bb_max > 1 && S::CORES > 1 && self.bus.can_defer()
+        let can_batch = !BOARD_POWER && !APPROXIMATE && self.bb_max > 1 && S::CORES > 1 && self.bus.can_defer()
             && blocks && !slow_path && self.probes.0 == 0 && !self.rt.enabled;
         if self.web.is_some() { self.ws.push_interval = (S::CPU_HZ / self.bus.board_ref().display_push_hz().max(1)).max(1); }
         let trace = self.has_observer("trace");
         let mut n = 0u64;
         let mut on = [true; 4];
         let mut idle = [true; 4];
-        loop {
+        'rounds: loop {
             if n >= max_insns { self.drain_console(); return Stop::MaxInsns; }
             self.apply_script_events();
             self.refresh_irq();
             if self.bus.sw_reset() { self.drain_console(); return Stop::SwReset; }
             if self.bus.cycles() >= self.max_cycles { self.drain_console(); return Stop::Halted; }
+            if BOARD_POWER && self.bus.soc_power_off() {
+                let chunk = self.idle_budget((max_insns - n).min(self.max_cycles - self.bus.cycles()), &[]);
+                n += chunk;
+                self.run_steps += chunk;
+                if self.after_round(chunk) { self.drain_console(); return Stop::Halted; }
+                if self.bus.sw_reset() { self.drain_console(); return Stop::SwReset; }
+                continue;
+            }
             for (i, state) in on.iter_mut().enumerate().take(S::CORES).skip(1) {
                 *state = match S::core_state(&self.bus, i) {
                     CoreState::Reset => { self.core_held[i] = true; false }
@@ -774,9 +789,14 @@ impl<S: Soc> Machine<S> {
                         }
                         // a reset takes effect at the instruction that requested it: the core's
                         // run already stopped there (the register write broke the block)
-                        if self.bus.sw_reset() {
-                            if i == 0 { self.run_steps += u64::from(budget - left); }
-                            return self.finish_reset(round_elapsed.max((quantum - u64::from(left)) * u64::from(cpi) + stalls[i]));
+                        let reset = self.bus.sw_reset();
+                        if reset || (BOARD_POWER && self.bus.soc_power_off()) {
+                            let used = u64::from(budget - left);
+                            if i == 0 { self.run_steps += used; n += used; }
+                            let cycles = round_elapsed.max((quantum - u64::from(left)) * u64::from(cpi) + stalls[i]);
+                            if reset { return self.finish_reset(cycles); }
+                            if self.after_round(cycles) { self.drain_console(); return Stop::Halted; }
+                            continue 'rounds;
                         }
                     }
                     if i == 0 { self.run_steps += u64::from(budget); }
@@ -793,9 +813,13 @@ impl<S: Soc> Machine<S> {
                             self.cores[i].advance_cycles(top_up.saturating_add(penalty));
                             stalls[i] += u64::from(penalty);
                         }
-                        if self.bus.sw_reset() {
-                            if i == 0 { self.run_steps += used; }
-                            return self.finish_reset(round_elapsed.max(used * u64::from(cpi) + stalls[i]));
+                        let reset = self.bus.sw_reset();
+                        if reset || (BOARD_POWER && self.bus.soc_power_off()) {
+                            if i == 0 { self.run_steps += used; n += used; }
+                            let cycles = round_elapsed.max(used * u64::from(cpi) + stalls[i]);
+                            if reset { return self.finish_reset(cycles); }
+                            if self.after_round(cycles) { self.drain_console(); return Stop::Halted; }
+                            continue 'rounds;
                         }
                     }
                     if i == 0 { self.run_steps += quantum; }
@@ -1005,6 +1029,12 @@ impl<S: Soc> Machine<S> {
             if self.apply_script_events() { self.drain_console(); return RunUntil::Stop(Stop::Halted); }
             self.refresh_irq();
             if self.bus.sw_reset() { self.drain_console(); return RunUntil::Stop(Stop::SwReset); }
+            if self.bus.soc_power_off() {
+                let chunk = self.idle_budget(target - now, &[]);
+                if self.after_round(chunk) { self.drain_console(); return RunUntil::Stop(Stop::Halted); }
+                if self.bus.sw_reset() { self.drain_console(); return RunUntil::Stop(Stop::SwReset); }
+                continue;
+            }
             if let Some(stop) = self.observe_idle_pcs(&[true]) { self.drain_console(); return RunUntil::Stop(stop); }
             let left = target - now;
             let core = &self.cores[0];
@@ -1026,6 +1056,7 @@ impl<S: Soc> Machine<S> {
                     budget -= used.min(budget);
                     if s.is_some() { stop = s; break; }
                     if self.bus.sw_reset() { return RunUntil::Stop(self.finish_reset(used_total)); }
+                    if self.bus.soc_power_off() { break; }
                     if self.bus.take_host_event() { yielded = true; break; }
                 }
                 let script_stopped = self.after_round(used_total);

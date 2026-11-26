@@ -190,6 +190,11 @@ pub trait SocBus: Bus {
     /// Chip reset: re-create the digital peripherals, keep what survives on silicon. Returns the cause.
     fn reboot(&mut self, mac: [u8; 6]) -> u32;
     fn sw_reset(&self) -> bool;
+    /// Opt in to scheduling an unpowered interval between board power transitions.
+    fn has_board_power(&self) -> bool { false }
+    /// Both cores are held while an external PMIC has removed the SoC supply.
+    #[inline]
+    fn soc_power_off(&self) -> bool { false }
     /// The board's reset button: the chip resets with this cause at the next scheduling round,
     /// through the same path as a reset the firmware asked for.
     fn request_reset(&mut self, cause: u32);

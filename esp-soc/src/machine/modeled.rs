@@ -142,7 +142,7 @@ impl<S: Soc> Machine<S> {
                 retired += slots;
                 spent += u64::from(slots) * u64::from(cpi) + u64::from(extra);
                 let penalty = self.bus.take_timing_penalty();
-                if penalty != 0 || spent >= cycles || self.cores[core].waiting() || deferred { break penalty; }
+                if penalty != 0 || spent >= cycles || self.cores[core].waiting() || deferred || self.bus.soc_power_off() { break penalty; }
             };
             if solo { self.bus.set_defer(false); }
             self.cores[core].advance_cycles(penalty.saturating_add(extras));
@@ -210,6 +210,7 @@ impl<S: Soc> Machine<S> {
     }
 
     fn refresh_modeled_core_states(&mut self, on: &mut [bool; 4], trace: bool) -> Option<Stop> {
+        if self.bus.soc_power_off() { on.fill(false); return None; }
         for (i, state) in on.iter_mut().enumerate().take(S::CORES) {
             *state = match S::core_state(&self.bus, i) {
                 CoreState::Reset => { self.core_held[i] = true; false }

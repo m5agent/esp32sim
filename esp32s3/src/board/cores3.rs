@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use esp_periph::i2c::{I2cDevice, Reg8Device};
 use esp_soc::board::{BoardEdge, BoardModel, VirtualCycle};
-use esp_soc::devices::{Bmi270, DcsPanel, Ft5x06, Ft5x06Points, FT5X06_ADDRESS};
+use esp_soc::devices::{Axp2101, Bm8563, Bmi270, DcsPanel, Ft5x06, Ft5x06Points, AXP2101_ADDRESS, BM8563_ADDRESS, FT5X06_ADDRESS};
 use esp_soc::devices::imu_motion::ImuMotion;
 
 pub const PIN_CORES3_I2C_SDA: u8 = 12;
@@ -114,6 +114,9 @@ pub struct Cores3Hw {
     pub panel: DcsPanel,
     pub aw9523: Aw9523,
     pub touch: Ft5x06,
+    pub pmic: Axp2101,
+    pub rtc: Bm8563,
+    backlight: bool,
     pub points: Ft5x06Points,
     pub others: Vec<(u8, Box<dyn I2cDevice>)>,
     lcd_in_reset: bool,
@@ -122,6 +125,8 @@ pub struct Cores3Hw {
 
 impl Cores3Hw {
     fn sync(&mut self) {
+        let backlight = self.pmic.backlight_on();
+        if backlight != self.backlight { self.panel_version += 1; self.backlight = backlight; }
         let in_reset = !self.aw9523.lcd_reset_released();
         if in_reset && !self.lcd_in_reset { self.panel.reset(); self.panel_version += 1; }
         self.lcd_in_reset = in_reset;
@@ -133,6 +138,8 @@ impl Cores3Hw {
         match address {
             Aw9523::ADDRESS => Some(&mut self.aw9523),
             FT5X06_ADDRESS => Some(&mut self.touch),
+            AXP2101_ADDRESS => Some(&mut self.pmic),
+            BM8563_ADDRESS => Some(&mut self.rtc),
             a => self.others.iter_mut().find(|(o, _)| *o == a).map(|(_, d)| &mut **d as &mut dyn I2cDevice),
         }
     }
@@ -178,6 +185,7 @@ pub struct Cores3 {
     sd_cs_low: bool,
     cycle: VirtualCycle,
     int_level: bool,
+    powered: bool,
     edges: Vec<BoardEdge>,
     pub gpio_events: u64,
     pub spi_bytes: u64,
@@ -190,10 +198,7 @@ impl Cores3 {
         let imu: Arc<ImuMotion> = Default::default();
         let points: Ft5x06Points = Default::default();
         let others: Vec<(u8, Box<dyn I2cDevice>)> = vec![
-            // AXP2101 chip ID 0x4A at 0x03, as M5GFX's CoreS3 detector requires.
-            (0x34, Box::new(Reg8Device::new("axp2101", &[(0x03, 0x4a), (0x00, 0x28)]))),
             (0x69, Box::new(Bmi270::new(imu.clone(), crate::periph::CPU_HZ))),
-            (0x51, Box::new(Reg8Device::new("bm8563", &[]))),
             (0x23, Box::new(Reg8Device::new("ltr553", &[(0x86, 0x92), (0x87, 0x05)]))),
             (0x36, Box::new(Reg8Device::new("aw88298", &[]))),
             (0x40, Box::new(Reg8Device::new("es7210", &[(0x3d, 0x72), (0x3e, 0x06)]))),
@@ -201,15 +206,16 @@ impl Cores3 {
         ];
         let hw = Cores3Hw {
             panel: DcsPanel::new(CORES3_LCD_W, CORES3_LCD_H), aw9523: Aw9523::new(), touch: Ft5x06::new(points.clone()),
+            pmic: Axp2101::new(crate::periph::CPU_HZ), rtc: Bm8563::new(crate::periph::CPU_HZ), backlight: false,
             points, others, lcd_in_reset: true, panel_version: 0,
         };
-        Cores3 { hw: Rc::new(RefCell::new(hw)), soft: SoftI2c { scl: true, sda: true, ..Default::default() }, sda_release: false, imu, lcd_cs_low: false, sd_cs_low: false, cycle: 0, int_level: true,
+        Cores3 { hw: Rc::new(RefCell::new(hw)), soft: SoftI2c { scl: true, sda: true, ..Default::default() }, sda_release: false, imu, lcd_cs_low: false, sd_cs_low: false, cycle: 0, int_level: true, powered: true,
                  edges: Vec::new(), gpio_events: 0, spi_bytes: 0 }
     }
 
     fn addresses(&self) -> Vec<u8> {
         let hw = self.hw.borrow_mut();
-        let mut v = vec![Aw9523::ADDRESS, FT5X06_ADDRESS];
+        let mut v = vec![Aw9523::ADDRESS, FT5X06_ADDRESS, AXP2101_ADDRESS, BM8563_ADDRESS];
         v.extend(hw.others.iter().map(|(a, _)| *a));
         v
     }
@@ -284,7 +290,7 @@ impl Cores3 {
     /// panel configuration has `invert = true`), black while asleep, off or in reset.
     pub fn visible(hw: &Cores3Hw) -> Vec<u16> {
         let p = &hw.panel;
-        let blank = !p.on || p.sleeping || hw.lcd_in_reset;
+        let blank = !p.on || p.sleeping || hw.lcd_in_reset || !hw.pmic.backlight_on();
         let exchange = p.madctl & 0x08 == 0;
         p.gram.iter().map(|&px| {
             if blank { return 0; }
@@ -363,17 +369,62 @@ impl BoardModel for Cores3 {
         }
         self.update_int();
     }
+    fn soc_powered(&self) -> Option<bool> { Some(self.hw.borrow().pmic.powered()) }
+    fn next_deadline(&self) -> Option<VirtualCycle> {
+        let hw = self.hw.borrow();
+        hw.rtc.next_deadline().into_iter().chain(hw.pmic.next_deadline()).min()
+    }
     fn advance_to(&mut self, cycle: VirtualCycle) {
-        if cycle > self.cycle { self.cycle = cycle; }
+        self.cycle = self.cycle.max(cycle);
+        let mut hw = self.hw.borrow_mut();
+        hw.rtc.advance_to(self.cycle);
+        hw.pmic.advance_to(self.cycle);
+        // CoreS3 schematic v1.0: BM8563 INT pulls down the AXP_WAKEUP net at AXP2101 IRQ.
+        let rtc_irq = hw.rtc.irq_low();
+        hw.pmic.set_irq_input(rtc_irq);
+        let powered = hw.pmic.powered();
+        if self.powered && !powered {
+            hw.aw9523.reset();
+            hw.panel.reset();
+            hw.panel.gram.fill(0);
+            self.soft = SoftI2c { scl: true, sda: true, transactions: self.soft.transactions, ..Default::default() };
+            self.sda_release = true;
+            hw.panel_version += 1;
+            hw.sync();
+        }
+        self.powered = powered;
+        drop(hw);
         self.update_int();
+    }
+    fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "pwrkey" | "battery") }
+    fn board_command(&mut self, cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
+        self.advance_to(cycle);
+        let mut hw = self.hw.borrow_mut();
+        let flag = |s: &str| match s { "0" => Some(false), "1" => Some(true), _ => None };
+        match (verb, args) {
+            ("pwrkey", [ms]) => ms.parse().is_ok_and(|ms| hw.pmic.press_key(ms)),
+            ("battery", [mv, percent, charging] | [mv, percent, charging, _]) => {
+                let (Ok(mv), Ok(percent), Some(charging)) = (mv.parse(), percent.parse(), flag(charging)) else { return false; };
+                if mv > 0x3fff || percent > 100 { return false; }
+                if let Some(vbus) = args.get(3) {
+                    let Some(vbus) = flag(vbus) else { return false; };
+                    hw.pmic.set_vbus_mv(if vbus { 5000 } else { 0 });
+                }
+                hw.pmic.set_battery(mv, percent, charging);
+                true
+            }
+            _ => false,
+        }
     }
     fn take_edges(&mut self) -> Vec<BoardEdge> { std::mem::take(&mut self.edges) }
     fn named_pin(&self, _name: &str) -> Option<u8> { None }
     fn report(&self) -> String {
         let hw = self.hw.borrow_mut();
         let p = &hw.panel;
-        format!("[emu] cores3: soft-i2c {} transactions; {} RAMWR, {} pixels, madctl={:#x} colmod={:#x} inverted={} on={} sleeping={} lcd_reset={} bbox={:?}; spi {} bytes; aw9523 out={:#06x} dir={:#06x}; gpio events {}",
+        format!("[emu] cores3: soft-i2c {} transactions; {} RAMWR, {} pixels, madctl={:#x} colmod={:#x} inverted={} on={} sleeping={} lcd_reset={} bbox={:?}; spi {} bytes; aw9523 out={:#06x} dir={:#06x}; gpio events {}\n[emu] cores3 power: powered={} backlight_mv={} off_cause={:#04x} off_cycle={:?} on_cause={:#04x} on_cycle={:?}; rtc control2={:#04x} timer_expiry_cycle={:?}",
                 self.soft.transactions, p.frames, p.pixels_written, p.madctl, p.colmod, p.inverted, p.on, p.sleeping, hw.lcd_in_reset, p.bbox(), self.spi_bytes,
-                hw.aw9523.outputs(), u16::from_le_bytes([hw.aw9523.regs[4], hw.aw9523.regs[5]]), self.gpio_events)
+                hw.aw9523.outputs(), u16::from_le_bytes([hw.aw9523.regs[4], hw.aw9523.regs[5]]), self.gpio_events,
+                hw.pmic.powered(), hw.pmic.backlight_mv(), hw.pmic.off_cause(), hw.pmic.last_off, hw.pmic.on_cause(), hw.pmic.last_on,
+                hw.rtc.control2(), hw.rtc.last_timer_expiry)
     }
 }
