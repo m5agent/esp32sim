@@ -437,12 +437,13 @@ fn run_cosim_on<R: esp32p4::Revision>(o: &Opts, spec: &cosim::CoprocSpec) {
     let end_ns = if p4.max_cycles == u64::MAX { u64::MAX } else { (p4.max_cycles as u128 * 1_000_000_000 / esp32p4::periph::CPU_HZ as u128) as u64 };
     p4.max_cycles = u64::MAX;
     let c6 = setup_coproc(o, spec);
+    let (pins, default_en) = esp32p4::board::hosted_wiring(p4.bus.board.name());
     let cfg = cosim::Config {
-        slice_ns: spec.slice_ns.unwrap_or(cosim::DEFAULT_SLICE_NS), en_pin: spec.en_pin.unwrap_or(cosim::DEFAULT_EN_PIN), en_inverted: spec.en_inverted,
+        slice_ns: spec.slice_ns.unwrap_or(cosim::DEFAULT_SLICE_NS), en_pin: spec.en_pin.unwrap_or(default_en), en_inverted: spec.en_inverted,
         reboot_p4: !o.no_reboot && boot == "rom", reboot_c6: !o.no_reboot, p4_console: p4.console.mask, c6_console: 2,
     };
-    eprintln!("[cosim] ESP32-C6 on SDIO slot 1 (CLK 18, CMD 19, D0-D3 14-17), EN on GPIO {}{}, slices of {} µs",
-              if cfg.en_inverted { "!" } else { "" }, cfg.en_pin, cfg.slice_ns as f64 / 1000.0);
+    eprintln!("[cosim] ESP32-C6 on SDIO slot 1 (CLK {}, CMD {}, D0-D3 {:?}), EN on GPIO {}{}, slices of {} µs",
+              pins.clk, pins.cmd, pins.data, if cfg.en_inverted { "!" } else { "" }, cfg.en_pin, cfg.slice_ns as f64 / 1000.0);
     let mut c6_file = spec.console.as_ref().map(|p| std::fs::File::create(p).unwrap_or_else(|e| usage_error(&format!("--coproc console={p}: {e}"))));
     let prefix = o.console_prefix;
     let mut cs = cosim::CoSim::new(p4, c6, cfg);

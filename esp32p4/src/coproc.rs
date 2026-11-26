@@ -472,7 +472,8 @@ impl<R: crate::Revision> CoSim<R> {
         let mut coproc = Coproc::new(c6);
         (coproc.reboot, coproc.console_mask) = (cfg.reboot_c6, cfg.c6_console);
         let c6 = Rc::new(RefCell::new(coproc));
-        p4.bus.attach_sdio(crate::periph::SdPins::HOSTED, Box::new(SdioLink(c6.clone())));
+        let (pins, _) = crate::board::hosted_wiring(p4.bus.board.name());
+        p4.bus.attach_sdio(pins, Box::new(SdioLink(c6.clone())));
         let mut s = CoSim { p4, c6, cfg, now_ns: 0, en: true, p4_console: Vec::new(), lines: Vec::new(), summary: Summary::default() };
         s.en = s.en_level();
         s

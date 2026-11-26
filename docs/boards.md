@@ -269,7 +269,7 @@ page demo `p4-lcd35-synth`. It wants PSRAM: `--psram-mb 32`, as the board has (t
 is none; the page's manifest sets 32).
 ## M5Stack Tab5 (ESP32-P4)
 
-Select `--board m5stack-tab5` for the original ILI9881C/GT911 pair or
+Run `esp32sim-p4 --board m5stack-tab5` for the original ILI9881C/GT911 pair or
 `--board m5stack-tab5-st7123` for the ST7123 display and touch controller.
 The P4 launcher defaults to 16 MiB flash and 32 MiB PSRAM for either profile.
 
@@ -279,6 +279,7 @@ The P4 launcher defaults to 16 MiB flash and 32 MiB PSRAM for either profile.
 | Touch | GPIO 23 and I2C1. `touch X Y 1` presses and `touch X Y 0` releases in native panel coordinates. The ST7123 also accepts `contact ID X Y 0\|1` for each slot 0–4. GT911 currently exposes one contact. |
 | PI4IOE5V6408 pair | GPIO 31/32 software I²C and I2C1 share the expanders’ register state. |
 | Backlight | GPIO 22 LEDC PWM is sampled in the board report. Frame capture represents the panel's digital pixels. |
+| ESP32-C6 | `--coproc` connects SDIO slot 1 to CLK 12, CMD 13, D0–D3 11/10/9/8 and defaults EN to GPIO 15. Supply the matching ESP-Hosted firmware. |
 
 See [the bring-up inventory](tab5-bringup.md) for the remaining board and SoC
 paths, including DMA2D blits, USB host, and peripherals beyond display/touch.

@@ -22,6 +22,15 @@ pub fn make_board(name: &str) -> Option<Board> {
     }
 }
 
+/// SDIO co-processor pins on Tab5, from the M5Stack Tab5 Arduino Wi-Fi example.
+pub fn hosted_wiring(name: &str) -> (crate::periph::SdPins, u8) {
+    use crate::periph::SdPins;
+    match name {
+        "m5stack-tab5" | "m5stack-tab5-st7123" => (SdPins { clk: 12, cmd: 13, data: [11, 10, 9, 8] }, 15),
+        _ => (SdPins::HOSTED, crate::coproc::DEFAULT_EN_PIN),
+    }
+}
+
 pub const PIN_LCD_DC: u8 = 26;
 pub const PIN_LCD_RST: u8 = 27;
 pub const PIN_LCD_BL: u8 = 28;

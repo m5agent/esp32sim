@@ -191,8 +191,8 @@ pub unsafe extern "C" fn esp32sim_new(board: *const u8, board_len: usize, flash_
         match (p4_rev3, coproc) {
             (false, false) => MachineKind::P4(Box::new(p4_machine::<esp32p4::RevLt3>(flash_bytes, psram_bytes, p4_board))),
             (true, false) => MachineKind::P4Rev3(Box::new(p4_machine::<esp32p4::RevGe3>(flash_bytes, psram_bytes, p4_board))),
-            (false, true) => MachineKind::P4C6(Box::new(esp32p4::coproc::CoSim::new(p4_machine(flash_bytes, psram_bytes, p4_board), coproc_c6(), coproc_config()))),
-            (true, true) => MachineKind::P4Rev3C6(Box::new(esp32p4::coproc::CoSim::new(p4_machine(flash_bytes, psram_bytes, p4_board), coproc_c6(), coproc_config()))),
+            (false, true) => MachineKind::P4C6(Box::new(esp32p4::coproc::CoSim::new(p4_machine(flash_bytes, psram_bytes, p4_board), coproc_c6(), coproc_config(p4_name)))),
+            (true, true) => MachineKind::P4Rev3C6(Box::new(esp32p4::coproc::CoSim::new(p4_machine(flash_bytes, psram_bytes, p4_board), coproc_c6(), coproc_config(p4_name)))),
         }
     } else if s31 {
         // As the CLI's setup_s31: the board's NOR identity, PSRAM and eFuse (the Mosaico's, or a
@@ -258,7 +258,9 @@ fn coproc_c6() -> esp32c6::Machine {
 }
 
 /// The CLI's defaults: 10 µs slices, EN on GPIO 54, both chips rebooting, both on UART0.
-fn coproc_config() -> esp32p4::coproc::Config { esp32p4::coproc::Config::default() }
+fn coproc_config(board: &str) -> esp32p4::coproc::Config {
+    esp32p4::coproc::Config { en_pin: esp32p4::board::hosted_wiring(board).1, ..Default::default() }
+}
 
 /// The page is the one client: messages queue in a `WebServer` sink; the worker paces the run.
 fn prepare<S: Soc>(m: &mut Machine<S>) {
