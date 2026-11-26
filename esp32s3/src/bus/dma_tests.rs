@@ -603,3 +603,60 @@ fn crypto_descriptor_writeback_preserves_mmio_side_effects() {
     assert!(!bus.periph.gdma.out[0].running);
     assert_eq!(bus.periph.gdma.out[0].desc, 0);
 }
+
+#[test]
+fn cores3_i2s1_duplex_pcm_follows_codec_power_and_gpio_routes() {
+    for rx_master in [false, true] {
+        let mut bus = bus_with_out(4, 4, DESC);
+        bus.board = Box::new(crate::board::Cores3::new());
+        let mut devices = bus.board.i2c_devices();
+        let mut send = |address, bytes: &[u8]| {
+            let (_, _, d) = devices.iter_mut().find(|(port, a, _)| *port == 1 && *a == address).unwrap();
+            assert!(d.start(false));
+            for &byte in bytes { assert!(d.write(byte)); }
+            d.stop();
+        };
+        send(0x58, &[0x04, 0xfb]);
+        send(0x58, &[0x02, 0x04]);
+        send(0x36, &[0x04, 0x40, 0x40]);
+        send(0x36, &[0x05, 0x00, 0x08]);
+        send(0x36, &[0x0c, 0x10, 0x64]); // -6 dB
+        for (reg, val) in [(0, 0x41), (1, 0x14), (0x11, 0x60), (0x40, 0x42), (0x43, 0x1b), (0x44, 0x1b), (0x4b, 0)] {
+            send(0x40, &[reg, val]);
+        }
+
+        for pin in [0, 13, 14, 33, 34] { bus.periph.io_mux.write(4 + 4 * pin, (1 << 12) | (1 << 9)); }
+        let (bck, ws) = if rx_master { (31, 32) } else { (28, 29) };
+        for (pin, sig) in [(0, 21), (13, 30), (33, ws), (34, bck)] { bus.periph.gpio.func_out_sel[pin] = sig; }
+        bus.periph.gpio.func_in_sel[30] = 0x80 | 14;
+
+        arm_aes_input(&mut bus, 16, 0);
+        bus.periph.gdma.inp[0].peri_sel = 4;
+        bus.write32(INPUT, 10_000).unwrap();
+        let i = &mut bus.periph.i2s1;
+        let widths = (24 << 7) | (15 << 13) | (15 << 18);
+        let clock = (1 << 26) | (2 << 27) | 25; // PLL160 /25 /25 /32 = 8 kHz
+        i.write(0x2c, widths); i.write(0x28, widths);
+        i.write(0x54, (1 << 16) | 3); i.write(0x50, (1 << 16) | 3);
+        if rx_master { i.write(0x30, clock); } else { i.write(0x34, clock); }
+        i.write(0x24, (1 << 27) | 4 | if rx_master { 8 } else { 0 });
+        i.write(0x20, if rx_master { 4 } else { 12 });
+        i.rx_input().push(&[[1234, -2345], [7, 8], [9, 10]]);
+        let frame = crate::periph::CPU_HZ / 8000;
+        bus.dma_i2s_step(frame);
+        assert_eq!(bus.periph.i2s1.pcm, [5012], "amp applies -6 dB");
+        assert_eq!(bus.read32(OUTPUT).unwrap(), 0xf6d7_04d2, "both mic channels");
+
+        send(0x40, &[0x4b, 8]); // ADC2 powered down
+        send(0x58, &[0x02, 0]); // amplifier reset
+        bus.dma_i2s_step(frame);
+        assert_eq!(bus.periph.i2s1.pcm, [5012, 0]);
+        assert_eq!(bus.read32(OUTPUT + 4).unwrap(), 7, "ADC1 remains connected");
+        bus.periph.gpio.func_in_sel[30] = 0x80 | 15;
+        bus.dma_i2s_step(frame);
+        assert_eq!(bus.read32(OUTPUT + 8).unwrap(), 0, "unwired input is silent");
+        bus.periph.gpio.func_in_sel[30] = 0x80 | 14;
+        bus.dma_i2s_step(frame);
+        assert_eq!(bus.read32(OUTPUT + 12).unwrap(), 9, "disconnected input preserved queued PCM");
+    }
+}

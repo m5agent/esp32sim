@@ -78,17 +78,27 @@ impl I2s {
             rx.selected_source = 0;
         }
     }
-    /// Standard I2S frame rate, or S3 PDM-to-PCM output rate. No external slave clock.
+    /// Standard I2S frame rate, or S3 PDM-to-PCM output rate, with on-controller clock sharing.
     pub fn rx_rate(&self) -> Option<u32> {
-        let conf1 = self.ram.read(0x28);
         if self.v2 {
             // A full-duplex slave RX (IDF i2s_std.c: the later channel of a duplex pair) runs on
             // the TX clock shared through SIG_LOOPBACK (TX_CONF bit 30, i2s_ll_share_bck_ws).
             if self.rx_conf & (1 << 3) != 0 {
                 return if self.tx_conf & (1 << 30) != 0 { self.derive_rate() } else { None };
             }
-            return self.v2_rate(self.v2_rx_clock, self.rx_conf, conf1);
+            return self.v2_rate(self.v2_rx_clock, self.rx_conf, self.ram.read(0x28));
         }
+        // ESP-IDF v5.4.3 esp32s3 i2s_reg.h: TX_CONF.SIG_LOOPBACK (27) shares BCK/WS.
+        if self.rx_conf & (1 << 3) != 0 {
+            return if self.tx_conf & (1 << 27 | 1 << 3) == 1 << 27 {
+                self.derive_rate()
+            } else { None };
+        }
+        self.rx_master_rate()
+    }
+
+    pub(super) fn rx_master_rate(&self) -> Option<u32> {
+        let conf1 = self.ram.read(0x28);
         let frame_bits = if self.rx_conf & (1 << 20) != 0 {
             if self.rx_conf & (1 << 22) != 0 {
                 128
@@ -110,30 +120,43 @@ impl I2s {
     }
     /// PCM at the DMA boundary, not a pin-level serializer or a PDM filter simulation.
     /// Supports standard 16/24/32-bit mono/stereo and S3 I2S0 converted PDM16.
-    /// Raw PDM, TDM >2 slots, slave clocks, endian/bit-order/companding modes do not advance.
+    /// Raw PDM, TDM >2 slots, external slave clocks and endian/bit-order/companding do not advance.
     pub fn receive(&mut self, cycles: u64, now: u64, pdm2pcm: bool,
         gpio: &crate::Gpio, signals: super::RxSignals, sources: Option<&mut super::PcmSources>) -> Vec<u8> {
+        self.receive_with_lanes((cycles, now), pdm2pcm, gpio, signals, sources, [true; 2])
+    }
+
+    /// A board's ADC can independently disconnect either data lane. A disconnected codec
+    /// yields silence without draining its controller input or stalling the guest's DMA.
+    pub fn receive_with_lanes(&mut self, (cycles, now): (u64, u64), pdm2pcm: bool,
+        gpio: &crate::Gpio, signals: super::RxSignals, sources: Option<&mut super::PcmSources>, lanes: [bool; 2]) -> Vec<u8> {
         if let Some(rx) = &mut self.rx { rx.selected_source = 0; }
+        if lanes == [false; 2] { return self.rx_data(cycles, pdm2pcm, |_| [0; 2]); }
         let cpu_hz = self.cpu_hz;
+        let gate = |[left, right]: [i16; 2]| [if lanes[0] { left } else { 0 }, if lanes[1] { right } else { 0 }];
         if let Some(sources) = sources {
             sources.advance_to(now.saturating_sub(cycles), cpu_hz);
             let selected = if sources.active() { sources.select(gpio, signals, self.rx_conf & (1 << 20) != 0) } else { None };
             if let Some(id) = selected {
-                let bytes = self.rx_data(cycles, pdm2pcm, |offset| sources.sample(id, offset, cpu_hz));
+                let bytes = self.rx_data(cycles, pdm2pcm, |offset| gate(sources.sample(id, offset, cpu_hz)));
                 if let Some(rx) = &mut self.rx { rx.selected_source = id + 1; }
                 return bytes;
             }
         }
         // No bank, or no slot wired to this controller: per-controller input (`--i2s-tone`, pushes).
-        self.receive_input(cycles, pdm2pcm)
+        self.receive_input_frames(cycles, pdm2pcm, gate)
     }
     /// The frames due after `cycles` from this controller's own input (`rx_input`), for chips
     /// without a pin-routed source bank.
     pub fn receive_input(&mut self, cycles: u64, pdm2pcm: bool) -> Vec<u8> {
+        self.receive_input_frames(cycles, pdm2pcm, |frame| frame)
+    }
+
+    fn receive_input_frames(&mut self, cycles: u64, pdm2pcm: bool, gate: impl Fn([i16; 2]) -> [i16; 2]) -> Vec<u8> {
         if let Some(rx) = &mut self.rx { rx.selected_source = 0; }
         let mut input = self.rx.as_mut().map(|rx| std::mem::take(&mut rx.input)).unwrap_or_default();
         let rate = self.rx_rate().unwrap_or(1);
-        let bytes = self.rx_data(cycles, pdm2pcm, |_| input.next(rate));
+        let bytes = self.rx_data(cycles, pdm2pcm, |_| gate(input.next(rate)));
         if let Some(rx) = &mut self.rx {
             rx.input = input;
         }
@@ -148,7 +171,7 @@ impl I2s {
         let tdm = self.ram.read(0x50);
         let mask = tdm & 0xffff;
         let pdm = self.rx_conf & (1 << 20) != 0;
-        let refused = if self.v2 { (1 << 7) | (3 << 10) | (1 << 18) } else { (1 << 3) | (1 << 7) | (3 << 10) | (1 << 18) };
+        let refused = (1 << 7) | (3 << 10) | (1 << 18);
         let supported = self.rx_running()
             && [16, 24, 32].contains(&bits)
             && mask != 0

@@ -19,7 +19,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use esp_periph::i2c::{I2cDevice, Reg8Device};
-use esp_soc::board::{BoardEdge, BoardModel, VirtualCycle};
+use esp_soc::board::{BoardEdge, BoardModel, I2sCodecs, VirtualCycle};
+use esp_soc::devices::{aw88298::Aw88298, es7210::Es7210};
 use esp_soc::devices::{Bmi270, DcsPanel, Ft5x06, Ft5x06Points, FT5X06_ADDRESS};
 use esp_soc::devices::imu_motion::ImuMotion;
 
@@ -115,6 +116,8 @@ pub struct Cores3Hw {
     pub aw9523: Aw9523,
     pub touch: Ft5x06,
     pub points: Ft5x06Points,
+    amp: Aw88298,
+    mic: Es7210,
     pub others: Vec<(u8, Box<dyn I2cDevice>)>,
     lcd_in_reset: bool,
     pub panel_version: u64,
@@ -122,6 +125,8 @@ pub struct Cores3Hw {
 
 impl Cores3Hw {
     fn sync(&mut self) {
+        // CoreS3 K128 schematic v1.0: AW_RST is driven by AW9523 P0_2.
+        self.amp.set_reset_released(self.aw9523.outputs() & !self.aw9523.word(0x04) & (1 << 2) != 0);
         let in_reset = !self.aw9523.lcd_reset_released();
         if in_reset && !self.lcd_in_reset { self.panel.reset(); self.panel_version += 1; }
         self.lcd_in_reset = in_reset;
@@ -133,6 +138,8 @@ impl Cores3Hw {
         match address {
             Aw9523::ADDRESS => Some(&mut self.aw9523),
             FT5X06_ADDRESS => Some(&mut self.touch),
+            Aw88298::ADDRESS => Some(&mut self.amp),
+            Es7210::ADDRESS => Some(&mut self.mic),
             a => self.others.iter_mut().find(|(o, _)| *o == a).map(|(_, d)| &mut **d as &mut dyn I2cDevice),
         }
     }
@@ -195,13 +202,11 @@ impl Cores3 {
             (0x69, Box::new(Bmi270::new(imu.clone(), crate::periph::CPU_HZ))),
             (0x51, Box::new(Reg8Device::new("bm8563", &[]))),
             (0x23, Box::new(Reg8Device::new("ltr553", &[(0x86, 0x92), (0x87, 0x05)]))),
-            (0x36, Box::new(Reg8Device::new("aw88298", &[]))),
-            (0x40, Box::new(Reg8Device::new("es7210", &[(0x3d, 0x72), (0x3e, 0x06)]))),
             (0x21, Box::new(Reg8Device::new("gc0308", &[(0x00, 0x9b)]))),
         ];
         let hw = Cores3Hw {
             panel: DcsPanel::new(CORES3_LCD_W, CORES3_LCD_H), aw9523: Aw9523::new(), touch: Ft5x06::new(points.clone()),
-            points, others, lcd_in_reset: true, panel_version: 0,
+            points, amp: Aw88298::new(), mic: Es7210::new(), others, lcd_in_reset: true, panel_version: 0,
         };
         Cores3 { hw: Rc::new(RefCell::new(hw)), soft: SoftI2c { scl: true, sda: true, ..Default::default() }, sda_release: false, imu, lcd_cs_low: false, sd_cs_low: false, cycle: 0, int_level: true,
                  edges: Vec::new(), gpio_events: 0, spi_bytes: 0 }
@@ -209,7 +214,7 @@ impl Cores3 {
 
     fn addresses(&self) -> Vec<u8> {
         let hw = self.hw.borrow_mut();
-        let mut v = vec![Aw9523::ADDRESS, FT5X06_ADDRESS];
+        let mut v = vec![Aw9523::ADDRESS, FT5X06_ADDRESS, Aw88298::ADDRESS, Es7210::ADDRESS];
         v.extend(hw.others.iter().map(|(a, _)| *a));
         v
     }
@@ -340,6 +345,12 @@ impl BoardModel for Cores3 {
             for bus in 0..2 { v.push((bus, address, Box::new(Port { hw: self.hw.clone(), address }))); }
         }
         v
+    }
+    fn i2s_codecs(&self) -> Option<I2sCodecs> {
+        let hw = self.hw.borrow();
+        // CoreS3 K128 schematic v1.0 and M5Unified 0.3.0 CoreS3 mic_cfg/spk_cfg.
+        Some(I2sCodecs { port: 1, bck: 34, ws: 33, mck: 0, dout: 13, din: 14,
+                         speaker_gain: hw.amp.gain(), mic_lanes: hw.mic.lanes() })
     }
     fn display(&self) -> Option<(u32, u32, Vec<u16>, u64)> {
         let hw = self.hw.borrow_mut();

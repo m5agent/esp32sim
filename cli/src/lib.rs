@@ -40,7 +40,7 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!("  --uart-tcp H:P        UART0 bytes over TCP: esptool --port socket://H:P (with --strap for download mode);");
     eprintln!("                        --uart1-tcp H:P the same for UART1");
     eprintln!("  --tft-png F, --wav F  save the display / the audio at the end of the run");
-    eprintln!("  --mic-wav [PORT:]F    play a 16-bit PCM WAV once into I2S RX (default controller 0), resampled");
+    eprintln!("  --mic-wav [PORT:]F    play a 16-bit PCM WAV once into I2S RX (default board mic or controller 0), resampled");
     eprintln!("  --web PORT            serve the board UI at http://127.0.0.1:PORT/ in real time");
     eprintln!("  --elf F               symbols for logs, traces and profiles (repeatable)");
     eprintln!("  --trace-fn PREFIX, --break PC, --watch ADDR, --peek ADDR,N, --profile, --vcd F, --debug AREAS, --no-jit");
@@ -1076,8 +1076,9 @@ fn prepare<S: Soc>(m: &mut Machine<S>, o: &Opts) -> String {
         if let Err(e) = result { eprintln!("--i2s-tone: {e}"); std::process::exit(2); }
     }
     for spec in &o.mic_wav {
+        let default_port = m.bus.board_ref().i2s_codecs().map_or(0, |codecs| codecs.port);
         // A leading "0:" or "1:" names the controller; anything else is the path.
-        let (port, path) = match spec.split_once(':') { Some((p @ ("0" | "1"), f)) => (p.parse().unwrap(), f), _ => (0usize, spec.as_str()) };
+        let (port, path) = match spec.split_once(':') { Some((p @ ("0" | "1"), f)) => (p.parse().unwrap(), f), _ => (default_port, spec.as_str()) };
         let result = std::fs::read(path).map_err(|e| e.to_string())
             .and_then(|bytes| esp_periph::i2s::parse_wav(&bytes))
             .and_then(|(rate, frames)| m.bus.i2s_input(port).ok_or_else(|| "controller absent".to_string())?.play(frames, rate).map_err(String::from));
