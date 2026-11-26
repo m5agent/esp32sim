@@ -183,6 +183,10 @@ fn bmp(d: &[u8]) -> Result<Picture, String> {
 
 /// Nearest-neighbour resample to `w`x`h` and pack as YUYV (BT.601 full range).
 pub fn to_yuyv(p: &Picture, w: u32, h: u32) -> Vec<u8> {
+    to_oriented_yuyv(w, h, |x, y| p.pixel(x, y, w, h))
+}
+
+fn to_oriented_yuyv(w: u32, h: u32, pixel_at: impl Fn(u32, u32) -> (u8, u8, u8)) -> Vec<u8> {
     let mut out = vec![0u8; (w * h * 2) as usize];
     let yuv = |r: u8, g: u8, b: u8| -> (u8, u8, u8) {
         let (r, g, b) = (r as f32, g as f32, b as f32);
@@ -196,7 +200,7 @@ pub fn to_yuyv(p: &Picture, w: u32, h: u32) -> Vec<u8> {
             let mut px = [(0u8, 0u8, 0u8); 2];
             for (k, pixel) in px.iter_mut().enumerate() {
                 let x = x2 * 2 + k as u32;
-                let (r, g, b) = p.pixel(x, y, w, h);
+                let (r, g, b) = pixel_at(x, y);
                 *pixel = yuv(r, g, b);
             }
             let o = ((y * w + x2 * 2) * 2) as usize;
@@ -223,12 +227,17 @@ pub fn crop(p: &Picture, [x0, y0, x1, y1]: [u32; 4], array_w: u32, array_h: u32)
 
 /// Nearest-neighbour sampling; RGB565 bytes are most-significant first.
 pub fn sensor_frame(p: &Picture, w: u32, h: u32, format: PixelFormat) -> Option<Vec<u8>> {
+    oriented_sensor_frame(p, w, h, format, [false; 2])
+}
+
+pub(crate) fn oriented_sensor_frame(p: &Picture, w: u32, h: u32, format: PixelFormat, [mirror, flip]: [bool; 2]) -> Option<Vec<u8>> {
     if !p.valid() || !valid_size(w, h) { return None; }
-    if matches!(format, PixelFormat::Yuyv) { return (w.is_multiple_of(2)).then(|| to_yuyv(p, w, h)); }
+    let pixel_at = |x, y| p.pixel(if mirror { w - 1 - x } else { x }, if flip { h - 1 - y } else { y }, w, h);
+    if matches!(format, PixelFormat::Yuyv) { return w.is_multiple_of(2).then(|| to_oriented_yuyv(w, h, pixel_at)); }
     let mut out = Vec::with_capacity((w * h * if matches!(format, PixelFormat::Grayscale) { 1 } else { 2 }) as usize);
     for y in 0..h {
         for x in 0..w {
-            let (r, g, b) = p.pixel(x, y, w, h);
+            let (r, g, b) = pixel_at(x, y);
             if matches!(format, PixelFormat::Grayscale) {
                 out.push(luma(r as f32, g as f32, b as f32).clamp(0.0, 255.0) as u8);
             } else {

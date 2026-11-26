@@ -571,6 +571,18 @@ impl SocBus {
         }
     }
 
+    /// Sample a fixed DVP connection at the frame boundary. Signal indices and GPIO
+    /// matrix select bit follow ESP-IDF v5.4 esp32s3 gpio_sig_map.h and gpio_reg.h.
+    fn camera_is_routed(&self) -> bool {
+        let Some(pins) = self.board.camera_dvp_pins() else { return true; };
+        let signals = [133, 134, 135, 136, 137, 138, 139, 140, 149, 150, 152];
+        // The ESP32-S3 esp32-camera driver can invert VSYNC during capture setup.
+        pins.into_iter().zip(signals).all(|(pin, signal)| {
+            let mask = if signal == 152 { 0xbf } else { 0xff };
+            self.periph.gpio.func_in_sel[signal] & mask == 0x80 | u32::from(pin)
+        })
+    }
+
     /// Sensor VSYNC precedes capture, allowing the driver to arm GDMA during blanking.
     /// CAM_VSYNC_INT bit 2, CAM_START bit 29 and CAM_VS_EOF_EN bit 8:
     /// ESP-IDF v5.5.4 components/soc/esp32s3/register/soc/lcd_cam_reg.h,
@@ -584,7 +596,7 @@ impl SocBus {
                     self.camera_dma_in(ch, &[], None, true);
                 }
             }
-            let frame = if self.periph.lcd_cam.cam_active() { self.board.camera_frame().map(|(_, _, frame)| frame) } else { None };
+            let frame = if self.periph.lcd_cam.cam_active() && self.camera_is_routed() { self.board.camera_frame().map(|(_, _, frame)| frame) } else { None };
             let cam = &mut self.periph.lcd_cam;
             cam.set_cam_frame(frame);
             cam.frame_dropped = false;
