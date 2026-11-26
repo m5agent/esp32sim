@@ -5,7 +5,7 @@ use emu_core::{ClockDomain, ClockTree};
 use esp_periph::{GpSpi, Ledc, LedcLayout, Mcpwm};
 use esp_periph::{device_set, mmio, Device, DeviceSet, Dispatch, Misc, WriteEffect};
 use esp_periph::sdmmc::{Sdmmc, SdmmcLayout, SLOTS};
-use esp_periph::usb_otg::{Dwc2, Dwc2Config};
+use esp_periph::usb_otg::{reg as dwc, Dwc2, Dwc2Config};
 pub use esp_periph::rmt::RmtDma as Rmt;
 pub use esp_periph::{read_desc, reset_cause_name, Aes, DirtyMem, DmaDesc, Efuse, Gdma, GdmaInCh, GdmaOutCh, Gpio, I2s, RegRam, RmtTxCh, Rsa, RtcCntl, Sha, SpiMem, SystemRegs, Systimer, Timer, TimerGroup, Uart, UartLayout, UsbSerialJtag,
                     APB_HZ, DMA_ADDR_BASE, GDMA_CHANNELS, GDMA_CH_STRIDE, RMT_MEM_WORDS, RST_POWERON, RST_RTCWDT_CPU, RST_RTCWDT_RTC, RST_RTCWDT_SYS, RST_SW_CPU, RST_SW_SYS, RTC_SLOW_HZ, SYSTIMER_HZ, XTAL_HZ};
@@ -461,7 +461,7 @@ impl Peripherals {
             0x0b => "HINF", 0x0c => "UHCI1", 0x0f => "I2S0", 0x10 => "UART1", 0x11 => "BT", 0x13 => "I2C0", 0x14 => "UHCI0", 0x15 => "SLCHOST", 0x16 => "RMT", 0x17 => "PCNT",
             0x18 => "SLC", 0x19 => "LEDC", 0x1c => "NRX", 0x1d => "BB", 0x1e => "PWM0", 0x1f => "TIMG0", 0x20 => "TIMG1", 0x21 => "RTC_SLOWMEM", 0x23 => "SYSTIMER",
             0x24 => "SPI2", 0x25 => "SPI3", 0x26 => "APB_CTRL", 0x27 => "I2C1", 0x28 => "SDMMC", 0x2a => "PERI_BACKUP", 0x2b => "TWAI", 0x2c => "PWM1", 0x2d => "I2S1", 0x2e => "UART2", 0x33 => "WIFI_MAC", 0x34 => "WIFI_MAC2", 0x35 => "WDEV", 0x0e => "I2C_MST",
-            0x38 => "USB_SERIAL_JTAG", 0x39 => "USB_WRAP", 0x3a => "AES", 0x3b => "SHA", 0x3c => "RSA", 0x3d => "DS", 0x3e => "HMAC", 0x3f => "GDMA", 0x40 => "APB_SARADC", 0x41 => "LCD_CAM", 0x80 => "USB_OTG",
+            0x38 => "USB_SERIAL_JTAG", 0x39 => "USB_WRAP", 0x3a => "AES", 0x3b => "SHA", 0x3c => "RSA", 0x3d => "DS", 0x3e => "HMAC", 0x3f => "GDMA", 0x40 => "APB_SARADC", 0x41 => "LCD_CAM", 0x80..=0x85 => "USB_OTG",
             0xc0 => "SYSTEM", 0xc1 => "SENSITIVE", 0xc2 => "INTERRUPT", 0xc4 => "EXTMEM", 0xc5 => "MMU", 0xce => "ASSIST_DEBUG", 0xcf => "ASSIST_DEBUG2", 0xd0 => "WCL",
             _ => "?",
         }
@@ -481,13 +481,29 @@ impl Peripherals {
         esp_soc::uart::uart_pin_input(&mut self.uart, input, &routes);
     }
 
+    /// TinyUSB dwc2_type.h puts the data ports on separate 4 KiB pages after the core.
+    /// Handle them only in Slave mode, leaving the DMA-mode MMIO map as it was.
+    fn usb_fifo_offset(&self, addr: u32) -> Option<u32> {
+        const USB_BASE: u32 = PERIPH_BASE + (USB_OTG_BLOCK << 12);
+        let off = addr.wrapping_sub(USB_BASE);
+        ((dwc::DFIFO0..=dwc::S3_DFIFO_LAST).contains(&off) && self.usb_otg.slave_mode()).then_some(off)
+    }
+
     pub fn read32(&mut self, addr: u32) -> u32 {
-        let mut v = mmio::read32(self, addr);
+        let mut v = match self.usb_fifo_offset(addr) {
+            Some(off) => self.usb_otg.read(off),
+            None => mmio::read32(self, addr),
+        };
         if !self.fake_reads.is_empty() { if let Some(&(o, m)) = self.fake_reads.get(&addr) { v = (v & m) | o; } }
         v
     }
 
     pub fn write32(&mut self, addr: u32, v: u32) {
+        if let Some(off) = self.usb_fifo_offset(addr) {
+            self.usb_otg.write(off, v);
+            self.refresh_optional(USB_OTG_BLOCK);
+            return;
+        }
         // IDF v5.5.4 components/soc/esp32s3/register/soc/io_mux_reg.h:42-50 (FUN_PD/PU).
         if (0x60009004..=0x600090c4).contains(&addr) {
             self.gpio.set_pad(((addr - 0x60009004) / 4) as u8, v);
