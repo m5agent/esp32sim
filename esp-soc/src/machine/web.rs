@@ -48,14 +48,14 @@ impl<S: Soc> Machine<S> {
         let due = changed && (!board.display_quiet_push() || ver == self.ws.px_pending || self.ws.px_deferred);
         self.ws.px_pending = ver;
         self.ws.px_deferred = changed && !due;
-        if due {
+        if due && !w.service {
             if let Some((w_, h_, px, _)) = board.display() {
                 self.ws.px_sent = ver;
                 w.send_binary(&display_message(w_, h_, &px));
             }
         }
         let board = self.bus.board_ref();
-        if self.ws.cam_pushed != self.bus.camera_frames() / 20 || !self.ws.cam_sent {
+        if !w.service && (self.ws.cam_pushed != self.bus.camera_frames() / 20 || !self.ws.cam_sent) {
             if let Some(rgb) = board.camera_preview(320, 240) {
                 w.send_binary(&camera_message(&rgb)); self.ws.cam_sent = true;
             }
@@ -134,9 +134,10 @@ impl<S: Soc> Machine<S> {
         }
         for m in w.poll_incoming() {
             let Ok(message) = parse_json(&m) else { continue };
-            let field = |key| message.get(key).and_then(Json::scalar_text);
+            let field = |key: &str| message.get(key).and_then(Json::scalar_text);
             let t = field("t").unwrap_or_default();
             match t.as_str() {
+                "service" if w.service => self.service_command(&w, &field),
                 "btn" => { let pin: u8 = field("pin").and_then(|x| x.parse().ok()).unwrap_or(0); let v = field("v").unwrap_or_default() == "1";
                            self.bus.gpio_set_input(pin, !v); *self.bus.irq_dirty() = true; }
                 "knobpress" => { let v = field("v").unwrap_or_default() == "1"; if let Some(sw) = self.bus.board_ref().named_pin("sw") { self.bus.gpio_set_input(sw, !v); *self.bus.irq_dirty() = true; } }
@@ -188,6 +189,72 @@ impl<S: Soc> Machine<S> {
                 _ => {}
             }
         }
+    }
+
+    fn service_command(&mut self, w: &crate::web::WebServer, field: &impl Fn(&str) -> Option<String>) {
+        let Some(id) = field("id").and_then(|value| value.parse::<u32>().ok()) else { return };
+        let args = field("args").unwrap_or_default();
+        let args: Vec<_> = args.split_ascii_whitespace().collect();
+        let op = field("op").unwrap_or_default();
+        let ok = match (op.as_str(), args.as_slice()) {
+            ("hello", []) => {
+                let board = self.bus.board_ref().name();
+                w.send_text(&format!(r#"{{"t":"service","id":{id},"ok":true,"board":"{board}","protocol":1}}"#));
+                return;
+            }
+            ("frame", []) => {
+                if let Some((width, height, pixels, _)) = self.bus.board_ref().display() {
+                    let mut output = vec![6];
+                    output.extend_from_slice(&id.to_le_bytes());
+                    output.extend(display_message(width, height, &pixels));
+                    w.send_binary(&output);
+                    return;
+                }
+                false
+            }
+            ("reset", []) => {
+                self.button_reset = true;
+                self.bus.request_reset(esp_periph::RST_POWERON);
+                true
+            }
+            ("touch", [x, y, down, hold]) => {
+                if let (Ok(x), Ok(y), Ok(hold)) = (x.parse::<u16>(), y.parse::<u16>(), hold.parse::<u32>()) {
+                    self.bus.touch_input(x, y, *down == "1");
+                    if hold > 0 { self.service_schedule(hold, ScriptAction::Touch(x, y, false)); }
+                    true
+                } else { false }
+            }
+            ("press", [hold]) => {
+                let pin = self.bus.board_ref().named_pin("g0");
+                if let (Some(pin), Ok(hold)) = (pin, hold.parse::<u32>()) {
+                    self.bus.gpio_set_input(pin, false);
+                    self.service_schedule(hold.max(1), ScriptAction::Gpio(pin, true));
+                    true
+                } else { false }
+            }
+            ("gpio", [level]) if matches!(*level, "0" | "1") => {
+                if let Some(pin) = self.bus.board_ref().named_pin("g0") {
+                    self.bus.gpio_set_input(pin, *level == "1");
+                    true
+                } else { false }
+            }
+            ("adc", [pin, volts]) => {
+                if let (Ok(pin @ 1..=20), Ok(volts)) = (pin.parse::<u8>(), volts.parse::<f32>()) {
+                    self.bus.analog_set(pin, esp_periph::AnalogSource::Const(volts));
+                    true
+                } else { false }
+            }
+            ("pwrkey" | "battery" | "imu" | "als" | "key", _) => self.bus.board_command(&op, &args),
+            _ => false,
+        };
+        *self.bus.irq_dirty() = true;
+        w.send_text(&format!(r#"{{"t":"service","id":{id},"ok":{ok}}}"#));
+    }
+
+    fn service_schedule(&mut self, hold_ms: u32, action: ScriptAction) {
+        let until = self.bus.cycles().saturating_add(u64::from(hold_ms) * (S::CPU_HZ / 1000));
+        self.script.events.push((until, action));
+        self.script.events[self.script.pos..].sort_by_key(|e| e.0);
     }
 
 }
