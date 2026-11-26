@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use esp_periph::i2c::{I2cDevice, Reg8Device};
 use esp_soc::board::{BoardEdge, BoardModel, VirtualCycle};
-use esp_soc::devices::{Bmi270, DcsPanel, Ft5x06, Ft5x06Points, FT5X06_ADDRESS};
+use esp_soc::devices::{Bmi270, Bmm150, DcsPanel, Ft5x06, Ft5x06Points, Ltr553, BMI270_ADDRESS, FT5X06_ADDRESS, LTR553_ADDRESS};
 use esp_soc::devices::imu_motion::ImuMotion;
 
 pub const PIN_CORES3_I2C_SDA: u8 = 12;
@@ -115,6 +115,8 @@ pub struct Cores3Hw {
     pub aw9523: Aw9523,
     pub touch: Ft5x06,
     pub points: Ft5x06Points,
+    bmi270: Bmi270,
+    ltr553: Ltr553,
     pub others: Vec<(u8, Box<dyn I2cDevice>)>,
     lcd_in_reset: bool,
     pub panel_version: u64,
@@ -133,6 +135,8 @@ impl Cores3Hw {
         match address {
             Aw9523::ADDRESS => Some(&mut self.aw9523),
             FT5X06_ADDRESS => Some(&mut self.touch),
+            BMI270_ADDRESS => Some(&mut self.bmi270),
+            LTR553_ADDRESS => Some(&mut self.ltr553),
             a => self.others.iter_mut().find(|(o, _)| *o == a).map(|(_, d)| &mut **d as &mut dyn I2cDevice),
         }
     }
@@ -192,15 +196,15 @@ impl Cores3 {
         let others: Vec<(u8, Box<dyn I2cDevice>)> = vec![
             // AXP2101 chip ID 0x4A at 0x03, as M5GFX's CoreS3 detector requires.
             (0x34, Box::new(Reg8Device::new("axp2101", &[(0x03, 0x4a), (0x00, 0x28)]))),
-            (0x69, Box::new(Bmi270::new(imu.clone(), crate::periph::CPU_HZ))),
             (0x51, Box::new(Reg8Device::new("bm8563", &[]))),
-            (0x23, Box::new(Reg8Device::new("ltr553", &[(0x86, 0x92), (0x87, 0x05)]))),
             (0x36, Box::new(Reg8Device::new("aw88298", &[]))),
             (0x40, Box::new(Reg8Device::new("es7210", &[(0x3d, 0x72), (0x3e, 0x06)]))),
             (0x21, Box::new(Reg8Device::new("gc0308", &[(0x00, 0x9b)]))),
         ];
         let hw = Cores3Hw {
             panel: DcsPanel::new(CORES3_LCD_W, CORES3_LCD_H), aw9523: Aw9523::new(), touch: Ft5x06::new(points.clone()),
+            bmi270: Bmi270::new(imu.clone(), crate::periph::CPU_HZ).with_aux_bmm150(Bmm150::new(Default::default())),
+            ltr553: Ltr553::new(),
             points, others, lcd_in_reset: true, panel_version: 0,
         };
         Cores3 { hw: Rc::new(RefCell::new(hw)), soft: SoftI2c { scl: true, sda: true, ..Default::default() }, sda_release: false, imu, lcd_cs_low: false, sd_cs_low: false, cycle: 0, int_level: true,
@@ -209,7 +213,7 @@ impl Cores3 {
 
     fn addresses(&self) -> Vec<u8> {
         let hw = self.hw.borrow_mut();
-        let mut v = vec![Aw9523::ADDRESS, FT5X06_ADDRESS];
+        let mut v = vec![Aw9523::ADDRESS, FT5X06_ADDRESS, BMI270_ADDRESS, LTR553_ADDRESS];
         v.extend(hw.others.iter().map(|(a, _)| *a));
         v
     }
@@ -353,6 +357,31 @@ impl BoardModel for Cores3 {
     }
     fn set_imu_motion(&mut self, mode: u32) -> bool { self.imu.mode.store(mode, std::sync::atomic::Ordering::Relaxed); true }
     fn imu_motion(&self) -> u32 { self.imu.mode.load(std::sync::atomic::Ordering::Relaxed) }
+    fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "imu" | "als") }
+    fn board_command(&mut self, _cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
+        match (verb, args) {
+            ("imu", args) if matches!(args.len(), 6 | 9) => {
+                let mut xyz = [0.0; 9];
+                for (dst, arg) in xyz.iter_mut().zip(args) {
+                    let Ok(value) = arg.parse::<f64>() else { return false; };
+                    if !value.is_finite() { return false; }
+                    *dst = value;
+                }
+                let [ax, ay, az, gx, gy, gz, mx, my, mz] = xyz;
+                // Script values use board axes. M5Unified 0.3.0 IMU_Class.inl inverts
+                // the BMM150's Y/Z on CoreS3; the accel/gyro axes are already aligned.
+                let mag = (args.len() == 9).then_some([mx, -my, -mz]);
+                self.hw.borrow_mut().bmi270.set_sample([ax, ay, az], [gx, gy, gz], mag);
+                true
+            }
+            ("als", [ch0, ch1, ps]) => {
+                let (Ok(ch0), Ok(ch1), Ok(ps)) = (ch0.parse(), ch1.parse(), ps.parse()) else { return false; };
+                self.hw.borrow_mut().ltr553.set_sample(ch0, ch1, ps);
+                true
+            }
+            _ => false,
+        }
+    }
     fn input_levels(&self) -> Vec<(u8, bool)> { vec![(PIN_CORES3_I2C_INT, self.int_level)] }
     fn touch(&mut self, x: u16, y: u16, down: bool) {
         {

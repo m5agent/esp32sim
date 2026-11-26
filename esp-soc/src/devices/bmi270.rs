@@ -27,6 +27,7 @@
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use esp_periph::i2c::I2cDevice;
+use super::bmm150::Bmm150;
 use super::imu_motion::{motion_script_screen, ImuMotion};
 
 /// SDO high, as on the ESP-Mosaico.
@@ -37,8 +38,10 @@ pub const BMI270_CONFIG_SIZE: usize = 8192;
 
 const CHIP_ID: usize = 0x00;
 const STATUS: usize = 0x03;
+const DATA_AUX: usize = 0x04;
 const DATA_ACC: usize = 0x0c;
 const SENSORTIME: usize = 0x18;
+const INT_STATUS_1: usize = 0x1d;
 const INTERNAL_STATUS: usize = 0x21;
 const TEMPERATURE: usize = 0x22;
 const FEAT_PAGE: u8 = 0x2f;
@@ -47,13 +50,25 @@ const ACC_CONF: usize = 0x40;
 const ACC_RANGE: usize = 0x41;
 const GYR_CONF: usize = 0x42;
 const GYR_RANGE: usize = 0x43;
+const AUX_DEV_ID: usize = 0x4b;
+const AUX_IF_CONF: usize = 0x4c;
+const AUX_RD_ADDR: usize = 0x4d;
+const AUX_WR_ADDR: usize = 0x4e;
+const AUX_WR_DATA: usize = 0x4f;
+const INT_MAP_DATA: usize = 0x58;
 const INIT_CTRL: u8 = 0x59;
 const INIT_ADDR_0: usize = 0x5b;
 const INIT_ADDR_1: usize = 0x5c;
 const INIT_DATA: u8 = 0x5e;
+const IF_CONF: usize = 0x6b;
 const PWR_CONF: usize = 0x7c;
 const PWR_CTRL: usize = 0x7d;
 const CMD: u8 = 0x7e;
+
+struct AuxBmm150 {
+    mag: Bmm150,
+    sample: Option<([f64; 3], [f64; 3])>,
+}
 
 pub struct Bmi270 {
     regs: [u8; 256],
@@ -65,6 +80,7 @@ pub struct Bmi270 {
     ptr: u8,
     first: bool,
     motion: Arc<ImuMotion>,
+    aux: Option<Box<AuxBmm150>>,
     /// Rate of `motion.cycle` (ticks per second of guest time).
     clock_hz: u64,
     pub resets: u32,
@@ -73,9 +89,22 @@ pub struct Bmi270 {
 impl Bmi270 {
     pub fn new(motion: Arc<ImuMotion>, clock_hz: u64) -> Self {
         let mut d = Bmi270 { regs: [0; 256], pages: [[0; 16]; 8], config: vec![0; BMI270_CONFIG_SIZE], config_bytes: 0,
-                             ptr: 0, first: true, motion, clock_hz, resets: 0 };
+                             ptr: 0, first: true, motion, aux: None, clock_hz, resets: 0 };
         d.reset();
         d
+    }
+    /// Attach a BMM150 strapped to AUX address 0x10 and expose the data-ready interrupt status.
+    pub fn with_aux_bmm150(mut self, mag: Bmm150) -> Self {
+        self.aux = Some(Box::new(AuxBmm150 { mag, sample: None }));
+        self.regs[AUX_DEV_ID] = 0x20;
+        self
+    }
+    /// Override the next conversion in sensor axes (g, dps, and optionally uT).
+    pub fn set_sample(&mut self, accel: [f64; 3], gyro: [f64; 3], mag: Option<[f64; 3]>) {
+        if let Some(aux) = &mut self.aux {
+            aux.sample = Some((accel, gyro));
+            if let Some(field) = mag { aux.mag.field = field; }
+        }
     }
     /// Reset values, datasheet section 5.2.
     fn reset(&mut self) {
@@ -85,7 +114,8 @@ impl Bmi270 {
         self.regs[ACC_CONF] = 0xa8;         // acc_odr 100 Hz, acc_bwp normal, perf mode
         self.regs[ACC_RANGE] = 0x02;        // +-8 g
         self.regs[GYR_CONF] = 0xa9;         // gyr_odr 200 Hz
-        self.regs[0x4c] = 0x83;             // AUX_IF_CONF
+        if self.aux.is_some() { self.regs[AUX_DEV_ID] = 0x20; }
+        self.regs[AUX_IF_CONF] = 0x83;
         self.regs[PWR_CONF] = 0x03;         // adv_power_save, fifo_self_wake_up
         self.pages = [[0; 16]; 8];
         self.config_bytes = 0;
@@ -94,7 +124,9 @@ impl Bmi270 {
     fn seconds(&self) -> f64 { self.motion.cycle.load(Relaxed) as f64 / self.clock_hz as f64 }
     /// Sample the outputs, sensortime and status for a read.
     fn latch(&mut self) {
-        let (accel, gyro) = if self.motion.mode.load(Relaxed) != 0 { motion_script_screen(self.seconds()) } else { ([0.0, 0.0, 1.0], [0.0; 3]) };
+        let (accel, gyro) = self.aux.as_ref().and_then(|a| a.sample).unwrap_or_else(|| {
+            if self.motion.mode.load(Relaxed) != 0 { motion_script_screen(self.seconds()) } else { ([0.0, 0.0, 1.0], [0.0; 3]) }
+        });
         let pwr = self.regs[PWR_CTRL];
         // ACC_RANGE bits 1:0: +-2/4/8/16 g -> 16384 >> range LSB/g; GYR_RANGE bits 2:0:
         // +-2000/1000/500/250/125 dps -> 16.4 << range LSB/dps (datasheet 5.2, ACC_RANGE/GYR_RANGE).
@@ -108,11 +140,52 @@ impl Bmi270 {
             self.regs[DATA_ACC + 6 + 2 * axis..DATA_ACC + 8 + 2 * axis].copy_from_slice(&g);
         }
         self.regs[STATUS] = 0x10 | if pwr & 4 != 0 { 0x80 } else { 0 } | if pwr & 2 != 0 { 0x40 } else { 0 };
+        if let Some(aux) = &mut self.aux {
+            // BST-BMI270-DS000 sections 4.9/4.10: data mode mirrors an AUX burst, with DATA_6
+            // bit 0 indicating ready. This on-demand model completes each conversion at read
+            // start. M5Unified 0.3.0 polls INT_STATUS_1, then reads AUX, accel and gyro together.
+            let conf = self.regs[AUX_IF_CONF];
+            if self.regs[IF_CONF] & 0x20 != 0 && conf & 0x80 == 0 && pwr & 1 != 0 {
+                let ready = self.regs[AUX_DEV_ID] >> 1 == 0x10;
+                Self::aux_read(&mut self.regs, &mut aux.mag, ready, conf & 3);
+                if self.regs[DATA_AUX + 6] & 1 != 0 { self.regs[STATUS] |= 0x20; }
+            }
+            self.regs[INT_STATUS_1] = if self.regs[INT_MAP_DATA] & 0x44 != 0 { self.regs[STATUS] & 0xe0 } else { 0 };
+        }
         let ticks = (self.seconds() * 25600.0) as u32;  // 39.0625 us per LSB
         self.regs[SENSORTIME..SENSORTIME + 3].copy_from_slice(&ticks.to_le_bytes()[..3]);
         // 0x0000 is 23 C, 1/512 K per LSB; 0x8000 means invalid (temperature sensor off).
         let temp: i16 = if pwr & 0x0e != 0 { 2 * 512 } else { i16::MIN };
         self.regs[TEMPERATURE..TEMPERATURE + 2].copy_from_slice(&temp.to_le_bytes());
+    }
+    fn aux_read(regs: &mut [u8; 256], mag: &mut Bmm150, addressed: bool, burst: u8) {
+        let len = [1, 2, 6, 8][usize::from(burst)];
+        let reg = regs[AUX_RD_ADDR];
+        let data = &mut regs[DATA_AUX..DATA_ACC];
+        data.fill(0);
+        if addressed {
+            mag.start(false);
+            mag.write(reg);
+            mag.start(true);
+            for byte in &mut data[..len] { *byte = mag.read(); }
+            mag.stop();
+        }
+    }
+    fn aux_manual(&mut self, reg: usize) {
+        let Some(aux) = &mut self.aux else { return; };
+        let conf = self.regs[AUX_IF_CONF];
+        if self.regs[IF_CONF] & 0x20 == 0 || self.regs[PWR_CONF] & 1 != 0 || conf & 0x80 == 0 { return; }
+        let addressed = self.regs[AUX_DEV_ID] >> 1 == 0x10;
+        // BST-BMI270-DS000 section 4.10.4: writing the address triggers the manual transaction.
+        // The downstream operation completes synchronously, so STATUS.aux_busy is already clear.
+        if reg == AUX_RD_ADDR {
+            Self::aux_read(&mut self.regs, &mut aux.mag, addressed, conf >> 2 & 3);
+        } else if addressed {
+            aux.mag.start(false);
+            aux.mag.write(self.regs[AUX_WR_ADDR]);
+            aux.mag.write(self.regs[AUX_WR_DATA]);
+            aux.mag.stop();
+        }
     }
     fn store(&mut self, b: u8) {
         let page = (self.regs[FEAT_PAGE as usize] & 7) as usize;
@@ -142,7 +215,11 @@ impl Bmi270 {
             r @ FEATURES..=0x3f => self.pages[page][usize::from(r - FEATURES)] = b,
             // Read-only: chip id, error, status, data, sensortime, events, internal status, temperature.
             0x00..=0x23 => {}
-            r => self.regs[usize::from(r)] = b,
+            r => {
+                let reg = usize::from(r);
+                self.regs[reg] = b;
+                if matches!(reg, AUX_RD_ADDR | AUX_WR_ADDR) { self.aux_manual(reg); }
+            }
         }
         self.ptr = self.ptr.wrapping_add(1);
     }
@@ -251,5 +328,49 @@ mod tests {
         motion.cycle.store(6_500_000_000, Relaxed);
         let tilted = rd(&mut d, 0x0c, 6);
         assert_ne!(tilted, [0, 0, 0, 0, 0x00, 0x10], "the shared script moves the board");
+    }
+
+    #[test]
+    fn m5unified_aux_setup_and_combined_data_read() {
+        let mut d = Bmi270::new(Arc::default(), 1_000_000_000).with_aux_bmm150(Bmm150::new(Default::default()));
+        init(&mut d);
+        wr(&mut d, IF_CONF as u8, &[0x20]);
+        wr(&mut d, PWR_CTRL as u8, &[0x0e]);
+        wr(&mut d, AUX_IF_CONF as u8, &[0x80]);
+        wr(&mut d, AUX_RD_ADDR as u8, &[0x40]);
+        assert_eq!(rd(&mut d, DATA_AUX as u8, 1), [0], "BMM150 starts suspended");
+        wr(&mut d, AUX_WR_DATA as u8, &[0x83]);
+        wr(&mut d, AUX_WR_ADDR as u8, &[0x4b]);
+        wr(&mut d, AUX_RD_ADDR as u8, &[0x40]);
+        assert_eq!(rd(&mut d, DATA_AUX as u8, 1), [0x32]);
+
+        wr(&mut d, AUX_DEV_ID as u8, &[0x22]);
+        wr(&mut d, AUX_RD_ADDR as u8, &[0x40]);
+        assert_eq!(rd(&mut d, DATA_AUX as u8, 1), [0], "a different AUX address does not select the BMM150");
+        wr(&mut d, AUX_DEV_ID as u8, &[0x20]);
+        wr(&mut d, AUX_IF_CONF as u8, &[0x84]);
+        wr(&mut d, AUX_RD_ADDR as u8, &[0x6c]);
+        assert_eq!(rd(&mut d, DATA_AUX as u8, 2), 6926u16.to_le_bytes(), "manual burst reaches the trim registers");
+
+        wr(&mut d, AUX_WR_DATA as u8, &[0x38]);
+        wr(&mut d, AUX_WR_ADDR as u8, &[0x4c]);
+        wr(&mut d, AUX_IF_CONF as u8, &[0x4f]);
+        wr(&mut d, AUX_RD_ADDR as u8, &[0x42]);
+        wr(&mut d, PWR_CTRL as u8, &[0x0f]);
+        assert_eq!(rd(&mut d, INT_STATUS_1 as u8, 1), [0], "data-ready interrupt is unmapped");
+        wr(&mut d, INT_MAP_DATA as u8, &[0xff]);
+        assert_eq!(rd(&mut d, INT_STATUS_1 as u8, 1), [0xe0]);
+
+        d.set_sample([0.5, -0.25, 1.0], [125.0, -250.0, 0.0], Some([20.0, -10.0, 30.0]));
+        let words = |bytes: Vec<u8>| bytes.chunks_exact(2).map(|p| i16::from_le_bytes([p[0], p[1]])).collect::<Vec<_>>();
+        let burst = words(rd(&mut d, DATA_AUX as u8, 20));
+        assert_eq!(&burst[..4], &[66 << 3, -33 << 3, 86 << 1, 6926 << 2 | 1]);
+        assert_eq!(&burst[4..], &[2048, -1024, 4096, 2048, -4096, 0]);
+        d.set_sample([0.0; 3], [0.0; 3], None);
+        let next = words(rd(&mut d, DATA_AUX as u8, 20));
+        assert_eq!(&next[..4], &burst[..4], "six-value input preserves the magnetic field");
+        assert_eq!(&next[4..], &[0; 6]);
+        wr(&mut d, PWR_CTRL as u8, &[0x0e]);
+        assert_eq!(rd(&mut d, INT_STATUS_1 as u8, 1), [0xc0]);
     }
 }

@@ -9,6 +9,7 @@ pub mod co5300;
 pub mod dcs_panel;
 pub mod ft5x06;
 pub mod imu_motion;
+pub mod ltr553;
 pub mod spi_bitbang;
 pub mod ws2812;
 
@@ -17,5 +18,6 @@ pub use bmm150::{Bmm150, Bmm150Trim};
 pub use bmp280::{Bmp280, BMP280_ADDRESS};
 pub use dcs_panel::DcsPanel;
 pub use ft5x06::{Ft5x06, Ft5x06Points, FT5X06_ADDRESS};
+pub use ltr553::{Ltr553, LTR553_ADDRESS};
 pub use spi_bitbang::SpiBitBang;
 pub use ws2812::Ws2812Chain;
