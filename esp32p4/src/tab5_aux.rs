@@ -44,6 +44,14 @@ impl Rx8130 {
             self.regs[0x1d] |= 8;
         }
     }
+    /// RX8130CE ETM50E-10: AF/AIE at bit 3, TF/TIE at bit 4 drive the active-low IRQ.
+    pub fn irq(&self) -> bool { self.regs[0x1d] & self.regs[0x1e] & 0x18 != 0 }
+    pub fn next_irq_check(&self) -> Option<u64> {
+        let alarm = (self.regs[0x1e] & 8 != 0 && self.regs[0x1e] & 0x40 == 0)
+            .then(|| self.anchor.saturating_add(CPU_HZ));
+        let timer = self.next_timer.filter(|_| self.regs[0x1e] & 0x10 != 0);
+        alarm.into_iter().chain(timer).min()
+    }
     fn timer_period(&self) -> u64 {
         let count = u64::from(u16::from_le_bytes([self.regs[0x1a], self.regs[0x1b]])).max(1);
         match self.regs[0x1c] & 7 {

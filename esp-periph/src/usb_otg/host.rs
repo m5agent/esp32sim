@@ -41,8 +41,8 @@ impl Host {
     pub(super) fn attach(&mut self, gamepad: bool) {
         self.connect(UsbDevice { gamepad, ..UsbDevice::default() });
     }
-    pub(super) fn attach_msc(&mut self) {
-        self.connect(UsbDevice { msc: Some(Msc::default()), ..UsbDevice::default() });
+    pub(super) fn attach_msc(&mut self, full_speed: bool) {
+        self.connect(UsbDevice { msc: Some(Msc::default()), full_speed, ..UsbDevice::default() });
     }
     fn connect(&mut self, device: UsbDevice) {
         self.device = Some(device);
@@ -113,7 +113,11 @@ impl Host {
                     if v & PORT_POWER == 0 { self.port &= !(PORT_EN | PORT_CONN); }
                     else if old & PORT_POWER == 0 && self.has_device() { self.port |= PORT_CONN | PORT_CONN_CHG; }
                     if self.port & PORT_CONN != 0 && old & PORT_RESET != 0 && v & PORT_RESET == 0 {
-                        if let Some(device) = &mut self.device { device.bus_reset(); }
+                        if let Some(device) = &mut self.device {
+                            device.bus_reset();
+                            // DWC2 HPRT.PRTSPD (ESP-IDF v5.4.1 usb_dwc_struct.h), 0 HS, 1 FS.
+                            self.port = (self.port & !(3 << 17)) | (u32::from(device.full_speed) << 17);
+                        }
                         self.port |= PORT_EN | PORT_EN_CHG;
                     }
                 }
@@ -195,6 +199,7 @@ const GAMEPAD: &[u8] = &[
 struct UsbDevice {
     msc: Option<Msc>,
     gamepad: bool,
+    full_speed: bool,
     address: u8,
     pending_address: Option<u8>,
     configuration: u8,
@@ -205,7 +210,7 @@ impl UsbDevice {
     fn report_len(&self) -> usize { if self.gamepad { 3 } else { 8 } }
     fn bus_reset(&mut self) {
         let msc = self.msc.is_some().then(Msc::default);
-        *self = Self { msc, gamepad: self.gamepad, ..Self::default() };
+        *self = Self { msc, gamepad: self.gamepad, full_speed: self.full_speed, ..Self::default() };
     }
     fn input(&mut self, ep: u8, len: usize) -> Result<Vec<u8>, u32> {
         let data = match ep {
@@ -231,13 +236,14 @@ impl UsbDevice {
             return Err(1 << 3);
         }
         let &[typ, request, low, high, _, _, len0, len1] = data else { return Err(1 << 3) };
+        let [mps0, mps1] = (if self.full_speed { 64u16 } else { 512u16 }).to_le_bytes();
         let report = if self.gamepad { GAMEPAD } else { KEYBOARD };
         self.response.clear();
         match (typ, request, high) {
             (0x80, 6, 1) => self.response.extend([18,1,0,2,0,0,0,64,0x09,0x12,0x01,0x00,0,1,0,0,0,1]),
             (0x80, 6, 2) if self.msc.is_some() => self.response.extend([
                 9,2,32,0,1,1,0,0x80,25, 9,4,0,0,2,8,6,0x50,0,
-                7,5,0x81,2,0,2,0, 7,5,0x02,2,0,2,0,
+                7,5,0x81,2,mps0,mps1,0, 7,5,0x02,2,mps0,mps1,0,
             ]),
             (0x80, 6, 2) => self.response.extend([
                 9,2,34,0,1,1,0,0x80,25, 9,4,0,0,1,3,if self.gamepad { 0 } else { 1 },if self.gamepad { 0 } else { 1 },0,

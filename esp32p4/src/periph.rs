@@ -71,6 +71,13 @@ pub mod src {
 /// The USB-OTG HS core's register block, DR_REG_USB2_BASE (register/hw_ver1/soc/reg_base.h); its
 /// data FIFOs from 0x50001000 are not modelled (buffer DMA does not use them).
 pub const USB_OTG_BLOCK: u32 = 0x50000;
+pub const RTC_SLOW_DIV: u64 = 2647;
+// IDF v5.4.1 esp32p4 ROM rtc.h, pmu_reg.h, lp_timer_reg.h and pmu_bit_defs.h.
+pub(crate) const RST_DEEP_SLEEP: u32 = 5;
+pub(crate) const PMU_SLEEP_REQ: u32 = 0x5011_5120;
+const PMU_WAKEUP_ENA: u32 = 0x5011_5128;
+const PMU_WAKEUP_CAUSE: u32 = 0x5011_5144;
+const RTC_TIMER_WAKE: u32 = 1 << 13;
 
 pub use esp_periph::clic::{ClicCore, CLIC_IDS, CLIC_EXT_OFFSET};
 
@@ -173,12 +180,12 @@ impl Device for Cache {
 /// (CPU_INT_FROM_CPU_0..3 at 0x10, bit 0) and the core-stall status.
 /// IDF v5.5.3 register/hw_ver1/soc/hp_system_reg.h:40-88, 362-380.
 #[derive(Default)]
-pub struct HpSys { pub from_cpu: u32, ram: RegRam }
+pub struct HpSys { pub from_cpu: u32, pub stalled: u32, ram: RegRam }
 impl Device for HpSys {
     fn read(&mut self, off: u32) -> u32 {
         match off {
             0x10..=0x1c => (self.from_cpu >> ((off - 0x10) / 4)) & 1,
-            0x64 => 0,                                                // CPU_CORESTALLED_ST: no core stalled
+            0x64 => self.stalled,                                     // CPU_CORESTALLED_ST
             _ => self.ram.read(off),
         }
     }
@@ -245,6 +252,9 @@ pub struct LpAon {
     /// RTC slow-clock ticks since power-on and the value latched by an UPDATE
     pub slow_ticks: u64,
     pub time_latch: u64,
+    timer0: Option<u64>,
+    pub(crate) sleeping: bool,
+    wake_cause: u32,
 }
 impl Default for LpAon { fn default() -> Self { Self::new() } }
 impl LpAon {
@@ -252,9 +262,26 @@ impl LpAon {
     pub fn new() -> Self {
         let mut ram = [RegRam::new(), RegRam::new(), RegRam::new()];
         ram[0].write(0x08, 0x1fff_c7f8);                              // LP_SYSTEM_REG_SYS_CTRL default
-        LpAon { ram, reset_cause: RST_POWERON, sw_reset: false, slow_ticks: 0, time_latch: 0 }
+        LpAon { ram, reset_cause: RST_POWERON, sw_reset: false, slow_ticks: 0, time_latch: 0, timer0: None, sleeping: false, wake_cause: 0 }
     }
     fn request_reset(&mut self, cause: u32) { self.reset_cause = cause; self.sw_reset = true; }
+    // LP_STORE8 bit 0 distinguishes digital deep sleep from light sleep.
+    pub(crate) fn deep_sleep(&mut self, wake: u32) {
+        if self.ram[0].read(0x4c) & 1 == 0 || wake & RTC_TIMER_WAKE == 0 || self.timer0.is_none() { return; }
+        self.wake_cause = 0;
+        self.sleeping = true;
+    }
+    pub(crate) fn sleep_cycles_left(&self) -> Option<u64> {
+        self.timer0.filter(|_| self.sleeping).map(|target| target.saturating_sub(self.slow_ticks).saturating_mul(RTC_SLOW_DIV).max(1))
+    }
+    pub(crate) fn wake_from_timer(&mut self) {
+        if self.sleeping && self.timer0.is_some_and(|target| self.slow_ticks >= target) {
+            self.timer0 = None;
+            self.sleeping = false;
+            self.wake_cause = RTC_TIMER_WAKE;
+            self.request_reset(RST_DEEP_SLEEP);
+        }
+    }
     pub fn core1_boot_addr(&self) -> u32 { self.ram[0].read(Self::BOOT_ADDR_HP_CORE1) }
 }
 impl Device for LpAon {
@@ -264,6 +291,7 @@ impl Device for LpAon {
             (0, 0x08) => self.ram[0].read(o) & !(1 << 1),             // SYS_SW_RST reads 0
             (1, 0x10) => (self.ram[1].read(o) & !(0x3f << 7)) | (self.reset_cause & 0x3f) << 7,   // RESET_CAUSE.HPCORE0_RESET_CAUSE
             (1, 0x14) => self.ram[1].read(o) & !(1 << 13 | 1 << 29),  // HPCPU_RESET_CTRL0: HPCORE0/1_SW_RESET read 0
+            (2, 0x04) => self.ram[2].read(o) & 0xffff,             // TAR_EN0 is a write trigger
             (2, 0x10) => self.ram[2].read(o) & !(1 << 28),            // LP_TIMER_UPDATE self-clears
             (2, 0x14) => self.time_latch as u32,                      // LP_TIMER_MAIN_BUF0_LOW
             (2, 0x18) => (self.time_latch >> 32) as u32,              // LP_TIMER_MAIN_BUF0_HIGH
@@ -282,6 +310,10 @@ impl Device for LpAon {
             // HP_USB_CLKRST_CTRL1.RST_EN_USB_OTG20 (bit 2) holds the USB-OTG HS core in reset
             // (lp_clkrst_reg.h:928-952; _usb_utmi_ll_reset_register pulses it)
             (1, 0x48) => { let old = self.ram[1].read(o); self.ram[1].write(o, v); if (old ^ v) & (1 << 2) != 0 { return WriteEffect::PERIPH_RESET; } }
+            (2, 0x04) => {
+                self.ram[2].write(o, v & 0xffff);
+                if v & (1 << 31) != 0 { self.timer0 = Some(u64::from(v & 0xffff) << 32 | u64::from(self.ram[2].read(0))); }
+            }
             (2, 0x10) => { if v & (1 << 28) != 0 { self.time_latch = self.slow_ticks; } self.ram[2].write(o, v); }
             (b, o) if b < 3 => self.ram[b].write(o, v),
             _ => {}
@@ -632,7 +664,7 @@ pub struct Peripherals {
 // Every peripheral, its 4 KB block (address >> 12) and its interrupt sources.
 // Clocks: XTAL 40 MHz for the systimer and the timer groups (TIMG clock source XTAL,
 // include/soc/clk_tree_defs.h), RC_SLOW 136 kHz (SOC_CLK_RC_SLOW_FREQ_APPROX) for the LP timer.
-device_set! { Peripherals; clock: (clock) CPU_HZ, [(ClockDomain::Xtal, 9), (ClockDomain::Apb, 9), (ClockDomain::RtcSlow, 2647), (ClockDomain::Cpu, 1)];
+device_set! { Peripherals; clock: (clock) CPU_HZ, [(ClockDomain::Xtal, 9), (ClockDomain::Apb, 9), (ClockDomain::RtcSlow, RTC_SLOW_DIV), (ClockDomain::Cpu, 1)];
     0x20800 "CLIC" (clic) => [];
     0x50000 "USB_OTG" optional (usb_otg) => [src::USB_OTG];
     0x20801 "CLIC_CTRL" alias (clic) delta 0x1000 => [];
@@ -760,10 +792,25 @@ impl Peripherals {
         }
     }
 
-    pub fn read32(&mut self, addr: u32) -> u32 { mmio::read32(self, addr) }
+    pub fn read32(&mut self, addr: u32) -> u32 {
+        if addr == PMU_WAKEUP_CAUSE { return self.lp.wake_cause; }
+        mmio::read32(self, addr)
+    }
+
+    pub(crate) fn request_deep_sleep(&mut self, v: u32) {
+        if v & (1 << 31) != 0 {
+            let wake = self.read32(PMU_WAKEUP_ENA);
+            self.lp.deep_sleep(wake);
+        }
+    }
 
     pub fn write32(&mut self, addr: u32, v: u32) {
         let fx = mmio::write32(self, addr, v);
+        // IDF v5.4.1 soc/pmu_reg.h PMU_CPU_SW_STALL and soc/hp_system_reg.h CPU_CORESTALLED_ST.
+        // hal/cpu_ll.h uses the key 0x86 to stall a hart and 0xff to release it.
+        if addr == 0x5011_5200 {
+            self.hp_sys.stalled = u32::from(v >> 24 == 0x86) | (u32::from(v >> 16 & 0xff == 0x86) << 1);
+        }
         if addr == 0x500e_609c { self.ledc_clock(v); }
         if addr == 0x500e_6094 { self.mcpwm_clock(v); }
         if (0x500e_6044..=0x500e_6050).contains(&addr) { self.i2s0_clock(); }
