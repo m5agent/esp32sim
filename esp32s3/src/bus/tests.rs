@@ -1861,3 +1861,120 @@ fn mmio_write_delivers_pending_time_and_leaves_the_post_write_budget() {
         assert_eq!(bus.periph.usb.int_raw & 2, raw, "write {reg:#x}={value}");
     }
 }
+
+#[test]
+fn board_battery_uses_gpio10_sar_adc_and_preserves_host_overrides() {
+    use esp_soc::SocBus as _;
+    struct Battery;
+    impl crate::board::BoardModel for Battery {
+        fn name(&self) -> &'static str { "battery-fixture" }
+        fn default_analog_inputs(&self) -> &'static [(u8, f32)] { &[(10, 1.85)] }
+    }
+    let mut bus = SocBus::new(1024, 1024, [0; 6]);
+    bus.board = Box::new(Battery);
+    bus.attach_board_devices();
+
+    // ESP-IDF v5.4.3 S3 sens_reg.h. GPIO10 = ADC1 pad 9, attenuation 3.
+    fn read_battery(bus: &mut SocBus) -> u32 {
+        let ctrl = 0x6000_880c;
+        bus.write32(0x6000_8814, 3 << 18).unwrap();
+        bus.write32(ctrl, 1 << 28).unwrap();
+        bus.write32(ctrl, (1 << 28) | (1 << 17)).unwrap();
+        let value = bus.read32(ctrl).unwrap();
+        assert_ne!(value & (1 << 16), 0);
+        assert_eq!(bus.adc_observation(10).unwrap().raw, value as u16);
+        value & 0xffff
+    }
+    // IDF v5.4.3's adc_cali_curve_fitting.c first step, using the S3 ADC1
+    // atten-3 eFuse calibration point (900 counts at 850 mV) and the same
+    // second-step coefficients as the legacy curve. At these points both
+    // scales yield the same first-stage integer.
+    let battery_mv = |raw| {
+        let first_stage = u64::from(raw) * (65_536 * 850 / 900) / 65_536;
+        assert_eq!(first_stage, u64::from(raw * (1_000_000 * 850 / 900) / 1_000_000));
+        2 * esp_periph::sar_adc::millivolts(raw, 3, esp_periph::sar_adc::Calibration::S3Adc1)
+    };
+    let default_mv = battery_mv(read_battery(&mut bus));
+    assert_eq!(default_mv, 3700);
+    assert_eq!((default_mv - 3300) * 100 / 800, 50); // M5Unified 0.3.0 Power_Class.inl
+
+    assert!(bus.adc_set_raw(10, 1000));
+    bus.attach_board_devices();
+    assert_eq!(read_battery(&mut bus), 1000);
+    bus.analog_set(10, esp_periph::AnalogSource::Const(2.0));
+    bus.attach_board_devices();
+    assert_eq!(battery_mv(read_battery(&mut bus)), 4000);
+}
+
+#[test]
+fn es8311_pcm_crosses_the_s3_gpio_matrix_and_gdma() {
+    use esp_periph::i2c::I2cDevice;
+    use esp_soc::devices::es8311::Es8311;
+    use esp_soc::SocBus as _;
+    struct CodecBoard(Es8311);
+    impl crate::board::BoardModel for CodecBoard {
+        fn name(&self) -> &'static str { "es8311-fixture" }
+        fn i2s_codecs(&self) -> Option<esp_soc::board::I2sCodecs> { Some(self.0.i2s_codecs(1, 0, 41, 43, 42, 46)) }
+    }
+    const I2S0: u32 = 0x6000_f000;
+    const I2S1: u32 = 0x6002_d000;
+    const TX_BUF: u32 = FIRST_DESC + 64;
+    const RX_DESC: u32 = FIRST_DESC + 16;
+    const RX_BUF: u32 = RX_DESC + 64;
+    const CLOCK: u32 = (1 << 26) | (2 << 27) | 25;
+    const CONF1: u32 = (24 << 7) | (15 << 13) | (15 << 18);
+    for (rx_port, clock_mask, connected, expected_tx, expected_rx) in [
+        (0, 0xba, true, 0, 0xf6d7_04d2), // ADV Arduino capture, RX0 master.
+        (1, 0xbf, true, 991, 0xf6d7_04d2), // TX1 master, RX1 duplex slave.
+        (1, 0xb5, true, 991, 0), // Microphone clocks off.
+        (1, 0xbf, false, 0, 0), // BCK misrouted.
+    ] {
+        let mut bus = SocBus::new(1024, 1024, [0; 6]);
+        let codec = Es8311::new();
+        let mut i2c = codec.i2c_port();
+        for (reg, val) in [(0, 0x80), (1, clock_mask), (0x0d, 1), (0x0e, 2),
+            (0x12, 0), (0x13, 0x10), (0x17, 0xbf), (0x32, 0xbf)] {
+            assert!(i2c.start(false) && i2c.write(reg) && i2c.write(val)); i2c.stop();
+        }
+        bus.board = Box::new(CodecBoard(codec));
+        bus.attach_board_devices();
+        bus.i2s_input(rx_port).unwrap().push(&[[1234, -2345]]);
+
+        // IDF v5.4.3 ESP32-S3 gpio_sig_map.h and i2s_reg.h. MCLK is derived in the codec.
+        let (bck, ws, input) = if rx_port == 0 { (26, 27, 25) } else { (28, 29, 30) };
+        for (pin, route) in [(41, if connected { bck } else { 24 }), (43, ws), (42, 30)] {
+            bus.periph.io_mux.write(4 + pin * 4, 1 << 12);
+            bus.periph.gpio.write(0x554 + pin * 4, route);
+        }
+        bus.periph.io_mux.write(4 + 46 * 4, (1 << 12) | (1 << 9));
+        bus.periph.gpio.write(0x154 + input * 4, 0x80 | 46);
+        let rx = if rx_port == 0 { I2S0 } else { I2S1 };
+        bus.write32(rx + 0x28, CONF1).unwrap();
+        bus.write32(rx + 0x30, CLOCK).unwrap();
+        bus.write32(rx + 0x50, (1 << 16) | 3).unwrap();
+        bus.write32(rx + 0x64, 4).unwrap();
+        bus.write32(RX_DESC, (1 << 31) | 4).unwrap();
+        bus.write32(RX_DESC + 4, RX_BUF).unwrap();
+        bus.write32(RX_DESC + 8, 0).unwrap();
+        bus.write32(GDMA + 0x48, 3 + rx_port as u32).unwrap();
+        bus.write32(GDMA + 0x20, (1 << 22) | (RX_DESC & 0xfffff)).unwrap();
+
+        if rx_port == 1 {
+            bus.write32(I2S1 + 0x2c, CONF1).unwrap();
+            bus.write32(I2S1 + 0x34, CLOCK).unwrap();
+            bus.write32(I2S1 + 0x54, (1 << 16) | 3).unwrap();
+            bus.write32(FIRST_DESC, (3 << 30) | (4 << 12) | 4).unwrap();
+            bus.write32(FIRST_DESC + 4, TX_BUF).unwrap();
+            bus.write32(FIRST_DESC + 8, 0).unwrap();
+            bus.write32(TX_BUF, 991).unwrap();
+            bus.write32(GDMA + 0xa8, 4).unwrap();
+            bus.write32(GDMA + 0x80, (1 << 21) | (FIRST_DESC & 0xfffff)).unwrap();
+            bus.write32(I2S1 + 0x24, (1 << 27) | 4).unwrap();
+        }
+        bus.write32(rx + 0x20, if rx_port == 0 { 4 } else { 12 }).unwrap();
+        bus.tick(30_000);
+        assert_eq!(bus.read32(GDMA + 0x28).unwrap(), RX_DESC, "RX DMA EOF");
+        assert_eq!(bus.read32(RX_BUF).unwrap(), expected_rx);
+        if rx_port == 1 { assert_eq!(bus.periph.i2s1.pcm, [expected_tx]); }
+    }
+}

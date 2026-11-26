@@ -1076,7 +1076,7 @@ fn prepare<S: Soc>(m: &mut Machine<S>, o: &Opts) -> String {
         if let Err(e) = result { eprintln!("--i2s-tone: {e}"); std::process::exit(2); }
     }
     for spec in &o.mic_wav {
-        let default_port = m.bus.board_ref().i2s_codecs().map_or(0, |codecs| codecs.port);
+        let default_port = m.bus.board_ref().i2s_codecs().map_or(0, |codecs| codecs.mic_port);
         // A leading "0:" or "1:" names the controller; anything else is the path.
         let (port, path) = match spec.split_once(':') { Some((p @ ("0" | "1"), f)) => (p.parse().unwrap(), f), _ => (default_port, spec.as_str()) };
         let result = std::fs::read(path).map_err(|e| e.to_string())
