@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 use esp_periph::i2c::{I2cDevice, Reg8Device};
 use esp_soc::board::{BoardEdge, BoardModel, VirtualCycle};
+use esp_soc::camera::Gc0308;
+use esp_soc::picture::Picture;
 use esp_soc::devices::{Bmi270, DcsPanel, Ft5x06, Ft5x06Points, FT5X06_ADDRESS};
 use esp_soc::devices::imu_motion::ImuMotion;
 
@@ -114,6 +116,7 @@ pub struct Cores3Hw {
     pub panel: DcsPanel,
     pub aw9523: Aw9523,
     pub touch: Ft5x06,
+    camera: Gc0308,
     pub points: Ft5x06Points,
     pub others: Vec<(u8, Box<dyn I2cDevice>)>,
     lcd_in_reset: bool,
@@ -133,6 +136,7 @@ impl Cores3Hw {
         match address {
             Aw9523::ADDRESS => Some(&mut self.aw9523),
             FT5X06_ADDRESS => Some(&mut self.touch),
+            Gc0308::ADDRESS => Some(&mut self.camera),
             a => self.others.iter_mut().find(|(o, _)| *o == a).map(|(_, d)| &mut **d as &mut dyn I2cDevice),
         }
     }
@@ -197,11 +201,10 @@ impl Cores3 {
             (0x23, Box::new(Reg8Device::new("ltr553", &[(0x86, 0x92), (0x87, 0x05)]))),
             (0x36, Box::new(Reg8Device::new("aw88298", &[]))),
             (0x40, Box::new(Reg8Device::new("es7210", &[(0x3d, 0x72), (0x3e, 0x06)]))),
-            (0x21, Box::new(Reg8Device::new("gc0308", &[(0x00, 0x9b)]))),
         ];
         let hw = Cores3Hw {
             panel: DcsPanel::new(CORES3_LCD_W, CORES3_LCD_H), aw9523: Aw9523::new(), touch: Ft5x06::new(points.clone()),
-            points, others, lcd_in_reset: true, panel_version: 0,
+            points, others, camera: Gc0308::default(), lcd_in_reset: true, panel_version: 0,
         };
         Cores3 { hw: Rc::new(RefCell::new(hw)), soft: SoftI2c { scl: true, sda: true, ..Default::default() }, sda_release: false, imu, lcd_cs_low: false, sd_cs_low: false, cycle: 0, int_level: true,
                  edges: Vec::new(), gpio_events: 0, spi_bytes: 0 }
@@ -209,7 +212,7 @@ impl Cores3 {
 
     fn addresses(&self) -> Vec<u8> {
         let hw = self.hw.borrow_mut();
-        let mut v = vec![Aw9523::ADDRESS, FT5X06_ADDRESS];
+        let mut v = vec![Aw9523::ADDRESS, FT5X06_ADDRESS, Gc0308::ADDRESS];
         v.extend(hw.others.iter().map(|(a, _)| *a));
         v
     }
@@ -368,6 +371,12 @@ impl BoardModel for Cores3 {
         self.update_int();
     }
     fn take_edges(&mut self) -> Vec<BoardEdge> { std::mem::take(&mut self.edges) }
+    fn set_camera_picture(&mut self, picture: Picture) -> Result<(), &'static str> { self.hw.borrow_mut().camera.set_camera_picture(picture) }
+    fn camera_preview(&self, w: u32, h: u32) -> Option<Vec<u8>> { self.hw.borrow().camera.camera_preview(w, h) }
+    fn camera_frame(&mut self) -> Option<(u32, u32, Arc<Vec<u8>>)> { self.hw.borrow_mut().camera.camera_frame() }
+    // M5GFX 0.3.0 board data and M5CoreS3 examples/Basic/camera/camera.ino.
+    // The board supplies XCLK independently (pin_xclk = -1 in the sketch).
+    fn camera_dvp_pins(&self) -> Option<[u8; 11]> { Some([39, 40, 41, 42, 15, 16, 48, 47, 45, 38, 46]) }
     fn named_pin(&self, _name: &str) -> Option<u8> { None }
     fn report(&self) -> String {
         let hw = self.hw.borrow_mut();

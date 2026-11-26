@@ -1,6 +1,8 @@
 //! Camera sensor and host-frame models, independent of a SoC's capture peripheral.
 //! OV5640 register encodings and its 2624 x 1952 array remain sensor-specific;
 //! this module does not model LCD_CAM, I2S, DMA, board wiring or capture timing.
+mod gc0308;
+pub use gc0308::Gc0308;
 mod ov2640;
 pub use ov2640::{Ov2640, Ov2640State};
 
@@ -103,7 +105,7 @@ pub struct HostFrameSource {
     jpeg: Option<picture::Jpeg>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct FrameConfig { w: u32, h: u32, format: picture::PixelFormat, window: Option<([u32; 4], u32, u32)> }
+struct FrameConfig { w: u32, h: u32, format: picture::PixelFormat, window: Option<([u32; 4], u32, u32)>, flip: [bool; 2] }
 impl HostFrameSource {
     fn invalidate(&mut self) { self.cached = None; }
     pub fn set_camera_picture(&mut self, p: picture::Picture) -> Result<(), &'static str> {
@@ -129,7 +131,10 @@ impl HostFrameSource {
         Some(out)
     }
     pub fn frame(&mut self, w: u32, h: u32, format: picture::PixelFormat, window: Option<([u32; 4], u32, u32)>) -> Option<(u32, u32, std::sync::Arc<Vec<u8>>)> {
-        let config = FrameConfig { w, h, format, window };
+        self.oriented_frame(w, h, format, window, [false; 2])
+    }
+    fn oriented_frame(&mut self, w: u32, h: u32, format: picture::PixelFormat, window: Option<([u32; 4], u32, u32)>, flip: [bool; 2]) -> Option<(u32, u32, std::sync::Arc<Vec<u8>>)> {
+        let config = FrameConfig { w, h, format, window, flip };
         if self.cached.as_ref().is_none_or(|(old, _)| *old != config) {
             let black = picture::Picture { w: 1, h: 1, rgb: vec![0; 3] };
             let p = self.picture.as_ref().unwrap_or(&black);
@@ -137,7 +142,7 @@ impl HostFrameSource {
             let p = if let Some((window, array_w, array_h)) = window {
                 cropped = picture::crop(p, window, array_w, array_h)?; &cropped
             } else { p };
-            let data = picture::sensor_frame(p, w, h, format)?;
+            let data = picture::oriented_sensor_frame(p, w, h, format, flip)?;
             self.cached = Some((config, std::sync::Arc::new(data)));
         }
         self.cached.as_ref().map(|(_, frame)| (w, h, frame.clone()))
