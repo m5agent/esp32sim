@@ -14,6 +14,8 @@ use esp_soc::{Board, BoardModel, NoBoard};
 
 pub fn make_board(name: &str) -> Option<Board> {
     match name {
+        "m5stack-tab5" => Some(Box::new(crate::tab5::Tab5::new(crate::tab5::Panel::Ili9881c))),
+        "m5stack-tab5-st7123" => Some(Box::new(crate::tab5::Tab5::new(crate::tab5::Panel::St7123))),
         "none" | "bare" => Some(Box::new(NoBoard)),
         "waveshare-p4-lcd35" | "p4-lcd35" | "lcd35" => Some(Box::new(WaveshareP4Lcd35::new())),
         _ => None,

@@ -7,14 +7,14 @@
 /// releases it again, so the line the master reads is the wired AND of both. Start and stop are
 /// SDA edges while SCL is high; data is sampled on SCL rising edges and changed after falling ones.
 #[derive(Default)]
-pub(super) struct SoftI2c { pub(super) scl: bool, pub(super) sda: bool, mode: SoftMode, shift: u8, bits: u8, addr: u8, out: u8, master_ack: bool, pub(super) pull_low: bool, pub(super) transactions: u64 }
+pub struct SoftI2c { pub scl: bool, pub sda: bool, mode: SoftMode, shift: u8, bits: u8, addr: u8, out: u8, master_ack: bool, pub pull_low: bool, pub transactions: u64 }
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
 enum SoftMode { #[default] Idle, Addr, AckSlot { read: bool }, Recv, Send, MasterAck }
 
-pub(super) enum SoftOp { Start(u8, bool), Write(u8, u8), Read(u8), Stop(u8), Sync }
+pub enum SoftOp { Start(u8, bool), Write(u8, u8), Read(u8), Stop(u8), Sync }
 
 impl SoftI2c {
-    pub(super) fn levels(&mut self, scl: bool, sda: bool, mut bus: impl FnMut(SoftOp) -> u8) {
+    pub fn levels(&mut self, scl: bool, sda: bool, mut bus: impl FnMut(SoftOp) -> u8) {
         let (old_scl, old_sda) = (self.scl, self.sda);
         self.scl = scl; self.sda = sda;
         if scl && old_scl && sda != old_sda {
@@ -62,5 +62,5 @@ impl SoftI2c {
         self.out = bus(SoftOp::Read(self.addr));
         self.pull_low = self.out & 0x80 == 0; self.bits = 1; self.mode = SoftMode::Send;
     }
-    pub(super) fn idle() -> Self { Self { scl: true, sda: true, ..Default::default() } }
+    pub fn idle() -> Self { Self { scl: true, sda: true, ..Default::default() } }
 }

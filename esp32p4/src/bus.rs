@@ -383,7 +383,10 @@ impl SocBus {
         // A GP-SPI transfer reaches the board now, after the GPIO edges before it (a panel's D/C
         // line is a GPIO the driver sets right before each transaction).
         if self.periph.spi2.dma_tx_pending.is_some() { self.spi2_dma_tx(); }
-        if self.periph.spi2.has_pending_transfer() || !self.periph.gpio.g.changes.is_empty() { self.deliver_board_events(); }
+        let pads = a >> 12 == 0x500e0 && matches!(a & 0xfff, 0x04..=0x18 | 0x20..=0x34) && self.board.observes_gpio_pads();
+        if pads || self.periph.spi2.has_pending_transfer() || !self.periph.gpio.g.changes.is_empty() {
+            self.deliver_board_events(pads);
+        }
         // Interrupt delivery has latency on silicon. The mask ROM's uart_buff_switch enables a UART's interrupt just before
         // it stores which UART its handler serves; an immediate interrupt runs the handler for the previous one.
         // Only newly enabled sources wait (`EnaLatency::on_write`); a mask takes effect at once.
@@ -406,6 +409,10 @@ impl SocBus {
         let Some((w, h, bpp)) = self.periph.dsi.video() else { return };
         let mut memory = DmaView { l2mem: &mut self.l2mem, psram: &mut self.psram, mmu: &self.mmu_psram, ver: &mut self.code_ver };
         if dma.scan(&mut memory, w as usize * h as usize * bpp) {
+            if self.board.observes_ledc() {
+                let (ledc, gpio) = (&self.periph.ledc, &self.periph.gpio.g);
+                self.board.ledc_output_at(self.cycles, &|pin| ledc.output(gpio, pin));
+            }
             self.board.dsi_frame(w, h, bpp, &dma.bytes);
             self.periph.dsi.vsync();
         }
@@ -492,11 +499,16 @@ impl SocBus {
     }
 
     /// GPIO edges, then a finished GP-SPI transaction, to the board.
-    fn deliver_board_events(&mut self) {
+    fn deliver_board_events(&mut self, pads: bool) {
         let changes = std::mem::take(&mut self.periph.gpio.g.changes);
         if !changes.is_empty() {
             if let Some(ev) = &mut self.gpio_events { for &(pin, level) in &changes { ev.push((self.cycles, pin, level)); } }
+        }
+        if pads || !changes.is_empty() {
             self.board.gpio_output_at(self.cycles, &changes, self.periph.gpio.g.enable, self.periph.gpio.g.out);
+            if pads {
+                self.irq_dirty |= esp_soc::gpio::drain_board_inputs(&mut *self.board, &mut self.periph.gpio.g, &mut self.gpio_events, self.cycles);
+            }
         }
         if let Some(transfer) = self.periph.spi2.take_transfer() {
             let rx = self.board.spi_transfer(2, &transfer.tx, transfer.rx_len);
@@ -627,7 +639,7 @@ impl SocBus {
         if !self.periph.gpio.g.input_changes.is_empty() { self.pcnt_edges(); }
         if edges { self.irq_dirty |= esp_soc::gpio::drain_board_inputs(&mut *self.board, &mut self.periph.gpio.g, &mut self.gpio_events, self.cycles); }
         if self.periph.spi2.dma_tx_pending.is_some() { self.spi2_dma_tx(); }
-        if self.periph.spi2.has_pending_transfer() || !self.periph.gpio.g.changes.is_empty() { self.deliver_board_events(); }
+        if self.periph.spi2.has_pending_transfer() || !self.periph.gpio.g.changes.is_empty() { self.deliver_board_events(false); }
         if self.periph.dw_dma.due.is_some_and(|due| due <= self.cycles) { self.scan_dsi(); }
         if self.periph.i2s1.poll_active() { self.i2s1_tx(cycles as u64); }
         if self.periph.usb_otg.pending() { self.run_usb(); }

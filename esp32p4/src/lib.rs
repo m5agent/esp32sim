@@ -12,6 +12,7 @@
 //! (`periph::Clic`, `riscv_rv32::exec::CLIC_IRQ_*`).
 pub mod board;
 mod dsi;
+mod tab5;
 pub mod bus;
 pub mod coproc;
 pub mod periph;
