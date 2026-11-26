@@ -158,8 +158,10 @@ impl esp_soc::SocBus for SocBus {
         let c = self.periph.cycles_until_timer();
         // Only while UART input is queued or an INT_ENA latency is pending (one flag test otherwise).
         let uart = if self.uart_busy { self.uart_deadline() } else { None };
-        if self.periph.sdmmc.timed { return self.timed_sd_deadline(c).into_iter().chain(uart).min(); }
-        match c { u32::MAX => uart, c => Some((c.max(1) as u64).min(uart.unwrap_or(u64::MAX))) }
+        let dsi = self.periph.dw_dma.due.map(|due| due.saturating_sub(self.cycles).max(1));
+        let timer = if self.periph.sdmmc.timed { self.timed_sd_deadline(c) }
+                    else { (c != u32::MAX).then_some(c.max(1) as u64) };
+        timer.into_iter().chain(uart).chain(dsi).min()
     }
     fn irq_dirty(&mut self) -> &mut bool { &mut self.irq_dirty }
     fn refresh_irq(&mut self) -> bool { self.periph.refresh_lines(); true }

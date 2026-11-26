@@ -23,7 +23,7 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!("  --rom F               the chip's mask ROM ELF; default: $ESP32SIM_ROM_DIR, then ~/.espressif/tools/esp-rom-elfs/*/");
     eprintln!("                        (Espressif's, not in the tarball: tools/fetch-rom-elfs.sh DIR downloads all of them)");
     eprintln!("  --board NAME          board model (S3: atech14, waveshare-lcd4b, waveshare-amoled18-v2, waveshare-cam, stopwatch, m5stack-cores3, m5stack-cardputer-adv, none;");
-    eprintln!("                        C6: waveshare-c6-lcd147, xiao-esp32c6, none; P4: waveshare-p4-lcd35, none; S31: mosaico, none;");
+    eprintln!("                        C6: waveshare-c6-lcd147, xiao-esp32c6, none; P4: waveshare-p4-lcd35, m5stack-tab5, m5stack-tab5-st7123, none; S31: mosaico, none;");
     eprintln!("                        classic: ttgo-tdisplay, cyd, ulanzi-tc001, ai-thinker-cam, esp32dev, none)");
     eprintln!("  --flash-mb N, --psram-mb N   memory sizes (S3 default 8 / 2, Cardputer-ADV 8 / 0, C3, C6 and classic 4 / 0, P4 16 / 0, S31 2, mosaico 16 / 16)");
     eprintln!("  --max-seconds S       stop after S emulated seconds (always give one: the run returns)");
@@ -437,12 +437,13 @@ fn run_cosim_on<R: esp32p4::Revision>(o: &Opts, spec: &cosim::CoprocSpec) {
     let end_ns = if p4.max_cycles == u64::MAX { u64::MAX } else { (p4.max_cycles as u128 * 1_000_000_000 / esp32p4::periph::CPU_HZ as u128) as u64 };
     p4.max_cycles = u64::MAX;
     let c6 = setup_coproc(o, spec);
+    let (pins, default_en) = esp32p4::board::hosted_wiring(p4.bus.board.name());
     let cfg = cosim::Config {
-        slice_ns: spec.slice_ns.unwrap_or(cosim::DEFAULT_SLICE_NS), en_pin: spec.en_pin.unwrap_or(cosim::DEFAULT_EN_PIN), en_inverted: spec.en_inverted,
+        slice_ns: spec.slice_ns.unwrap_or(cosim::DEFAULT_SLICE_NS), en_pin: spec.en_pin.unwrap_or(default_en), en_inverted: spec.en_inverted,
         reboot_p4: !o.no_reboot && boot == "rom", reboot_c6: !o.no_reboot, p4_console: p4.console.mask, c6_console: 2,
     };
-    eprintln!("[cosim] ESP32-C6 on SDIO slot 1 (CLK 18, CMD 19, D0-D3 14-17), EN on GPIO {}{}, slices of {} µs",
-              if cfg.en_inverted { "!" } else { "" }, cfg.en_pin, cfg.slice_ns as f64 / 1000.0);
+    eprintln!("[cosim] ESP32-C6 on SDIO slot 1 (CLK {}, CMD {}, D0-D3 {:?}), EN on GPIO {}{}, slices of {} µs",
+              pins.clk, pins.cmd, pins.data, if cfg.en_inverted { "!" } else { "" }, cfg.en_pin, cfg.slice_ns as f64 / 1000.0);
     let mut c6_file = spec.console.as_ref().map(|p| std::fs::File::create(p).unwrap_or_else(|e| usage_error(&format!("--coproc console={p}: {e}"))));
     let prefix = o.console_prefix;
     let mut cs = cosim::CoSim::new(p4, c6, cfg);
@@ -736,10 +737,11 @@ fn setup_p4<R: esp32p4::Revision>(o: &Opts) -> esp_soc::Machine<esp32p4::Esp32p4
     let flash = o.flash_mb.unwrap_or(16) << 20;
     let mut m = esp32p4::machine_rev::<R>(o.mac.unwrap_or([0x30, 0xed, 0xa0, 0x00, 0x11, 0x22]), flash);
     m.bus.set_flash_size(flash);   // the JEDEC capacity follows the size
-    if let Some(mb) = o.psram_mb { m.bus.set_psram_size(mb << 20).unwrap(); }
+    let tab5 = matches!(o.board.as_str(), "m5stack-tab5" | "m5stack-tab5-st7123");
+    if let Some(mb) = o.psram_mb.or(tab5.then_some(32)) { m.bus.set_psram_size(mb << 20).unwrap(); }
     if !o.debug.is_empty() { let mut f = esp_soc::DebugFlags::from_env(); for d in &o.debug { f.parse(d); } m.set_debug(&f); }
     let board = if o.board == "atech14" { "none" } else { o.board.as_str() };   // the S3 default means "bare module" here
-    match esp32p4::board::make_board(board) { Some(b) => m.bus.board = b, None => usage_error(&format!("--board {board}: none or waveshare-p4-lcd35 on the P4")) }
+    match esp32p4::board::make_board(board) { Some(b) => m.bus.board = b, None => usage_error(&format!("--board {board}: none, waveshare-p4-lcd35, m5stack-tab5 or m5stack-tab5-st7123 on the P4")) }
     m.bus.attach_board_devices();
     for (flag, on) in [("--wifi", !o.wifi.is_empty() && o.coproc.is_none()), ("--cam-image", o.cam_image.is_some()), ("--cam-stream", o.cam_stream.is_some()), ("--cam-size", o.cam_size.is_some()), ("--flash-octal", o.flash_octal), ("--efuse-regs", o.efuse_regs.is_some()), ("--regs-init", o.regs_init.is_some()), ("--regstat", o.regstat.is_some())] {
         if on { eprintln!("{} is not available on the P4{}", flag, if flag == "--wifi" { " (it goes to a co-processor: --coproc)" } else { "" }); std::process::exit(2); }

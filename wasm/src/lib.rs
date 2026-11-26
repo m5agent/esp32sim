@@ -126,7 +126,7 @@ pub unsafe extern "C" fn esp32sim_new(board: *const u8, board_len: usize, flash_
     // SAFETY: The caller provides a readable board-name buffer for this call.
     let board = unsafe { text(board, board_len) }.to_string();
     let Some(flash_bytes) = mib_bytes(flash_mb.max(1)) else { log("[emu] flash size exceeds the supported memory range"); return std::ptr::null_mut() };
-    let Some(psram_bytes) = mib_bytes(psram_mb) else { log("[emu] PSRAM size exceeds the supported memory range"); return std::ptr::null_mut() };
+    let Some(mut psram_bytes) = mib_bytes(psram_mb) else { log("[emu] PSRAM size exceeds the supported memory range"); return std::ptr::null_mut() };
     let c6_board = if matches!(board.as_str(), "esp32c6" | "c6") {
         esp32c6::board::make_board("none")
     } else if matches!(board.as_str(), "none" | "bare") {
@@ -140,8 +140,10 @@ pub unsafe extern "C" fn esp32sim_new(board: *const u8, board_len: usize, flash_
     // (`esp32p4::coproc`), whose images load with `COPROC_KIND` / `COPROC_FLASH`.
     let (p4_name, coproc) = board.strip_suffix("+c6").map_or((board.as_str(), false), |b| (b, true));
     let p4_board = esp32p4::board::make_board(p4_name).filter(|_| !matches!(p4_name, "none" | "bare"));
-    let p4_rev3 = p4_board.is_some() || matches!(p4_name, "esp32p4-rev3" | "p4-rev3");   // the board has a v3.2 chip
-    let p4 = p4_rev3 || matches!(p4_name, "esp32p4" | "p4");
+    let tab5 = matches!(p4_name, "m5stack-tab5" | "m5stack-tab5-st7123");
+    if tab5 && psram_bytes == 0 { psram_bytes = 32 << 20; }
+    let p4_rev3 = (p4_board.is_some() && !tab5) || matches!(p4_name, "esp32p4-rev3" | "p4-rev3");
+    let p4 = p4_rev3 || tab5 || matches!(p4_name, "esp32p4" | "p4");
     // The ESP32-S31: `esp32s31` is the bare module, `mosaico` the ESP-Mosaico (the CLI's names).
     let s31_board = esp32s31::board::make_board(&board).filter(|_| !matches!(board.as_str(), "none" | "bare"));
     let s31 = s31_board.is_some() || matches!(board.as_str(), "esp32s31" | "s31");
@@ -189,8 +191,8 @@ pub unsafe extern "C" fn esp32sim_new(board: *const u8, board_len: usize, flash_
         match (p4_rev3, coproc) {
             (false, false) => MachineKind::P4(Box::new(p4_machine::<esp32p4::RevLt3>(flash_bytes, psram_bytes, p4_board))),
             (true, false) => MachineKind::P4Rev3(Box::new(p4_machine::<esp32p4::RevGe3>(flash_bytes, psram_bytes, p4_board))),
-            (false, true) => MachineKind::P4C6(Box::new(esp32p4::coproc::CoSim::new(p4_machine(flash_bytes, psram_bytes, p4_board), coproc_c6(), coproc_config()))),
-            (true, true) => MachineKind::P4Rev3C6(Box::new(esp32p4::coproc::CoSim::new(p4_machine(flash_bytes, psram_bytes, p4_board), coproc_c6(), coproc_config()))),
+            (false, true) => MachineKind::P4C6(Box::new(esp32p4::coproc::CoSim::new(p4_machine(flash_bytes, psram_bytes, p4_board), coproc_c6(), coproc_config(p4_name)))),
+            (true, true) => MachineKind::P4Rev3C6(Box::new(esp32p4::coproc::CoSim::new(p4_machine(flash_bytes, psram_bytes, p4_board), coproc_c6(), coproc_config(p4_name)))),
         }
     } else if s31 {
         // As the CLI's setup_s31: the board's NOR identity, PSRAM and eFuse (the Mosaico's, or a
@@ -256,7 +258,9 @@ fn coproc_c6() -> esp32c6::Machine {
 }
 
 /// The CLI's defaults: 10 µs slices, EN on GPIO 54, both chips rebooting, both on UART0.
-fn coproc_config() -> esp32p4::coproc::Config { esp32p4::coproc::Config::default() }
+fn coproc_config(board: &str) -> esp32p4::coproc::Config {
+    esp32p4::coproc::Config { en_pin: esp32p4::board::hosted_wiring(board).1, ..Default::default() }
+}
 
 /// The page is the one client: messages queue in a `WebServer` sink; the worker paces the run.
 fn prepare<S: Soc>(m: &mut Machine<S>) {

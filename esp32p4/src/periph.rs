@@ -24,6 +24,8 @@ pub mod src {
     pub const USB_SERIAL_JTAG: usize = 22;
     /// ETS_SPI2_INTR_SOURCE: GPSPI2
     pub const GPSPI2: usize = 25;
+    pub const DW_GDMA: usize = 24;
+    pub const DSI_BRIDGE: usize = 86;
     pub const I2C1: usize = 45;
     pub const LEDC: usize = 52;
     /// IDF v5.5.4 components/soc/esp32p4/include/soc/interrupts.h, ETS_PCNT_INTR_SOURCE.
@@ -521,7 +523,35 @@ pub const SIG_SD_WRITE_PRT: [usize; SLOTS] = [130, 131];
 /// slot 0's clock pad is SD1_CCLK_PAD, function 1 is the GPIO (register/hw_ver1/soc/io_mux_reg.h).
 fn pad_function(io_mux: &RegRam, pin: u8) -> u32 { io_mux.read(4 + 4 * pin as u32) >> 12 & 7 }
 
+/// HP SAR ADC1 timer-start and completion latch used by the v5.4.1
+/// bootloader entropy setup (bootloader_support/src/bootloader_random_esp32p4.c).
+/// Register fields: soc/esp32p4/register/soc/adc_reg.h, ADC_TIMER_EN,
+/// ADC_SAR1_DONE_INT_RAW and ADC_APB_SARADC1_DONE_INT_CLR. The first
+/// digital conversion completes at the bus boundary. Analog sampling,
+/// continuous conversions, and ADC DMA are outside this model.
+#[derive(Default)]
+pub struct Adc { ram: RegRam, raw: u32 }
+impl Device for Adc {
+    fn read(&mut self, off: u32) -> u32 {
+        match off { 0x54 => self.raw, 0x58 => self.raw & self.ram.read(0x50), _ => self.ram.read(off) }
+    }
+    fn write(&mut self, off: u32, v: u32) -> WriteEffect {
+        match off {
+            0x04 => {
+                if v & !self.ram.read(off) & (1 << 24) != 0 { self.raw |= 1 << 31; }
+                self.ram.write(off, v);
+            }
+            0x54 | 0x58 => {}
+            0x5c => self.raw &= !v,
+            _ => self.ram.write(off, v),
+        }
+        WriteEffect::NONE
+    }
+}
 pub struct Peripherals {
+    pub dsi: crate::dsi::Dsi,
+    pub adc: Adc,
+    pub dw_dma: crate::dsi::DwDma,
     pub uart: [Uart; 2],
     pub usb: UsbSerialJtag,
     pub systimer: SystimerP4,
@@ -602,6 +632,8 @@ device_set! { Peripherals; clock: (clock) CPU_HZ, [(ClockDomain::Xtal, 9), (Cloc
     0x20811 "CLIC_OTHER_CTRL" alias (clic) delta 0x11000 => [];
     0x3ff06 "ASSIST_DEBUG" (assist_debug) => [];
     0x3ff10 "CACHE" (cache) => [];
+    0x50081 "DW_GDMA" (dw_dma) => [src::DW_GDMA];
+    0x500a0 "DSI" (dsi) => [src::DSI_BRIDGE];
     0x50083 "SDMMC" (sdmmc) => [src::SDIO_HOST];
     0x50085 "AHB_DMA" (ahb_dma) => [src::AHB_DMA_OUT_CH0, src::AHB_DMA_OUT_CH0 + 1, src::AHB_DMA_OUT_CH0 + 2, NO_SOURCE, NO_SOURCE,
                                     src::AHB_DMA_IN_CH0, src::AHB_DMA_IN_CH0 + 1, src::AHB_DMA_IN_CH0 + 2, NO_SOURCE, NO_SOURCE];
@@ -625,6 +657,7 @@ device_set! { Peripherals; clock: (clock) CPU_HZ, [(ClockDomain::Xtal, 9), (Cloc
     0x500c0 "MCPWM0" optional (mcpwm[0]) => [src::PWM0];
     0x500c1 "MCPWM1" optional (mcpwm[1]) => [src::PWM0 + 1];
     0x500d6 "INTMTX" (intmtx) => [];
+    0x500de "ADC" (adc) => [];
     0x500e0 "GPIO" (gpio) => [src::GPIO_INTR0];
     0x500e1 "IO_MUX" (io_mux) => [];
     0x500e2 "SYSTIMER" (systimer) => [src::SYSTIMER_TARGET0, src::SYSTIMER_TARGET0 + 1, src::SYSTIMER_TARGET0 + 2];
@@ -681,6 +714,7 @@ impl Peripherals {
             spi0: MspiCache(flash_controller(false)), psram0: MspiCache(RegRam::new()), spi1: flash_controller(true), psram1: psram_controller(),
             sha: Sha::new(), intmtx: IntMatrix::new(), clic: Clic::default(), cache: Cache::new(), hp_sys: HpSys::default(), hp_clkrst: HpClkRst::new(),
             lp: LpAon::new(), ana_mst: AnaMst::default(), assist_debug: AssistDebug::default(), rng: Rng::new(),
+            dsi: Default::default(), dw_dma: Default::default(), adc: Default::default(),
             spi2: GpSpi::new(), i2c1: esp_periph::i2c::I2c::new(), axi_dma: AxiDma::new(), ahb_dma: AhbDma::new(), i2s1: esp_periph::I2s::new_v2_p4(CPU_HZ), ledc: Ledc::new(LedcLayout::P4), pcnt: esp_periph::Pcnt::new(esp_periph::PcntLayout::P4), mcpwm: [Self::new_mcpwm(89), Self::new_mcpwm(95)],
             misc: Misc::new(), spi_exec: false, psram_exec: false, clock: Self::new_clock(), cycle_base: 0, last_status: [0; 4],
         }

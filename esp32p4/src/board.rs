@@ -14,9 +14,20 @@ use esp_soc::{Board, BoardModel, NoBoard};
 
 pub fn make_board(name: &str) -> Option<Board> {
     match name {
+        "m5stack-tab5" => Some(Box::new(crate::tab5::Tab5::new(crate::tab5::Panel::Ili9881c))),
+        "m5stack-tab5-st7123" => Some(Box::new(crate::tab5::Tab5::new(crate::tab5::Panel::St7123))),
         "none" | "bare" => Some(Box::new(NoBoard)),
         "waveshare-p4-lcd35" | "p4-lcd35" | "lcd35" => Some(Box::new(WaveshareP4Lcd35::new())),
         _ => None,
+    }
+}
+
+/// SDIO co-processor pins on Tab5, from the M5Stack Tab5 Arduino Wi-Fi example.
+pub fn hosted_wiring(name: &str) -> (crate::periph::SdPins, u8) {
+    use crate::periph::SdPins;
+    match name {
+        "m5stack-tab5" | "m5stack-tab5-st7123" => (SdPins { clk: 12, cmd: 13, data: [11, 10, 9, 8] }, 15),
+        _ => (SdPins::HOSTED, crate::coproc::DEFAULT_EN_PIN),
     }
 }
 

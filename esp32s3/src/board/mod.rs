@@ -16,7 +16,7 @@ pub mod atech14;
 pub mod cardputer_adv;
 mod cardputer_adv_ir;
 pub mod cores3;
-mod soft_i2c;
+use esp_soc::devices::soft_i2c;
 pub mod stopwatch;
 pub mod waveshare_amoled18;
 pub mod waveshare_cam;
