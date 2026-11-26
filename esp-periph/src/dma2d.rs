@@ -7,7 +7,9 @@
 //! components/soc/esp32s31/register/soc/dma2d_{reg,struct}.h, descriptor from
 //! components/esp_hal_dma/include/hal/dma2d_types.h (`dma2d_descriptor_align8_t`), peri_sel ids
 //! from components/soc/esp32s31/include/soc/dma2d_channel.h, channel reset sequence from
-//! components/esp_hal_dma/dma2d_hal.c.
+//! components/esp_hal_dma/dma2d_hal.c. P4 rev < 3 fields and IDs checked against ESP-IDF
+//! v5.4.1/v5.5.4 soc/esp32p4 dma2d_reg.h, include/soc/dma2d_channel.h, and hal/esp32p4
+//! include/hal/dma2d_ll.h and dma2d_types.h.
 //!
 //! Model: a transfer completes synchronously when everything it needs has been started (both
 //! channels of an M2M pair; the PPA plus its channels). The FIFOs, burst lengths, arbitration,
@@ -26,6 +28,7 @@ const STRIDE: u32 = 0x100;
 const COMMON: u32 = 0xa00;
 /// Descriptors walked per transfer before the chain is treated as looping.
 const STEP_BUDGET: usize = 1 << 16;
+const STREAM_LIMIT: usize = 64 * 1024 * 1024;
 
 /// dma2d_channel.h: PPA SRM uses peri_sel 1 on both sides; blending reads background on TX 2,
 /// foreground on TX 3, writes on RX 2. M2M uses any of TX 4-7 / RX 3-7 (dma2d_ll.h masks 0xF0/0xF8).
@@ -108,13 +111,16 @@ impl Desc {
         let half = match self.pbyte() { 0 => 1, 1 => 2, 2 => 3, 3 => 4, 4 => 6, 5 => 8, _ => return None };
         let stride = self.ha() * half / 2;
         let (x, y, w, h) = if self.multiple() { (0, 0, self.ha(), self.va()) } else { (self.x(), self.y(), self.hb(), self.vb()) };
+        if w == 0 || h == 0 || x + w > self.ha() || y + h > self.va() || (x * half) & 1 != 0 { return None; }
         let start = self.buf.wrapping_add(((y * self.ha() + x) * half / 2) as u32);
-        Some((start, w * half / 2, stride, h))
+        Some((start, (w * half).div_ceil(2), stride, h))
     }
 }
 
 /// How a TX chain ended.
 struct Gathered { data: Vec<u8>, eof_desc: u32, next: u32 }
+#[derive(Clone, Copy)]
+struct Block { width: usize, height: usize, pbyte: u32 }
 
 impl Dma2d {
     pub fn new() -> Self {
@@ -140,17 +146,20 @@ impl Dma2d {
         let mut data = Vec::new();
         let mut addr = c.desc;
         for _ in 0..STEP_BUDGET {
-            if addr == 0 { return Err(Fault::Unmapped); }
+            if addr == 0 || addr & 7 != 0 { return Err(Fault::Unmapped); }
             let d = Desc::read(mem, addr)?;
             if check_owner && !d.owner() { return Err(Fault::Prohibited); }
             if d.d2() {
                 let (start, row, stride, rows) = d.rows().ok_or(Fault::Unmapped)?;
+                if data.len() + row * rows > STREAM_LIMIT { return Err(Fault::Prohibited); }
                 for r in 0..rows {
                     let at = data.len(); data.resize(at + row, 0);
                     mem.read(start.wrapping_add((r * stride) as u32), &mut data[at..])?;
                 }
             } else {
-                let at = data.len(); data.resize(at + d.length(), 0);
+                let at = data.len();
+                if at + d.length() > STREAM_LIMIT { return Err(Fault::Prohibited); }
+                data.resize(at + d.length(), 0);
                 mem.read(d.buf, &mut data[at..])?;
             }
             if wrback { mem.write(addr, &(d.w0 & !(1 << 31)).to_le_bytes())?; }
@@ -163,12 +172,18 @@ impl Dma2d {
 
     /// Write a byte stream down an RX chain. The descriptor holding the last byte gets SUC_EOF
     /// and (1D) the received length; owner is handed back to the CPU on each one used.
-    fn scatter(&mut self, ch: usize, data: &[u8], mem: &mut impl SdmmcMemory) -> Result<(), Fault> {
+    fn scatter(&mut self, ch: usize, data: &[u8], block: Option<Block>, mem: &mut impl SdmmcMemory) -> Result<(), Fault> {
         let mut addr = self.inp[ch].desc;
         let mut pos = 0;
         for _ in 0..STEP_BUDGET {
             if addr == 0 { break; }
-            let d = Desc::read(mem, addr)?;
+            if addr & 7 != 0 { return Err(Fault::Unmapped); }
+            let mut d = Desc::read(mem, addr)?;
+            if let Some(Block { width, height, pbyte }) = block {
+                if !d.d2() || d.multiple() || d.hb() == 0 || d.vb() == 0 { return Err(Fault::Prohibited); }
+                d.w0 = (d.w0 & 0xf000_0000) | (width as u32) << 14 | height as u32;
+                d.w1 = (d.w1 & 0x0fff_ffff) | pbyte << 28;
+            }
             if self.inp[ch].conf0() >> 4 & 1 != 0 && !d.owner() { return Err(Fault::Prohibited); }
             let mut w0 = d.w0 & !(1 << 31);
             if d.d2() {
@@ -179,6 +194,7 @@ impl Dma2d {
                     mem.write(start.wrapping_add((r * stride) as u32), &data[pos..pos + n])?;
                     pos += n;
                 }
+                if block.is_some() { mem.write(addr.wrapping_add(4), &d.w1.to_le_bytes())?; }
                 mem.write(addr, &(w0 | if pos >= data.len() { 1 << 30 } else { 0 }).to_le_bytes())?;
             } else {
                 let n = d.size().min(data.len() - pos);
@@ -187,7 +203,7 @@ impl Dma2d {
                 w0 = (w0 & !(0x3fff << 14)) | ((n as u32 & 0x3fff) << 14);
                 if pos >= data.len() { w0 |= 1 << 30; }
                 mem.write(addr, &w0.to_le_bytes())?;
-                mem.write(addr + 4, &((d.w1 & !(0x3fff << 14)) | ((n as u32 >> 14 & 0x3fff) << 14)).to_le_bytes())?;
+                mem.write(addr.wrapping_add(4), &((d.w1 & !(0x3fff << 14)) | ((n as u32 >> 14 & 0x3fff) << 14)).to_le_bytes())?;
             }
             if self.dbg { eprintln!("[dma2d] in{ch} desc {addr:#010x} w0={:#010x} w1={:#010x} w2={:#010x} buf={:#010x} <- {pos}/{} bytes", d.w0, d.w1, d.w2, d.buf, data.len()); }
             if pos >= data.len() {
@@ -216,21 +232,24 @@ impl Dma2d {
         if input { self.inp[ch].regs[0x4c / 4] >> 3 & 7 != 7 } else { self.out[ch].regs[0x48 / 4] >> 3 & 7 != 7 }
     }
     fn running_out(&self, peri: impl Fn(u32) -> bool) -> Option<usize> {
-        (0..DMA2D_OUT_CHANNELS).find(|&i| self.out[i].running && peri(self.out[i].regs[0x38 / 4] & 7))
+        // Arbitration between simultaneously armed channels is by priority, then channel number.
+        // Token weights and timeouts do not affect a synchronous transfer.
+        (0..DMA2D_OUT_CHANNELS).rev().filter(|&i| self.out[i].running && peri(self.out[i].regs[0x38 / 4] & 7))
+            .max_by_key(|&i| self.out[i].regs[0x3c / 4] >> 4 & 3)
     }
     fn running_in(&self, m2m: bool, peri: u32) -> Option<usize> {
-        (0..DMA2D_IN_CHANNELS).find(|&i| { let c = &self.inp[i]; c.running && (c.conf0() & 1 != 0) == m2m && (m2m || c.regs[0x3c / 4] & 7 == peri) })
+        (0..DMA2D_IN_CHANNELS).rev()
+            .filter(|&i| { let c = &self.inp[i]; c.running && (c.conf0() & 1 != 0) == m2m && (m2m || c.regs[0x3c / 4] & 7 == peri) })
+            .max_by_key(|&i| self.inp[i].regs[0x40 / 4] >> 4 & 1)
     }
 
     /// Run every transfer whose channels (and PPA engine) are all started. Returns what was refused.
     pub fn service(&mut self, ppa: &mut Ppa, mem: &mut impl SdmmcMemory) -> Vec<Refusal> {
         let mut refused = Vec::new();
         // Memory-to-memory: RX channel with IN_MEM_TRANS_EN takes the stream of a started M2M TX
-        // channel (peri_sel 4-7). The pairing the silicon uses for differing ids is not documented
-        // in the IDF sources; the same channel number is preferred, otherwise the lowest started one.
+        // channel (peri_sel 4-7). TX and RX selection IDs are independent (dma2d_channel.h).
         while let Some(rx) = self.running_in(true, 0) {
-            let tx = if self.out[rx].running && self.out[rx].regs[0x38 / 4] & 7 >= 4 { Some(rx) } else { self.running_out(|p| p >= 4) };
-            let Some(tx) = tx else { break };
+            let Some(tx) = self.running_out(|p| p >= 4) else { break };
             if self.csc_enabled(false, tx) || self.csc_enabled(true, rx) {
                 refused.push(Refusal { ppa: false, off: STRIDE * tx as u32 + 0x48 });
                 self.out[tx].running = false; self.inp[rx].running = false;
@@ -239,7 +258,7 @@ impl Dma2d {
             match self.gather(tx, mem) {
                 Ok(g) => {
                     self.finish_out(tx, &g);
-                    if self.scatter(rx, &g.data, mem).is_err() { self.in_error(rx); }
+                    if self.scatter(rx, &g.data, None, mem).is_err() { self.in_error(rx); }
                     self.transfers.0 += 1;
                 }
                 Err(_) => { self.out_error(tx); self.inp[rx].running = false; }
@@ -252,6 +271,9 @@ impl Dma2d {
             let txs: Vec<Option<usize>> = need.iter().map(|&p| self.running_out(|q| q == p)).collect();
             if let (Some(rx), true) = (rx, txs.iter().all(Option::is_some)) {
                 let txs: Vec<usize> = txs.into_iter().flatten().collect();
+                let shape = txs.first().and_then(|&tx| Desc::read(mem, self.out[tx].desc).ok())
+                    .filter(|d| d.d2() && !d.multiple()).map(|d| (d.hb(), d.vb()));
+                let pixels = shape.map_or(0, |(w, h)| w * h);
                 let mut inputs = Vec::new();
                 let mut ok = true;
                 for &tx in &txs {
@@ -263,12 +285,19 @@ impl Dma2d {
                 }
                 if ok && self.csc_enabled(true, rx) { refused.push(Refusal { ppa: false, off: IN_BASE + STRIDE * rx as u32 + 0x4c }); ok = false; }
                 if ok {
-                    match ppa.run(op, &inputs) {
-                        Ok(out) => {
-                            if self.scatter(rx, &out, mem).is_err() { self.in_error(rx); }
+                    let result = if op == PpaOp::Srm {
+                        match shape {
+                            Some((w, h)) => ppa.srm(&inputs[0], w, h)
+                                .map(|(data, width, height, pbyte)| (data, Some(Block { width, height, pbyte }))),
+                            None => { ppa.cancel(op); Err(0x64) }
+                        }
+                    } else { ppa.run(op, &inputs, pixels).map(|data| (data, None)) };
+                    match result {
+                        Ok((out, block)) => {
+                            if self.scatter(rx, &out, block, mem).is_err() { self.in_error(rx); }
                             self.transfers.1 += 1;
                         }
-                        Err(off) => { refused.push(Refusal { ppa: true, off }); self.inp[rx].running = false; }
+                        Err(off) => { refused.push(Refusal { ppa: true, off }); self.in_error(rx); }
                     }
                 } else { self.inp[rx].running = false; ppa.cancel(op); }
             }
@@ -437,7 +466,7 @@ mod tests {
         start(&mut d, false, 0, 0x100, PERI_PPA_BLEND_BG_TX, false);
         start(&mut d, false, 1, 0x140, PERI_PPA_BLEND_FG_TX, false);
         start(&mut d, true, 0, 0x200, PERI_PPA_BLEND_RX, false);
-        p.write(0x3c, 2 | 1 << 14); p.write(0x24, 2 | 2 << 8); // bg RGB565, fg ARGB8888 (0), out RGB565
+        p.write(0x24, 2 | 2 << 8); // bg RGB565, fg ARGB8888 (0), out RGB565
         p.write(0x50, 0xffffff); p.write(0x54, 0); p.write(0x58, 0xffffff); p.write(0x5c, 0);
         p.write(0x34, 1 | 1 << 3);
         assert!(d.service(&mut p, &mut m).is_empty());
@@ -446,6 +475,31 @@ mod tests {
         assert_eq!(px(0), 16 << 11 | 32 << 5 | 31);
         assert_eq!(px(1), 0xf800, "transparent foreground leaves the background");
         assert_eq!(d.transfers.1, 1);
+    }
+
+    #[test]
+    fn ppa_srm_rotates_scales_and_writes_back_the_output_geometry() {
+        let mut m = Ram(vec![0; 0x4000]);
+        // Two RGB565 pixels: red, then blue. Scale X by 2 and rotate 90° CCW.
+        m.0[0x1000..0x1004].copy_from_slice(&[0, 0xf8, 0x1f, 0]);
+        let (w0, w1, w2) = d2(1, 2, 1, 2, 3, 0, 0); desc(&mut m, 0x100, w0, w1, w2, 0x1000, 0);
+        // RX descriptor uses the IDF's placeholder 2x2 fields and no pbyte value.
+        let (w0, w1, w2) = d2(2, 2, 5, 4, 0, 1, 1); desc(&mut m, 0x200, w0, w1, w2, 0x2000, 0);
+        let (mut d, mut p) = (Dma2d::new(), Ppa::new());
+        start(&mut d, false, 2, 0x100, PERI_PPA_SRM, false);
+        start(&mut d, true, 0, 0x200, PERI_PPA_SRM, false);
+        p.write(0x20, 2 | 1 << 4); // RGB565 -> RGB888
+        p.write(0x64, 2 | 1 << 12 | 1 << 24 | 1 << 27);
+        assert!(d.service(&mut p, &mut m).is_empty());
+        for (row, color) in [[255, 0, 0], [255, 0, 0], [0, 0, 255], [0, 0, 255]].into_iter().enumerate() {
+            let addr = 0x2000 + (row + 1) * 12 + 3;
+            assert_eq!(&m.0[addr..addr + 3], &color);
+            assert_eq!((m.0[addr - 1], m.0[addr + 3]), (0, 0));
+        }
+        let rx = Desc::read(&mut m, 0x200).unwrap();
+        assert_eq!((rx.hb(), rx.vb(), rx.pbyte()), (1, 4, 4));
+        assert_eq!(p.read(0x10) & 1, 1);
+        assert_eq!(d.inp[0].int_raw() & IN_SUC_EOF, IN_SUC_EOF);
     }
 
     #[test]
