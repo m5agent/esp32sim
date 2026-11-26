@@ -115,9 +115,14 @@ impl PinRoutes<'_> {
             }
         }
         if user & (1 << 28) != 0 {
-            pins.miso = self.matrix_input(signals[1] as usize);
-            if self.gpio.func_in_sel[signals[1] as usize] & self.chip.input_select == 0 {
-                pins.miso = native.iter().find_map(|&(f, _, _, pin, _)| {
+            // USER.SIO selects D for both phases in 3-wire master mode (IDF v5.5.5
+            // spi_reg.h and esp_driver_spi/src/gpspi/spi_common.c, spid_in routing).
+            let single_io = user & (1 << 17) != 0;
+            let signal = signals[if single_io { 2 } else { 1 }] as usize;
+            pins.miso = self.matrix_input(signal);
+            if self.gpio.func_in_sel[signal] & self.chip.input_select == 0 {
+                pins.miso = native.iter().find_map(|&(f, _, d, q, _)| {
+                    let pin = if single_io { d } else { q };
                     self.input_function(pin, f).then_some(pin as u8)
                 });
             }
