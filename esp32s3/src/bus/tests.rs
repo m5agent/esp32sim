@@ -1742,6 +1742,40 @@ fn spi3_dma_reads_the_gdma_channel_of_trigger_1() {
     assert_eq!(bus.spi3_dma_fault, None);
 }
 
+#[test]
+fn spi_dma_rx_writes_selected_in_link_instead_of_w0() {
+    const DATA: u32 = 0x3fc9_0200;
+    for (host, spi, trigger) in [(2, SPI2, 0), (3, SPI3, 1)] {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut bus = SocBus::new(1024, 1024, [0; 6]);
+        bus.board = Box::new(ProbeBoard { events: Arc::clone(&events) });
+        bus.write32(FIRST_DESC, 8 | (1 << 31)).unwrap(); // capacity exceeds the transaction
+        bus.write32(FIRST_DESC + 4, DATA).unwrap();
+        bus.write32(FIRST_DESC + 8, 0).unwrap();
+        bus.write32(DATA, 0xffff_ffff).unwrap();
+        bus.periph.gdma.inp[0].running = true;
+        bus.periph.gdma.inp[0].peri_sel = 1 - trigger;
+        bus.periph.gdma.inp[1].running = true;
+        bus.periph.gdma.inp[1].peri_sel = trigger;
+        bus.periph.gdma.inp[1].desc = FIRST_DESC;
+
+        bus.write32(spi + 0x30, 1 << 27).unwrap(); // DMA_RX_ENA
+        bus.write32(spi + 0x10, 1 << 28).unwrap(); // MISO phase
+        bus.write32(spi + 0x1c, 23).unwrap();
+        bus.write32(spi + 0x98, 0xaabb_ccdd).unwrap();
+        bus.write32(spi, 1 << 24).unwrap();
+
+        assert_eq!(&*events.lock().unwrap(), &[format!("spi:{host}:[]:3")]);
+        assert_eq!(bus.read32(DATA).unwrap(), 0xff52_5150);
+        assert_eq!(bus.read32(FIRST_DESC).unwrap(), (1 << 30) | (3 << 12) | 8);
+        assert_eq!(bus.read32(spi + 0x98).unwrap(), 0xaabb_ccdd);
+        assert_eq!(bus.periph.gdma.inp[0].int_raw, 0);
+        assert_eq!(bus.periph.gdma.inp[1].int_raw & 0x1f, 3);
+        assert_eq!(bus.periph.gdma.inp[1].eof_desc, FIRST_DESC);
+        assert!(bus.irq_dirty);
+    }
+}
+
 /// A pin-aware board sees SPI3's routes through the matrix (IDF v5.5.5
 /// components/soc/esp32s3/include/soc/gpio_sig_map.h:136-147, :226): SPI3_CLK 66, SPI3_D 68,
 /// SPI3_Q 67 in, SPI3_CS0 71; LEDC_LS_SIG_OUT0 (73, right after SPI3_CS1 72) is no select, and

@@ -28,6 +28,8 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!("  --flash-mb N, --psram-mb N   memory sizes (S3 default 8 / 2, Cardputer-ADV 8 / 0, C3, C6 and classic 4 / 0, P4 16 / 0, S31 2, mosaico 16 / 16)");
     eprintln!("  --max-seconds S       stop after S emulated seconds (always give one: the run returns)");
     eprintln!("  --console usb|uart0|both|none   which consoles to print (uart0 shows the ROM and bootloader)");
+    eprintln!("  --cap NAME            Cardputer-ADV accessory: lora1262, lora868 or cc1101");
+    eprintln!("  --cap-peer IN:OUT     CAP packet link, bound and connected to IPv4 loopback UDP ports");
     eprintln!("  --imu-motion N        scripted IMU motion: 0 at rest, 1 the 30 s tilt/flip/shake script (amoled18-v2, m5stack-cardputer-adv, mosaico)");
     eprintln!("  --wifi ssid=…,psk=…   a virtual access point with DHCP, DNS, NTP and NAT to the host network");
     eprintln!("  --wifi-sta ssid=…,psk=…   a virtual station that joins the guest's own access point (not the P4)");
@@ -159,6 +161,7 @@ pub struct Opts {
     pub wifi_sta: Option<String>,
     /// whether `--net` was given, which `--wifi-sta` refuses: it configures `--wifi`'s network
     pub net_given: bool,
+    pub cap: Option<String>, pub cap_peer: Option<(u16, u16)>,
     pub board: String, pub wifi: Vec<String>, pub wifi_nearby: Vec<String>, pub ble_nearby: Vec<String>, pub ble: bool, pub ble_full: bool, pub ble_observe: bool, pub ble_scan: bool, pub net: String, pub hostfwd: Vec<String>, pub cam_image: Option<String>, pub cam_stream: Option<String>, pub cam_size: Option<String>, pub cam_fps: f64,
     pub spi2_timing: bool, pub measured_te: bool,
     /// `--imu-motion N`: scripted IMU motion mode for boards with an IMU model (0 at rest, 1 the 30 s handling script)
@@ -217,6 +220,14 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
             "--efuse-regs" => o.efuse_regs = Some(next()),
             "--regs-init" => o.regs_init = Some(next()),
             "--board" => o.board = next(),
+            "--cap" => o.cap = Some(next()),
+            "--cap-peer" => {
+                o.cap_peer = next().split_once(':').and_then(|(local, remote)| {
+                    let (local, remote) = (local.parse().ok()?, remote.parse().ok()?);
+                    (local != 0 && remote != 0 && local != remote).then_some((local, remote))
+                });
+                if o.cap_peer.is_none() { usage_error("--cap-peer: expected two distinct, nonzero UDP ports IN:OUT"); }
+            }
             "--spi2-timing" => o.spi2_timing = true,
             "--measured-te" => o.measured_te = true,
             "--imu-motion" => o.imu_motion = Some(next().parse().unwrap_or_else(|_| usage_error("--imu-motion: expected a mode number (0 rest, 1 handling script)"))),
@@ -347,6 +358,11 @@ pub fn run_cli(default_chip: &str) {
     let mut o = parse(&args, default_chip);
     if o.cam_stream.is_some() != o.cam_size.is_some() { usage_error("--cam-stream and --cam-size must be supplied together"); }
     validate_timing(&o).unwrap_or_else(|e| usage_error(&e));
+    if o.cap_peer.is_some() && o.cap.is_none() { usage_error("--cap-peer requires --cap"); }
+    if o.cap.is_some() && (!matches!(o.chip.as_str(), "s3" | "esp32s3") ||
+        !matches!(o.board.as_str(), "cardputer-adv" | "m5stack-cardputer-adv") || o.cooja || o.coproc.is_some()) {
+        usage_error("--cap requires a standalone Cardputer-ADV session");
+    }
     if o.approximate_cache { cache_config().unwrap_or_else(|e| usage_error(&e)); }
     if (o.cooja || o.coproc.is_some()) && (o.exit_on.is_some() || o.timeout.is_some() || !o.injects.is_empty() || o.uart_tcp.is_some() || o.uart1_tcp.is_some()) {
         usage_error("--exit-on, --timeout, --inject, --uart-tcp and --uart1-tcp are not available with --cooja or --coproc");
@@ -522,7 +538,11 @@ fn setup_s3(o: &Opts) -> esp32s3::Machine {
         if invalid { usage_error(message); }
     }
     let mut m = esp32s3::machine(o.mac.unwrap_or([0x44, 0x1b, 0xf6, 0x75, 0xdc, 0xe0]));
-    m.bus.board = esp32s3::board::make_board(&o.board).unwrap_or_else(|| { eprintln!("unknown board '{}' (atech14, waveshare-cam, waveshare-lcd4b, waveshare-amoled18-v2, stopwatch, m5stack-cores3, m5stack-cardputer-adv, none)", o.board); std::process::exit(2) });
+    m.bus.board = if let Some(cap) = &o.cap {
+        Box::new(esp32s3::board::CardputerAdv::new().with_cap(cap, o.cap_peer).unwrap_or_else(|e| usage_error(&e)))
+    } else {
+        esp32s3::board::make_board(&o.board).unwrap_or_else(|| { eprintln!("unknown board '{}' (atech14, waveshare-cam, waveshare-lcd4b, waveshare-amoled18-v2, stopwatch, m5stack-cores3, m5stack-cardputer-adv, none)", o.board); std::process::exit(2) })
+    };
     if o.measured_te {
         assert_eq!(m.bus.board.name(), "waveshare-amoled18-v2", "--measured-te requires the AMOLED V2 board");
         m.bus.board = Box::new(esp32s3::board::WaveshareAmoled18V2::with_measured_te());

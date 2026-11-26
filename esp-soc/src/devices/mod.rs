@@ -8,6 +8,7 @@ pub mod bm8563;
 pub mod bmi270;
 pub mod bmm150;
 pub mod bmp280;
+pub mod cc1101;
 pub mod co5300;
 pub mod dcs_panel;
 pub mod es7210;
@@ -18,6 +19,8 @@ pub mod imu_motion;
 pub mod ltr553;
 pub mod soft_i2c;
 pub mod spi_bitbang;
+pub mod st25r3916;
+pub mod sx1262;
 pub mod tca8418;
 pub mod ws2812;
 

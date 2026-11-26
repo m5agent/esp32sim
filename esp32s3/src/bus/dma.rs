@@ -209,7 +209,16 @@ impl SocBus {
         } else {
             self.board.spi_transfer(host, &transfer.tx, transfer.rx_len)
         };
-        self.periph.gpspi_mut(host).finish_transfer(transfer, &rx);
+        let spi = self.periph.gpspi_mut(host);
+        spi.finish_transfer(transfer, &rx);
+        // IDF v5.5.4 esp32s3 soc/spi_reg.h (DMA_RX_ENA) and gdma_channel.h
+        // (SPI2/3 triggers 0/1). Finish at the SPI data-phase length even when
+        // the last descriptor is larger than the transfer.
+        if let Some(data) = spi.dma_rx.take() {
+            if let Some(channel) = self.periph.gdma.in_channel_for(u32::from(host - 2)) {
+                let _ = self.scatter_dma_in(channel, &data, Some(data.len() as u32), false);
+            }
+        }
     }
 
     /// Collect one GP-SPI data phase (`host` 2 or 3) and its GDMA
