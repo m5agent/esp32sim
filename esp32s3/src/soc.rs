@@ -327,6 +327,12 @@ impl esp_soc::SocBus for SocBus {
     fn attach_sd_card(&mut self, image: Box<dyn esp_periph::sdmmc::SdStore>, config: esp_periph::sdmmc::SdCardConfig) -> Result<String, String> {
         if config.timed_bus { return Err("a timed SD bus needs the SDMMC clock tree, which the ESP32-S3 model does not decode".into()); }
         let mut card = esp_periph::sdmmc::SdCard::with_config(image, config)?;
+        if self.board.has_spi_sd_slot() {
+            let what = format!("{}, {} blocks ({}), serial {:08x}, programming {} us, in the board's SPI socket",
+                               card.describe(), card.blocks(), if card.sdxc() { "SDXC" } else { "SDHC" }, card.serial(), card.config.prg_ns / 1000);
+            self.board.insert_spi_sd(card);
+            return Ok(what);
+        }
         let what = format!("{}, {} blocks ({}), serial {:08x}, programming {} us, on the pins the firmware routes a slot's clock to", card.describe(), card.blocks(),
                            if card.sdxc() { "SDXC" } else { "SDHC" }, card.serial(), card.config.prg_ns / 1000);
         esp_periph::sdmmc::SdDevice::set_log(&mut card, self.periph.sdmmc.logging());

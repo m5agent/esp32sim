@@ -52,6 +52,9 @@ pub trait BoardModel {
     fn spi_transfer_pins(&mut self, host: u8, _pins: SpiPins, tx: &[u8], rx_len: usize) -> Vec<u8> {
         self.spi_transfer(host, tx, rx_len)
     }
+    /// Board-wired SPI card socket, if present. Other boards use the SoC's SDMMC slots.
+    fn has_spi_sd_slot(&self) -> bool { false }
+    fn insert_spi_sd(&mut self, _card: esp_periph::sdmmc::SdCard) {}
     /// Opt in to UART route decoding and receive polling. Cached by `attach_board_devices`.
     fn uses_uart_pins(&self) -> bool { false }
     /// A completed UART byte, with the routing and baud at the FIFO write. Console output is
