@@ -33,6 +33,11 @@ pub const PIN_CORES3_I2C_INT: u8 = 21;
 pub const CORES3_LCD_W: usize = 320;
 pub const CORES3_LCD_H: usize = 240;
 
+// ILI9342C V1.02, §8.2.3 (RDDIDIF). M5GFX 9bcedf4e's CoreS3 probe clocks the
+// serial dummy bit separately, then checks ID1 == 0xe3; ID2 and ID3 are unused.
+const LCD_RDDID: u8 = 0x04;
+const LCD_ID: [u8; 3] = [0xe3, 0, 0];
+
 /// AW9523B 16-bit IO expander, register map from the AW9523B datasheet (V1.1, section 9):
 /// 0x00/0x01 input P0/P1, 0x02/0x03 output, 0x04/0x05 direction (1 = input), 0x06/0x07 interrupt
 /// enable (0 = enabled), 0x10 ID (0x23), 0x11 global control, 0x12/0x13 LED mode, 0x7F soft reset.
@@ -117,13 +122,16 @@ pub struct Cores3Hw {
     pub points: Ft5x06Points,
     pub others: Vec<(u8, Box<dyn I2cDevice>)>,
     lcd_in_reset: bool,
+    lcd_id_offset: Option<usize>,
     pub panel_version: u64,
 }
 
 impl Cores3Hw {
     fn sync(&mut self) {
         let in_reset = !self.aw9523.lcd_reset_released();
-        if in_reset && !self.lcd_in_reset { self.panel.reset(); self.panel_version += 1; }
+        if in_reset && !self.lcd_in_reset {
+            self.panel.reset(); self.panel_version += 1; self.lcd_id_offset = None;
+        }
         self.lcd_in_reset = in_reset;
         let touched = self.points.lock().expect("CoreS3 touch mutex poisoned").iter().any(Option::is_some);
         let ext = self.aw9523.external;
@@ -201,7 +209,7 @@ impl Cores3 {
         ];
         let hw = Cores3Hw {
             panel: DcsPanel::new(CORES3_LCD_W, CORES3_LCD_H), aw9523: Aw9523::new(), touch: Ft5x06::new(points.clone()),
-            points, others, lcd_in_reset: true, panel_version: 0,
+            points, others, lcd_in_reset: true, lcd_id_offset: None, panel_version: 0,
         };
         Cores3 { hw: Rc::new(RefCell::new(hw)), soft: SoftI2c { scl: true, sda: true, ..Default::default() }, sda_release: false, imu, lcd_cs_low: false, sd_cs_low: false, cycle: 0, int_level: true,
                  edges: Vec::new(), gpio_events: 0, spi_bytes: 0 }
@@ -302,7 +310,10 @@ impl BoardModel for Cores3 {
         for &(pin, level) in changes {
             self.gpio_events += 1;
             match pin {
-                PIN_CORES3_LCD_CS => self.lcd_cs_low = !level,
+                PIN_CORES3_LCD_CS => {
+                    self.lcd_cs_low = !level;
+                    if level { hw.lcd_id_offset = None; }
+                }
                 PIN_CORES3_LCD_DC => hw.panel.dc = level,
                 PIN_CORES3_SD_CS => self.sd_cs_low = !level,
                 _ => {}
@@ -323,14 +334,27 @@ impl BoardModel for Cores3 {
     fn gpio_events(&self) -> u64 { self.gpio_events }
     fn spi_transfer(&mut self, host: u8, tx: &[u8], rx_len: usize) -> Vec<u8> {
         if host == 2 && self.lcd_cs_low {
+            self.spi_bytes += tx.len() as u64;
             let mut hw = self.hw.borrow_mut();
             hw.sync();
             if !hw.lcd_in_reset {
+                if !hw.panel.dc {
+                    if let Some(&command) = tx.last() { hw.lcd_id_offset = (command == LCD_RDDID).then_some(0); }
+                }
                 let before = hw.panel.pixels_written;
                 for &b in tx { hw.panel.byte(b); }
                 if hw.panel.pixels_written != before { hw.panel_version += 1; }
+                if hw.panel.dc && rx_len != 0 {
+                    if let Some(offset) = &mut hw.lcd_id_offset {
+                        let mut rx = vec![0; rx_len];
+                        let rest = &LCD_ID[*offset..];
+                        let n = rest.len().min(rx_len);
+                        rx[..n].copy_from_slice(&rest[..n]);
+                        *offset += n;
+                        return rx;
+                    }
+                }
             }
-            self.spi_bytes += tx.len() as u64;
         }
         vec![0xff; rx_len]
     }
@@ -375,5 +399,23 @@ impl BoardModel for Cores3 {
         format!("[emu] cores3: soft-i2c {} transactions; {} RAMWR, {} pixels, madctl={:#x} colmod={:#x} inverted={} on={} sleeping={} lcd_reset={} bbox={:?}; spi {} bytes; aw9523 out={:#06x} dir={:#06x}; gpio events {}",
                 self.soft.transactions, p.frames, p.pixels_written, p.madctl, p.colmod, p.inverted, p.on, p.sleeping, hw.lcd_in_reset, p.bbox(), self.spi_bytes,
                 hw.aw9523.outputs(), u16::from_le_bytes([hw.aw9523.regs[4], hw.aw9523.regs[5]]), self.gpio_events)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rddid_is_readable_across_spi_phases_until_deselect() {
+        let mut board = Cores3::new();
+        board.gpio_changes(&[(PIN_CORES3_LCD_CS, false), (PIN_CORES3_LCD_DC, false)]);
+        board.spi_transfer(2, &[0x04], 0);
+        board.gpio_changes(&[(PIN_CORES3_LCD_DC, true)]);
+        assert_eq!(board.spi_transfer(3, &[], 4), [0xff; 4]);
+        assert_eq!(board.spi_transfer(2, &[], 1), [0xe3]);
+        assert_eq!(board.spi_transfer(2, &[], 3), [0; 3]);
+        board.gpio_changes(&[(PIN_CORES3_LCD_CS, true), (PIN_CORES3_LCD_CS, false)]);
+        assert_eq!(board.spi_transfer(2, &[], 4), [0xff; 4]);
     }
 }
