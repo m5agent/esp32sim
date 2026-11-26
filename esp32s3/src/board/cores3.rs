@@ -400,7 +400,7 @@ impl BoardModel for Cores3 {
     fn i2s_codecs(&self) -> Option<I2sCodecs> {
         let hw = self.hw.borrow();
         // CoreS3 K128 schematic v1.0 and M5Unified 0.3.0 CoreS3 mic_cfg/spk_cfg.
-        Some(I2sCodecs { port: 1, bck: 34, ws: 33, mck: 0, dout: 13, din: 14,
+        Some(I2sCodecs { port: 1, mic_port: 1, bck: 34, ws: 33, mck: Some(0), dout: 13, din: 14,
                          speaker_gain: hw.amp.gain(), mic_lanes: hw.mic.lanes() })
     }
     fn display(&self) -> Option<(u32, u32, Vec<u16>, u64)> {

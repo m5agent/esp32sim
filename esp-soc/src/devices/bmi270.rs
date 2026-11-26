@@ -65,10 +65,7 @@ const PWR_CONF: usize = 0x7c;
 const PWR_CTRL: usize = 0x7d;
 const CMD: u8 = 0x7e;
 
-struct AuxBmm150 {
-    mag: Bmm150,
-    sample: Option<([f64; 3], [f64; 3])>,
-}
+struct AuxBmm150 { mag: Bmm150 }
 
 pub struct Bmi270 {
     regs: [u8; 256],
@@ -81,6 +78,7 @@ pub struct Bmi270 {
     first: bool,
     motion: Arc<ImuMotion>,
     aux: Option<Box<AuxBmm150>>,
+    sample: Option<([f64; 3], [f64; 3])>,
     /// Rate of `motion.cycle` (ticks per second of guest time).
     clock_hz: u64,
     pub resets: u32,
@@ -89,20 +87,20 @@ pub struct Bmi270 {
 impl Bmi270 {
     pub fn new(motion: Arc<ImuMotion>, clock_hz: u64) -> Self {
         let mut d = Bmi270 { regs: [0; 256], pages: [[0; 16]; 8], config: vec![0; BMI270_CONFIG_SIZE], config_bytes: 0,
-                             ptr: 0, first: true, motion, aux: None, clock_hz, resets: 0 };
+                             ptr: 0, first: true, motion, aux: None, sample: None, clock_hz, resets: 0 };
         d.reset();
         d
     }
     /// Attach a BMM150 strapped to AUX address 0x10 and expose the data-ready interrupt status.
     pub fn with_aux_bmm150(mut self, mag: Bmm150) -> Self {
-        self.aux = Some(Box::new(AuxBmm150 { mag, sample: None }));
+        self.aux = Some(Box::new(AuxBmm150 { mag }));
         self.regs[AUX_DEV_ID] = 0x20;
         self
     }
     /// Override the next conversion in sensor axes (g, dps, and optionally uT).
     pub fn set_sample(&mut self, accel: [f64; 3], gyro: [f64; 3], mag: Option<[f64; 3]>) {
+        self.sample = Some((accel, gyro));
         if let Some(aux) = &mut self.aux {
-            aux.sample = Some((accel, gyro));
             if let Some(field) = mag { aux.mag.field = field; }
         }
     }
@@ -124,7 +122,7 @@ impl Bmi270 {
     fn seconds(&self) -> f64 { self.motion.cycle.load(Relaxed) as f64 / self.clock_hz as f64 }
     /// Sample the outputs, sensortime and status for a read.
     fn latch(&mut self) {
-        let (accel, gyro) = self.aux.as_ref().and_then(|a| a.sample).unwrap_or_else(|| {
+        let (accel, gyro) = self.sample.unwrap_or_else(|| {
             if self.motion.mode.load(Relaxed) != 0 { motion_script_screen(self.seconds()) } else { ([0.0, 0.0, 1.0], [0.0; 3]) }
         });
         let pwr = self.regs[PWR_CTRL];
@@ -150,8 +148,8 @@ impl Bmi270 {
                 Self::aux_read(&mut self.regs, &mut aux.mag, ready, conf & 3);
                 if self.regs[DATA_AUX + 6] & 1 != 0 { self.regs[STATUS] |= 0x20; }
             }
-            self.regs[INT_STATUS_1] = if self.regs[INT_MAP_DATA] & 0x44 != 0 { self.regs[STATUS] & 0xe0 } else { 0 };
         }
+        self.regs[INT_STATUS_1] = if self.regs[INT_MAP_DATA] & 0x44 != 0 { self.regs[STATUS] & 0xe0 } else { 0 };
         let ticks = (self.seconds() * 25600.0) as u32;  // 39.0625 us per LSB
         self.regs[SENSORTIME..SENSORTIME + 3].copy_from_slice(&ticks.to_le_bytes()[..3]);
         // 0x0000 is 23 C, 1/512 K per LSB; 0x8000 means invalid (temperature sensor off).
@@ -331,6 +329,26 @@ mod tests {
     }
 
     #[test]
+    fn m5unified_combined_read_without_aux_sensor() {
+        let mut d = Bmi270::new(Arc::default(), 1_000_000_000);
+        init(&mut d);
+        // M5Unified 0.3.0 BMI270_Class::begin probes the optional magnetometer
+        // even on ADV. A missing AUX response leaves accel and gyro enabled.
+        for (reg, val) in [(INT_MAP_DATA, 0xff), (IF_CONF, 0x20), (PWR_CONF, 0),
+            (PWR_CTRL, 0x0e), (AUX_IF_CONF, 0x80), (AUX_DEV_ID, 0x20),
+            (AUX_WR_DATA, 0x83), (AUX_WR_ADDR, 0x4b), (AUX_RD_ADDR, 0x40)] {
+            wr(&mut d, reg as u8, &[val]);
+        }
+        assert_eq!(rd(&mut d, DATA_AUX as u8, 1), [0]);
+        assert_eq!(rd(&mut d, INT_STATUS_1 as u8, 1), [0xc0]);
+        d.set_sample([0.5, -0.25, 1.0], [125.0, -250.0, 0.0], None);
+        let data = rd(&mut d, DATA_AUX as u8, 20);
+        let expected: Vec<u8> = [0i16, 0, 0, 0, 2048, -1024, 4096, 2048, -4096, 0]
+            .into_iter().flat_map(i16::to_le_bytes).collect();
+        assert_eq!(data, expected);
+    }
+
+    #[test]
     fn m5unified_aux_setup_and_combined_data_read() {
         let mut d = Bmi270::new(Arc::default(), 1_000_000_000).with_aux_bmm150(Bmm150::new(Default::default()));
         init(&mut d);
@@ -362,7 +380,7 @@ mod tests {
         assert_eq!(rd(&mut d, INT_STATUS_1 as u8, 1), [0xe0]);
 
         d.set_sample([0.5, -0.25, 1.0], [125.0, -250.0, 0.0], Some([20.0, -10.0, 30.0]));
-        let words = |bytes: Vec<u8>| bytes.chunks_exact(2).map(|p| i16::from_le_bytes([p[0], p[1]])).collect::<Vec<_>>();
+        let words = |bytes: Vec<u8>| bytes.as_chunks::<2>().0.iter().copied().map(i16::from_le_bytes).collect::<Vec<_>>();
         let burst = words(rd(&mut d, DATA_AUX as u8, 20));
         assert_eq!(&burst[..4], &[66 << 3, -33 << 3, 86 << 1, 6926 << 2 | 1]);
         assert_eq!(&burst[4..], &[2048, -1024, 4096, 2048, -4096, 0]);

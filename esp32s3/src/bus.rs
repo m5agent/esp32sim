@@ -339,6 +339,7 @@ impl SocBus {
         if self.board.observes_gpio_pads() {
             self.board.gpio_waveform_at(self.cycles, esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux));
         }
+        self.periph.rtc.analog.set_defaults(self.board.default_analog_inputs());
         self.uart_pins = self.board.uses_uart_pins();
         self.board_edges = self.board.uses_gpio_edges();
         self.board_ledc = self.board.observes_ledc();

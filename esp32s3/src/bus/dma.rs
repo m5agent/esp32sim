@@ -317,24 +317,25 @@ impl SocBus {
         Ok(())
     }
 
-    /// CoreS3 clock routes: IDF v5.4.3 esp32s3 gpio_sig_map.h. The master side of a
-    /// full-duplex I2S1 bus supplies both BCK and WS on the shared pins.
-    fn i2s1_clock_wired(&self, codecs: &esp_soc::board::I2sCodecs, rx_master: bool) -> bool {
-        let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
-        let (bck, ws) = if rx_master { (31, 32) } else { (28, 29) };
-        routes.matrix_output(codecs.bck as usize, bck) && routes.matrix_output(codecs.ws as usize, ws)
+    // ESP-IDF v5.4.3 gpio_sig_map.h: I2S0 BCK/WS TX 22/24 and RX 26/27;
+    // I2S1 TX 28/29 and RX 31/32. The master supplies both clocks in duplex mode.
+    fn i2s_clock_signals(port: usize, rx_master: bool) -> [usize; 2] {
+        match (port, rx_master) { (0, false) => [22, 24], (0, true) => [26, 27],
+                                 (_, false) => [28, 29], (_, true) => [31, 32] }
     }
 
     fn dma_i2s_rx(&mut self, cycles: u64, port: u32) {
         let Some(ch) = self.periph.gdma.in_channel_for(3 + port) else { return };
-        let mut signals = esp_periph::i2s::RxSignals { data: if port == 0 { 25 } else { 30 }, clock: if port == 0 { [26, 27] } else { [31, 32] }, input_select_bit: 7, output_mask: 0x3ff };
-        let lanes = self.board.i2s_codecs().filter(|codecs| codecs.port == port as usize).map_or([true; 2], |codecs| {
-            let rx_master = !self.periph.i2s1.rx_slave();
-            if !rx_master { signals.clock = [28, 29]; }
+        let mut signals = esp_periph::i2s::RxSignals { data: if port == 0 { 25 } else { 30 }, clock: Self::i2s_clock_signals(port as usize, true), input_select_bit: 7, output_mask: 0x3ff };
+        let lanes = self.board.i2s_codecs().filter(|c| [c.mic_port, c.port].contains(&(port as usize))).map_or([true; 2], |c| {
+            let i2s = if port == 0 { &self.periph.i2s0 } else { &self.periph.i2s1 };
+            signals.clock = Self::i2s_clock_signals(port as usize, !i2s.rx_slave());
+            let [bck, ws] = signals.clock;
             let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
-            if self.i2s1_clock_wired(&codecs, rx_master)
-                && routes.matrix_input(30) == Some(codecs.din) && routes.matrix_output(codecs.mck as usize, 21) {
-                codecs.mic_lanes
+            if routes.matrix_output(c.bck as usize, bck as u32) && routes.matrix_output(c.ws as usize, ws as u32)
+                && routes.matrix_input(signals.data) == Some(c.din)
+                && c.mck.is_none_or(|pin| routes.matrix_output(pin as usize, if port == 0 { 23 } else { 21 })) {
+                c.mic_lanes
             } else { [false; 2] }
         });
         let mut bank = self.periph.i2s0.take_pcm_bank();
@@ -408,8 +409,11 @@ impl SocBus {
         if let Some(codecs) = self.board.i2s_codecs() {
             if which != codecs.port { return; }
             let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
-            let gain = if self.i2s1_clock_wired(&codecs, self.periph.i2s1.tx_slave())
-                && routes.matrix_output(codecs.dout as usize, 30) { codecs.speaker_gain } else { 0.0 };
+            let i2s = if which == 0 { &self.periph.i2s0 } else { &self.periph.i2s1 };
+            let [bck, ws] = Self::i2s_clock_signals(which, i2s.tx_slave());
+            let gain = if routes.matrix_output(codecs.bck as usize, bck as u32)
+                && routes.matrix_output(codecs.ws as usize, ws as u32)
+                && routes.matrix_output(codecs.dout as usize, if which == 0 { 25 } else { 30 }) { codecs.speaker_gain } else { 0.0 };
             if gain == 0.0 { samples.fill(0); }
             else if gain != 1.0 { for sample in &mut samples { *sample = (f32::from(*sample) * gain).round() as i16; } }
         }
