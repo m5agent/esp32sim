@@ -1,7 +1,10 @@
 //! M5Stack Tab5 display/touch and internal I²C wiring (M5GFX 0.3.0, board_detect/m5/esp32p4*).
+use crate::tab5_aux::{Ina226, Rx8130};
 use esp_periph::i2c::{I2cDevice, Reg8Device};
-use esp_soc::board::{BoardEdge, I2sCodecs, VirtualCycle};
+use esp_soc::board::{BoardEdge, I2sCodecs, SpiPins, VirtualCycle};
 use esp_soc::devices::es7210::Es7210;
+use esp_soc::devices::{Bmi270, BMI270_ADDRESS};
+use esp_soc::devices::imu_motion::ImuMotion;
 use esp_soc::devices::gt911::{Gt911, TouchState};
 use esp_soc::devices::soft_i2c::{SoftI2c, SoftOp};
 use esp_soc::BoardModel;
@@ -74,7 +77,7 @@ pub struct Tab5 {
     screen: Vec<u16>,
     sleeping: bool, on: bool, page: u8,
     scans: u64, version: u64, reads: u64,
-    contacts: Points, goodix: Arc<Mutex<TouchState>>,
+    contacts: Points,
     bus: Vec<(u8, DevicePort)>,
     soft: SoftI2c,
     edges: Vec<BoardEdge>,
@@ -85,28 +88,42 @@ pub struct Tab5 {
     mic: Rc<RefCell<Es7210>>,
     dac: Rc<RefCell<Reg8Device>>,
     rails: Rc<RefCell<Reg8Device>>,
+    charger: Rc<RefCell<Reg8Device>>,
+    rtc: Rc<RefCell<Rx8130>>,
+    battery: Rc<RefCell<Ina226>>,
+    imu: Rc<RefCell<Bmi270>>,
+    motion: Arc<ImuMotion>,
+    sd_spi: Option<esp_periph::sdmmc::SpiSdCard>,
 }
 impl Tab5 {
     pub fn new(panel: Panel) -> Self {
-        let (contacts, goodix): (Points, Arc<Mutex<TouchState>>) = (Default::default(), Default::default());
+        let contacts = Points::default();
         // The two PI4IOE5V6408s retain direction and output latches across
         // transactions, including when the guest switches from bit-bang to I2C1.
-        let pi4io = || Reg8Device::new("pi4ioe5v6408", &[(1, 0xa0), (3, 0xff)]);
+        let pi4io = || Reg8Device::new("pi4ioe5v6408", &[(1, 0xa0), (7, 0xff), (0xb, 0xff)]);
         let rails = Rc::new(RefCell::new(pi4io()));
+        let charger = Rc::new(RefCell::new(pi4io()));
+        charger.borrow_mut().regs[0x0f] = 1 << 6;
+        let rtc = Rc::new(RefCell::new(Rx8130::new()));
+        let battery = Rc::new(RefCell::new(Ina226::new()));
         let mic = Rc::new(RefCell::new(Es7210::new()));
         // ES8388 control registers used by M5Unified 0.3.0's Tab5 speaker callback.
         // Reset starts with CHIPPOWER/DACPOWER down and DACCONTROL3 muted.
         let dac = Rc::new(RefCell::new(Reg8Device::new("es8388", &[(2, 0xc3), (4, 0xc0), (25, 4)])));
-        let mut bus = vec![(0x43, DevicePort(rails.clone())), (0x44, DevicePort::new(pi4io())),
+        let mut bus = vec![(0x43, DevicePort(rails.clone())), (0x44, DevicePort(charger.clone())),
+                           (Rx8130::ADDRESS, DevicePort(rtc.clone())), (Ina226::ADDRESS, DevicePort(battery.clone())),
                            (Es7210::ADDRESS, DevicePort(mic.clone())), (0x10, DevicePort(dac.clone()))];
+        let motion = Arc::<ImuMotion>::default();
+        let imu = Rc::new(RefCell::new(Bmi270::new(motion.clone(), crate::periph::CPU_HZ)));
+        bus.push((BMI270_ADDRESS, DevicePort(imu.clone())));
         let goodix_pending = Rc::new(Cell::new(false));
         match panel {
-            Panel::Ili9881c => bus.push((0x14, DevicePort::new(Gt911::new(goodix.clone(), WIDTH as u16, HEIGHT as u16).with_pending(goodix_pending.clone())))),
+            Panel::Ili9881c => bus.push((0x14, DevicePort::new(Gt911::new_multi(contacts.clone(), WIDTH as u16, HEIGHT as u16).with_pending(goodix_pending.clone())))),
             Panel::St7123 => bus.push((0x55, DevicePort::new(Sitronix { pointer: 0, phase: 0, points: contacts.clone(), report: [0; 35] }))),
         }
         Self { panel, screen: Vec::new(), sleeping: true, on: false, page: 0,
-               scans: 0, version: 0, reads: 0, contacts, goodix, bus, soft: SoftI2c::idle(),
-               edges: Vec::new(), released: Vec::new(), touch_irq: true, goodix_pending, backlight: None, mic, dac, rails }
+               scans: 0, version: 0, reads: 0, contacts, bus, soft: SoftI2c::idle(),
+               edges: Vec::new(), released: Vec::new(), touch_irq: true, goodix_pending, backlight: None, mic, dac, rails, charger, rtc, battery, imu, motion, sd_spi: None }
     }
 
     fn contact(&mut self, cycle: VirtualCycle, id: usize, x: u16, y: u16, down: bool) -> bool {
@@ -114,10 +131,8 @@ impl Tab5 {
         let irq = {
             let mut points = self.contacts.lock().unwrap();
             let Some(point) = points.get_mut(id) else { return false };
-            if self.panel == Panel::Ili9881c && id != 0 { return false; }
             point.update(x, y, down);
             if self.panel == Panel::Ili9881c {
-                self.goodix.lock().unwrap().update(x, y, down);
                 self.goodix_pending.set(true);
                 false
             } else { !points.iter().any(|point| point.down && !point.release_pending) }
@@ -149,9 +164,25 @@ impl BoardModel for Tab5 {
         Some(I2sCodecs { port: 0, mic_port: 0, bck: 27, ws: 29, mck: Some(30), dout: 26, din: 28,
                         speaker_gain: if enabled { 1.0 } else { 0.0 }, mic_lanes: self.mic.borrow().lanes() })
     }
+    fn has_spi_sd_slot(&self) -> bool { true }
+    fn uses_spi_pins(&self) -> bool { self.sd_spi.is_some() }
+    fn insert_spi_sd(&mut self, card: esp_periph::sdmmc::SdCard) {
+        self.sd_spi = Some(esp_periph::sdmmc::SpiSdCard::new(card));
+    }
+    fn spi_transfer_pins(&mut self, host: u8, pins: SpiPins, tx: &[u8], rx_len: usize) -> Vec<u8> {
+        // Tab5 Arduino microSD example: D3/CS=42, CLK=43, CMD/MOSI=44, D0/MISO=39.
+        let socket = SpiPins { sclk: 1 << 43, mosi: 1 << 44, miso: Some(39), cs: 1 << 42 };
+        let time = self.motion.cycle.load(std::sync::atomic::Ordering::Relaxed);
+        let ns = (u128::from(time) * 1_000_000_000 / u128::from(crate::periph::CPU_HZ)) as u64;
+        self.sd_spi.as_mut().filter(|_| host == 2).and_then(|card| pins.transfer_sd(socket, card, tx, rx_len, ns))
+            .unwrap_or_else(|| vec![0xff; rx_len])
+    }
     fn observes_gpio_pads(&self) -> bool { true }
-    fn gpio_output_at(&mut self, cycle: VirtualCycle, _: &[(u8, bool)], enabled: u64, output: u64) {
+    fn gpio_output_at(&mut self, cycle: VirtualCycle, changes: &[(u8, bool)], enabled: u64, output: u64) {
         let high = |pin| enabled & (1u64 << pin) == 0 || output & (1u64 << pin) != 0;
+        if changes.contains(&(42, true)) {
+            if let Some(sd) = &mut self.sd_spi { sd.deselect(); }
+        }
         let (scl, sda) = (high(SCL), high(SDA));
         let before = self.soft.pull_low;
         let mut transport = |op| {
@@ -183,6 +214,8 @@ impl BoardModel for Tab5 {
     }
     fn input_levels(&self) -> Vec<(u8, bool)> { vec![(INT, self.touch_irq)] }
     fn advance_to(&mut self, cycle: VirtualCycle) {
+        self.motion.cycle.store(cycle, std::sync::atomic::Ordering::Relaxed);
+        self.rtc.borrow_mut().advance(cycle);
         if self.panel == Panel::Ili9881c && !self.touch_irq && !self.goodix_pending.get() {
             self.touch_irq = true;
             self.edges.push(BoardEdge { cycle, pin: INT, level: true });
@@ -192,8 +225,23 @@ impl BoardModel for Tab5 {
     fn released_inputs(&mut self) -> Vec<u8> { std::mem::take(&mut self.released) }
     fn touch_at(&mut self, cycle: VirtualCycle, x: u16, y: u16, down: bool) { self.contact(cycle, 0, x, y, down); }
     fn touch(&mut self, x: u16, y: u16, down: bool) { self.touch_at(0, x, y, down); }
-    fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "contact" | "usb-hid" | "usb-msc" | "usb-report" | "usb-key" | "usb-unplug") }
+    fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "contact" | "imu" | "battery" | "usb-hid" | "usb-msc" | "usb-report" | "usb-key" | "usb-unplug") }
     fn board_command(&mut self, cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
+        if let ("battery", [mv, ma, charging]) = (verb, args) {
+            let (Ok(mv), Ok(ma), "0" | "1") = (mv.parse::<u16>(), ma.parse::<i16>(), *charging) else { return false; };
+            if mv > 16000 { return false; }
+            self.battery.borrow_mut().supply(mv, ma);
+            // M5Unified Tab5: IOE1 P6 reads the IP2326's active-low charging output.
+            let mut charger = self.charger.borrow_mut();
+            charger.regs[0x0f] = charger.regs[0x0f] & !(1 << 6) | (u8::from(*charging == "0") << 6);
+            return true;
+        }
+        if let ("imu", [ax, ay, az, gx, gy, gz]) = (verb, args) {
+            let values = [ax, ay, az, gx, gy, gz].map(|s| s.parse::<f64>().ok().filter(|v| v.is_finite()));
+            let [Some(ax), Some(ay), Some(az), Some(gx), Some(gy), Some(gz)] = values else { return false; };
+            self.imu.borrow_mut().set_sample([ax, ay, az], [gx, gy, gz], None);
+            return true;
+        }
         let ("contact", [id, x, y, down]) = (verb, args) else { return false };
         let (Ok(id), Ok(x), Ok(y), Ok(down @ 0..=1)) = (id.parse(), x.parse(), y.parse(), down.parse::<u8>()) else { return false };
         self.contact(cycle, id, x, y, down != 0)
@@ -249,8 +297,9 @@ impl BoardModel for Tab5 {
     fn display_frames(&self) -> u64 { self.scans }
     fn display_version(&self) -> u64 { self.version }
     fn report(&self) -> String {
-        format!("[emu] {}: DSI scans={} reads={} on={} sleep={} software I2C transactions={} backlight PWM={:?}",
-                self.name(), self.scans, self.reads, self.on, self.sleeping, self.soft.transactions, self.backlight)
+        let display = format!("[emu] {}: DSI scans={} reads={} on={} sleep={} software I2C transactions={} backlight PWM={:?}",
+                self.name(), self.scans, self.reads, self.on, self.sleeping, self.soft.transactions, self.backlight);
+        if let Some(sd) = &self.sd_spi { format!("{display}\n{}", sd.report()) } else { display }
     }
 }
 

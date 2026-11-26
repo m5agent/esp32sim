@@ -319,7 +319,13 @@ impl esp_soc::SocBus for SocBus {
     /// it through slot 0 or, routing those pins through the GPIO matrix, slot 1.
     fn attach_sd_card(&mut self, image: Box<dyn esp_periph::sdmmc::SdStore>, config: esp_periph::sdmmc::SdCardConfig) -> Result<String, String> {
         let timed = config.timed_bus;
+        let (image, spi) = if self.board.has_spi_sd_slot() {
+            let shared = crate::tab5_aux::SocketStore(std::rc::Rc::new(std::cell::RefCell::new(image)));
+            let spi = esp_periph::sdmmc::SdCard::with_config(Box::new(shared.clone()), config.clone())?;
+            (Box::new(shared) as Box<dyn esp_periph::sdmmc::SdStore>, Some(spi))
+        } else { (image, None) };
         let card = esp_periph::sdmmc::SdCard::with_config(image, config)?;
+        if let Some(spi) = spi { self.board.insert_spi_sd(spi); }
         let what = format!("{}, {} blocks ({}), serial {:08x}, programming {} us, at CLK {} CMD {} D0-D3 {:?}", card.describe(), card.blocks(), if card.sdxc() { "SDXC" } else { "SDHC" },
                            card.serial(), card.config.prg_ns / 1000, periph::SdPins::SOCKET.clk, periph::SdPins::SOCKET.cmd, periph::SdPins::SOCKET.data);
         self.periph.sdmmc.timed = timed;

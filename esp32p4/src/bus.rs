@@ -572,7 +572,17 @@ impl SocBus {
             }
         }
         if let Some(transfer) = self.periph.spi2.take_transfer() {
-            let rx = self.board.spi_transfer(2, &transfer.tx, transfer.rx_len);
+            let rx = if self.board.uses_spi_pins() {
+                let gpio = &self.periph.gpio;
+                // IDF v5.5.4 gpio_sig_map.h: SPI2_CK/D/Q = 53/55/54.
+                let pins = esp_soc::board::SpiPins {
+                    sclk: u64::from(gpio.out_signal(43) == 53) << 43,
+                    mosi: u64::from(gpio.out_signal(44) == 55) << 44,
+                    miso: (gpio.g.func_in_sel[54] & 0xbf == 0x80 | 39).then_some(39),
+                    cs: u64::from(gpio.drive(42) == Some(false)) << 42,
+                };
+                self.board.spi_transfer_pins(2, pins, &transfer.tx, transfer.rx_len)
+            } else { self.board.spi_transfer(2, &transfer.tx, transfer.rx_len) };
             self.periph.spi2.finish_transfer(transfer, &rx);
             self.irq_dirty = true;
         }

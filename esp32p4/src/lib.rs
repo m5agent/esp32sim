@@ -13,6 +13,7 @@
 pub mod board;
 mod dsi;
 mod tab5;
+mod tab5_aux;
 pub mod bus;
 pub mod coproc;
 pub mod periph;
