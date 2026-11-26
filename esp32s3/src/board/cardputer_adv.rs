@@ -72,6 +72,7 @@ pub struct CardputerAdv {
     lcd_version: u64,
     lcd_gpio_reads: u64,
     lcd_spi_bytes: u64,
+    lcd_spi2_bytes: u64,
     keyboard: Rc<RefCell<Tca8418>>,
     key_up: Vec<(u8, u8, VirtualCycle)>,
     imu: Rc<RefCell<Bmi270>>,
@@ -102,7 +103,7 @@ impl CardputerAdv {
         let soft_codec = codec.i2c_port();
         Self { lcd: DcsPanel::st7789(), lcd_gpio: SpiBitBang::new(LCD_CLK, LCD_DATA, LCD_CS),
                lcd_cmd: 0, lcd_read_bit: 0, lcd_reset: false, lcd_selected: false, lcd_clk: false,
-               lcd_bl: false, lcd_version: 0, lcd_gpio_reads: 0, lcd_spi_bytes: 0,
+               lcd_bl: false, lcd_version: 0, lcd_gpio_reads: 0, lcd_spi_bytes: 0, lcd_spi2_bytes: 0,
                keyboard: Default::default(), key_up: Vec::new(), key_int_high: true,
                imu: Rc::new(RefCell::new(Bmi270::new(motion.clone(), CPU_HZ))), motion,
                codec, soft_codec, sd: None, sd_cs_low: false,
@@ -266,14 +267,17 @@ impl BoardModel for CardputerAdv {
             if let Some(rx) = pins.transfer_sd(TF, sd, tx, rx_len, now_ns) { return rx; }
         }
         let mut rx = vec![0xff; rx_len];
-        if host != 3 || self.lcd_reset || pins.cs & (1 << LCD_CS) == 0 || pins.sclk & (1 << LCD_CLK) == 0 { return rx; }
+        // M5GFX 9bcedf4 probes RDDID on SPI2 before moving the LCD to SPI3.
+        // Both hosts can reach these same wires, independently of the SD routes.
+        if !matches!(host, 2 | 3) || self.lcd_reset || pins.cs & (1 << LCD_CS) == 0 || pins.sclk & (1 << LCD_CLK) == 0 { return rx; }
         if self.lcd.dc && rx_len != 0 && pins.miso == Some(LCD_DATA) && !self.lcd_id().is_empty() {
             for byte in &mut rx {
                 *byte = *self.lcd_id().get(self.lcd_read_bit / 8).unwrap_or(&0);
                 self.lcd_read_bit = self.lcd_read_bit.saturating_add(8);
             }
         } else if pins.mosi & (1 << LCD_DATA) != 0 {
-            self.lcd_spi_bytes += tx.len() as u64;
+            if host == 2 { self.lcd_spi2_bytes += tx.len() as u64; }
+            else { self.lcd_spi_bytes += tx.len() as u64; }
             for &byte in tx { self.lcd_byte(byte); }
         }
         rx
@@ -356,6 +360,7 @@ impl BoardModel for CardputerAdv {
     fn report(&self) -> String {
         let mut report = format!("[emu] cardputer-adv: {} GPIO LCD reads, {} SPI3 LCD bytes, {} RAMWR, {} pixels, MADCTL={:#04x}, backlight={}; {} GPIO I2C ACKs, {} keyboard events read",
             self.lcd_gpio_reads, self.lcd_spi_bytes, self.lcd.frames, self.lcd.pixels_written, self.lcd.madctl, self.lcd_bl, self.soft_acks, self.keyboard.borrow().read_count());
+        if self.lcd_spi2_bytes != 0 { report += &format!("; {} SPI2 LCD bytes", self.lcd_spi2_bytes); }
         if self.ir.count != 0 {
             report += &format!("\n[emu] cardputer-adv GPIO44 NEC: {} frames", self.ir.count);
             for &(address, command) in &self.ir.recent { report += &format!(" address=0x{address:04x}/command=0x{command:02x}"); }
@@ -407,12 +412,55 @@ mod tests {
     }
 
     #[test]
+    fn spi2_rddid_reads_the_st7789_on_the_shared_data_pin() {
+        // ESP-IDF v5.5.5 esp32s3 spi_reg.h, io_mux_reg.h and gpio_sig_map.h.
+        const SPI2: u32 = 0x6002_4000;
+        const GPIO: u32 = 0x6000_4000;
+        const MUX: u32 = 0x6000_9004;
+        const READ: u32 = 1 << 28;
+        const SIO: u32 = 1 << 17;
+        let transfer = |bus: &mut crate::bus::SocBus, user, bits: u32| {
+            bus.write32(SPI2 + 0x10, user).unwrap();
+            bus.write32(SPI2 + 0x1c, bits - 1).unwrap();
+            bus.write32(SPI2, 1 << 24).unwrap();
+            bus.read32(SPI2 + 0x98).unwrap()
+        };
+        for native in [false, true] {
+            let mut bus = crate::bus::SocBus::new(8 << 20, 0, [0; 6]);
+            bus.board = Box::new(CardputerAdv::new());
+            bus.attach_board_devices();
+            let dc = 1 << (LCD_DC - 32);
+            let cs = 1 << (LCD_CS - 32);
+            for pin in [LCD_CS, LCD_DC] {
+                bus.write32(MUX + 4 * u32::from(pin), 1 << 12).unwrap();
+            }
+            let function = if native { 2 } else { 1 };
+            for (pin, signal) in [(LCD_DATA, 103), (LCD_CLK, 101)] {
+                bus.write32(MUX + 4 * u32::from(pin), (function << 12) | (1 << 9)).unwrap();
+                if !native { bus.write32(GPIO + 0x554 + 4 * u32::from(pin), signal).unwrap(); }
+            }
+            if !native { bus.write32(GPIO + 0x154 + 4 * 103, 0x80 | u32::from(LCD_DATA)).unwrap(); }
+            bus.write32(SPI2 + 0x20, 0x3f).unwrap(); // hardware CS disabled
+            bus.write32(GPIO + 0x30, dc | cs).unwrap(); // GPIO CS and D/C low
+            bus.write32(SPI2 + 0x98, 0x04).unwrap();
+            transfer(&mut bus, 1 << 27, 8);
+            bus.write32(GPIO + 0x14, dc).unwrap();
+            assert_eq!(transfer(&mut bus, READ, 32), u32::MAX); // separate Q is unwired
+            assert_eq!(transfer(&mut bus, READ | SIO, 32), 0x0052_8585);
+            bus.write32(GPIO + 0x14, cs).unwrap();
+            assert_eq!(transfer(&mut bus, READ | SIO, 32), u32::MAX);
+            bus.write32(GPIO + 0x18, cs).unwrap();
+            assert_eq!(transfer(&mut bus, READ | SIO, 32), u32::MAX); // new selection
+        }
+    }
+
+    #[test]
     fn spi3_read_id_follows_physical_select_and_data_routes() {
         let mut board = CardputerAdv::new();
         let route = SpiPins { sclk: 1 << LCD_CLK, mosi: 1 << LCD_DATA, cs: 1 << LCD_CS, miso: Some(LCD_DATA) };
         board.spi_transfer_pins(3, route, &[0x04], 0);
         board.lcd.dc = true;
-        assert_eq!(board.spi_transfer_pins(2, route, &[], 1), [0xff]);
+        assert_eq!(board.spi_transfer_pins(1, route, &[], 1), [0xff]);
         assert_eq!(board.spi_transfer_pins(3, SpiPins { cs: 0, ..route }, &[], 1), [0xff]);
         assert_eq!(board.spi_transfer_pins(3, route, &[], 2), [0x85, 0x85]);
         assert_eq!(board.spi_transfer_pins(3, route, &[], 1), [0x52]);
