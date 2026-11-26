@@ -22,10 +22,32 @@ pub struct SpiPins {
     pub cs: u64,
 }
 
+impl SpiPins {
+    /// Clock an SPI SD socket. The board must also call deselect on CS rising
+    /// edges between transactions. The return value is None for another bus's pins.
+    pub fn transfer_sd(self, socket: SpiPins, card: &mut esp_periph::sdmmc::SpiSdCard,
+                       tx: &[u8], rx_len: usize, now_ns: u64) -> Option<Vec<u8>> {
+        if self.sclk & socket.sclk == 0 { return None; }
+        let mut rx = vec![0xff; rx_len];
+        if self.cs & socket.cs == 0 { card.deselect(); return Some(rx); }
+        let miso = self.miso.is_some() && self.miso == socket.miso;
+        let mosi = self.mosi & socket.mosi != 0;
+        for i in 0..tx.len().max(rx_len) {
+            let input = if mosi { tx.get(i).copied().unwrap_or(0xff) } else { 0xff };
+            let output = card.exchange(input, now_ns);
+            if miso {
+                if let Some(byte) = rx.get_mut(i) { *byte = output; }
+            }
+        }
+        Some(rx)
+    }
+}
+
 /// I2S transducers wired to the same clock pins. PCM levels are digital.
 pub struct I2sCodecs {
-    pub port: usize,
-    pub bck: u8, pub ws: u8, pub mck: u8, pub dout: u8, pub din: u8,
+    pub port: usize, // TX controller
+    pub mic_port: usize, // Preferred RX controller for host PCM input
+    pub bck: u8, pub ws: u8, pub mck: Option<u8>, pub dout: u8, pub din: u8,
     pub speaker_gain: f32,
     pub mic_lanes: [bool; 2],
 }
@@ -74,6 +96,8 @@ pub trait BoardModel {
     fn gpio_events(&self) -> u64 { 0 }
     /// Devices on the I2C buses: (bus, 7-bit address, device).
     fn i2c_devices(&mut self) -> Vec<(u8, u8, Box<dyn I2cDevice>)> { Vec::new() }
+    /// Default ADC pad voltages. Host-provided voltage or raw inputs override them.
+    fn default_analog_inputs(&self) -> &'static [(u8, f32)] { &[] }
     /// Board-wired I2S codecs, with the current I2C-controlled signal gates.
     fn i2s_codecs(&self) -> Option<I2sCodecs> { None }
     /// Give the board's camera a picture to look at (RGB888).
@@ -185,4 +209,28 @@ pub struct NoBoard;
 impl BoardModel for NoBoard {
     fn name(&self) -> &'static str { "none" }
     fn uses_gpio_edges(&self) -> bool { false }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use esp_periph::sdmmc::{MemStore, SdCard, SpiSdCard};
+
+    #[test]
+    fn dedicated_sd_pins_route_commands_and_release_miso() {
+        let sd = SpiPins { sclk: 1 << 40, mosi: 1 << 14, miso: Some(39), cs: 1 << 12 };
+        let mut card = SpiSdCard::new(SdCard::new(Box::new(MemStore(vec![0; 1 << 20]))).unwrap());
+        let cmd0 = [0x40, 0, 0, 0, 0, 0x95];
+        let lcd = SpiPins { sclk: 1 << 36, ..sd };
+        assert_eq!(lcd.transfer_sd(sd, &mut card, &cmd0, 0, 0), None);
+        let wrong_mosi = SpiPins { mosi: 0, ..sd };
+        assert_eq!(wrong_mosi.transfer_sd(sd, &mut card, &cmd0, 8, 0).unwrap(), [0xff; 8]);
+        assert_eq!(sd.transfer_sd(sd, &mut card, &cmd0[..3], 0, 0).unwrap(), []);
+        let deselected = SpiPins { cs: 0, ..sd };
+        assert_eq!(deselected.transfer_sd(sd, &mut card, &[], 1, 0).unwrap(), [0xff]);
+        assert_eq!(sd.transfer_sd(sd, &mut card, &cmd0[3..], 8, 0).unwrap(), [0xff; 8]);
+        let wrong_miso = SpiPins { miso: Some(38), ..sd };
+        assert_eq!(wrong_miso.transfer_sd(sd, &mut card, &cmd0, 6, 0).unwrap(), [0xff; 6]);
+        assert!(sd.transfer_sd(sd, &mut card, &[], 8, 0).unwrap().contains(&1), "CMD0 R1 idle");
+    }
 }

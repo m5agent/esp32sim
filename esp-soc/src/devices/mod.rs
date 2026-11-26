@@ -11,6 +11,7 @@ pub mod bmp280;
 pub mod co5300;
 pub mod dcs_panel;
 pub mod es7210;
+pub mod es8311;
 pub mod ft5x06;
 pub mod imu_motion;
 pub mod ltr553;

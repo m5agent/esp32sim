@@ -34,9 +34,10 @@ impl std::fmt::Debug for AnalogSource {
 pub struct AdcObservation { pub generation: u64, pub raw: u16 }
 
 #[derive(Default)]
-pub struct AnalogInputs { pins: HashMap<u8, AnalogSource>, raw: HashMap<u8, u16>, observed: HashMap<u8, AdcObservation>, pub cpu_hz: u64 }
+pub struct AnalogInputs { pins: HashMap<u8, AnalogSource>, raw: HashMap<u8, u16>, defaults: &'static [(u8, f32)], observed: HashMap<u8, AdcObservation>, pub cpu_hz: u64 }
 impl AnalogInputs {
     pub fn new(cpu_hz: u64) -> Self { AnalogInputs { cpu_hz, ..Default::default() } }
+    pub fn set_defaults(&mut self, volts: &'static [(u8, f32)]) { self.defaults = volts; }
     pub fn set(&mut self, pin: u8, src: AnalogSource) { self.raw.remove(&pin); self.pins.insert(pin, src); }
     /// Replace the voltage source with a post-attenuation 12-bit count. Invalid counts leave it intact.
     pub fn set_raw(&mut self, pin: u8, raw: u16) -> bool {
@@ -59,7 +60,7 @@ impl AnalogInputs {
     pub fn convert(&mut self, pin: u8, now: u64, code: impl FnOnce(f32) -> u32) -> u32 {
         let raw = self.raw.get(&pin).copied().unwrap_or_else(|| match self.pins.get(&pin) {
             Some(AnalogSource::RawStream(stream)) => stream.sample(now, self.cpu_hz),
-            source => code(self.source_volts(source, now)) as u16,
+            source => code(self.source_volts(pin, source, now)) as u16,
         });
         let sample = self.observed.entry(pin).or_default();
         sample.generation = sample.generation.wrapping_add(1); sample.raw = raw;
@@ -67,10 +68,11 @@ impl AnalogInputs {
     }
     /// Volts on `pin` at `now_cycles` (0 V for undriven pads or raw-count sources).
     pub fn volts(&self, pin: u8, now_cycles: u64) -> f32 {
-        self.source_volts(self.pins.get(&pin), now_cycles)
+        self.source_volts(pin, self.pins.get(&pin), now_cycles)
     }
-    fn source_volts(&self, source: Option<&AnalogSource>, now_cycles: u64) -> f32 {
+    fn source_volts(&self, pin: u8, source: Option<&AnalogSource>, now_cycles: u64) -> f32 {
         match source {
+            None if !self.defaults.is_empty() && !self.raw.contains_key(&pin) => self.defaults.iter().find(|&&(gpio, _)| gpio == pin).map_or(0.0, |&(_, volts)| volts),
             None | Some(AnalogSource::RawStream(_)) => 0.0,
             Some(AnalogSource::Const(v)) => *v,
             Some(AnalogSource::Stream(stream)) => stream.sample(now_cycles, self.cpu_hz),
