@@ -26,6 +26,10 @@ pub mod src {
     pub const GPSPI2: usize = 25;
     pub const DW_GDMA: usize = 24;
     pub const DSI_BRIDGE: usize = 86;
+    // IDF v5.4.1/v5.5.4 soc/interrupts.h: DMA2D RX0/1 and TX0/1/2 on rev < 3.
+    pub const PPA: usize = 96;
+    pub const DMA2D_IN_CH0: usize = 104;
+    pub const DMA2D_OUT_CH0: usize = 106;
     pub const I2C1: usize = 45;
     pub const LEDC: usize = 52;
     /// IDF v5.5.4 components/soc/esp32p4/include/soc/interrupts.h, ETS_PCNT_INTR_SOURCE.
@@ -552,6 +556,8 @@ pub struct Peripherals {
     pub dsi: crate::dsi::Dsi,
     pub adc: Adc,
     pub dw_dma: crate::dsi::DwDma,
+    pub dma2d: esp_periph::dma2d::Dma2d,
+    pub ppa: esp_periph::ppa::Ppa,
     pub uart: [Uart; 2],
     pub usb: UsbSerialJtag,
     pub systimer: SystimerP4,
@@ -635,6 +641,9 @@ device_set! { Peripherals; clock: (clock) CPU_HZ, [(ClockDomain::Xtal, 9), (Cloc
     0x50081 "DW_GDMA" (dw_dma) => [src::DW_GDMA];
     0x500a0 "DSI" (dsi) => [src::DSI_BRIDGE];
     0x50083 "SDMMC" (sdmmc) => [src::SDIO_HOST];
+    0x50087 "PPA" (ppa) => [src::PPA];
+    0x50088 "DMA2D" (dma2d) => [src::DMA2D_IN_CH0, src::DMA2D_IN_CH0 + 1, NO_SOURCE,
+                                src::DMA2D_OUT_CH0, src::DMA2D_OUT_CH0 + 1, src::DMA2D_OUT_CH0 + 2];
     0x50085 "AHB_DMA" (ahb_dma) => [src::AHB_DMA_OUT_CH0, src::AHB_DMA_OUT_CH0 + 1, src::AHB_DMA_OUT_CH0 + 2, NO_SOURCE, NO_SOURCE,
                                     src::AHB_DMA_IN_CH0, src::AHB_DMA_IN_CH0 + 1, src::AHB_DMA_IN_CH0 + 2, NO_SOURCE, NO_SOURCE];
     0x5008a "AXI_DMA" (axi_dma) => [src::AXI_DMA_OUT_CH0, src::AXI_DMA_OUT_CH0 + 1, src::AXI_DMA_OUT_CH0 + 2, NO_SOURCE, NO_SOURCE,
@@ -714,7 +723,7 @@ impl Peripherals {
             spi0: MspiCache(flash_controller(false)), psram0: MspiCache(RegRam::new()), spi1: flash_controller(true), psram1: psram_controller(),
             sha: Sha::new(), intmtx: IntMatrix::new(), clic: Clic::default(), cache: Cache::new(), hp_sys: HpSys::default(), hp_clkrst: HpClkRst::new(),
             lp: LpAon::new(), ana_mst: AnaMst::default(), assist_debug: AssistDebug::default(), rng: Rng::new(),
-            dsi: Default::default(), dw_dma: Default::default(), adc: Default::default(),
+            dsi: Default::default(), dw_dma: Default::default(), dma2d: Default::default(), ppa: Default::default(), adc: Default::default(),
             spi2: GpSpi::new(), i2c1: esp_periph::i2c::I2c::new(), axi_dma: AxiDma::new(), ahb_dma: AhbDma::new(), i2s1: esp_periph::I2s::new_v2_p4(CPU_HZ), ledc: Ledc::new(LedcLayout::P4), pcnt: esp_periph::Pcnt::new(esp_periph::PcntLayout::P4), mcpwm: [Self::new_mcpwm(89), Self::new_mcpwm(95)],
             misc: Misc::new(), spi_exec: false, psram_exec: false, clock: Self::new_clock(), cycle_base: 0, last_status: [0; 4],
         }

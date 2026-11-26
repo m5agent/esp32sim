@@ -373,6 +373,8 @@ impl SocBus {
                 self.schedule_dsi();
             }
             crate::dsi::DW_DMA_BLOCK => self.schedule_dsi(),
+            // IDF v5.4.1/v5.5.4 soc/reg_base.h, DR_REG_PPA_BASE / DR_REG_DMA2D_BASE.
+            0x50087 | 0x50088 => self.run_dma2d(),
             _ => {}
         }
         // the store that asks for a software reset is where ASSIST_DEBUG finds this core
@@ -393,6 +395,15 @@ impl SocBus {
         match ena_port {
             Some(i) => { if self.ena_latency.on_write(old_ena, self.periph.uart[i].int_ena) { self.irq_dirty = true; } else { self.uart_busy = true; } }
             None => self.irq_dirty = true,
+        }
+    }
+
+    #[cold]
+    fn run_dma2d(&mut self) {
+        let mut memory = DmaView { l2mem: &mut self.l2mem, psram: &mut self.psram, mmu: &self.mmu_psram, ver: &mut self.code_ver };
+        let refused = self.periph.dma2d.service(&mut self.periph.ppa, &mut memory);
+        if self.periph.dma2d.dbg || self.periph.ppa.dbg {
+            for r in refused { eprintln!("[graphics] {} +{:#05x}: unsupported configuration", if r.ppa { "PPA" } else { "DMA2D" }, r.off); }
         }
     }
 
@@ -930,6 +941,36 @@ mod tests {
         b.write32(0x5008_3000, 1 << 4).unwrap();
         b.periph.refresh_lines();
         assert_eq!(b.periph.source_status()[0] >> crate::periph::src::SDIO_HOST & 1, 1, "source 23 asserted");
+    }
+
+    #[test]
+    fn dma2d_and_ppa_fill_through_the_p4_bus_and_signal_the_interrupt_matrix() {
+        let mut b = SocBus::new(0x1000, [0; 6], (1, 0));
+        let rx = 0x5008_8500;
+        let ppa = 0x5008_7000;
+        let desc = 0x4ff0_1000;
+        let dst = 0x4ff0_2000;
+        // Fill a two-pixel RGB565 window in the second row of a 4x2 destination.
+        for (i, word) in [0xe000_8001, 0x3001_0002, 0x4001, dst, 0].into_iter().enumerate() {
+            b.write32(desc + i as u32 * 4, word).unwrap();
+        }
+        assert_ne!(b.read32(0x5008_8224).unwrap() & (1 << 24), 0);
+        for (off, value) in [(0x08, 2), (0x3c, 2), (0x20, desc), (0x1c, 1 << 22)] {
+            b.write32(rx + off, value).unwrap();
+        }
+        for (off, value) in [(0x18, 2), (0x24, 2 << 8), (0x3c, 2 | 1 << 14), (0x4c, 0xf800), (0x34, 13)] {
+            b.write32(ppa + off, value).unwrap();
+        }
+        assert_eq!(b.read32(dst + 8).unwrap(), 0xf800_0000);
+        assert_eq!(b.read32(dst + 12).unwrap(), 0x0000_f800);
+        assert_eq!(b.read32(rx + 0x28).unwrap(), desc);
+        let mask = (1 << (crate::periph::src::DMA2D_IN_CH0 - 96)) | (1 << (crate::periph::src::PPA - 96));
+        b.periph.refresh_lines();
+        assert_eq!(b.periph.source_status()[3] & mask, mask);
+        b.write32(rx + 0x10, 2).unwrap();
+        b.write32(ppa + 0x1c, 2).unwrap();
+        b.periph.refresh_lines();
+        assert_eq!(b.periph.source_status()[3] & mask, 0);
     }
 
     /// A chip reset keeps the USB cable and its VBUS; the host sees the reset core's pull-up go.
