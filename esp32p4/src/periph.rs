@@ -36,6 +36,7 @@ pub mod src {
     pub const PCNT: usize = 111;
     /// ETS_PWM0_INTR_SOURCE, ETS_PWM1_INTR_SOURCE (same header).
     pub const PWM0: usize = 38;
+    pub const I2S0: usize = 27;
     pub const I2S1: usize = 28;
     /// ETS_AHB_PDMA_IN_CH0..2 (56-58) and OUT_CH0..2 (59-61)
     pub const AHB_DMA_IN_CH0: usize = 56;
@@ -59,7 +60,7 @@ pub mod src {
     pub fn name(s: usize) -> &'static str {
         match s {
             USB_SERIAL_JTAG => "USB_SERIAL_JTAG", SDIO_HOST => "SDIO_HOST", GPSPI2 => "SPI2", I2C1 => "I2C1", LEDC => "LEDC",
-            I2S1 => "I2S1", 56..=58 => "AHB_PDMA_IN", 59..=61 => "AHB_PDMA_OUT", 62..=64 => "AXI_PDMA_IN", 65..=67 => "AXI_PDMA_OUT", UART0 => "UART0", UART1 => "UART1", TG0_T0 => "TG0_T0", TG0_T1 => "TG0_T1",
+            I2S0 => "I2S0", I2S1 => "I2S1", 56..=58 => "AHB_PDMA_IN", 59..=61 => "AHB_PDMA_OUT", 62..=64 => "AXI_PDMA_IN", 65..=67 => "AXI_PDMA_OUT", UART0 => "UART0", UART1 => "UART1", TG0_T0 => "TG0_T0", TG0_T1 => "TG0_T1",
             TG1_T0 => "TG1_T0", TG1_T1 => "TG1_T1", 53 => "SYSTIMER_TARGET0", 54 => "SYSTIMER_TARGET1", 55 => "SYSTIMER_TARGET2",
             GPIO_INTR0 => "GPIO_INTR0", 79 => "FROM_CPU_INTR0", 80 => "FROM_CPU_INTR1", 81 => "FROM_CPU_INTR2", 82 => "FROM_CPU_INTR3",
             USB_OTG => "USB_OTG", _ => "?",
@@ -601,6 +602,7 @@ pub struct Peripherals {
     /// I2S1 (0x500C7000), the BSP's codec port (CONFIG_BSP_I2S_NUM 1): the shared model in the
     /// P4/S31 field layout (IDF v5.5.4 register/hw_ver3/soc/i2s_reg.h: TX_CONF1 BITS_MOD 18:14,
     /// TX_CONF MONO bit 6), its TX clock from HP_SYS_CLKRST (`i2s1_clock`). RX's clock is not read.
+    pub i2s0: esp_periph::I2s,
     pub i2s1: esp_periph::I2s,
     /// LEDC (0x500D3000); its clock is HP_SYS_CLKRST PERI_CLK_CTRL22's (`ledc_clock`)
     pub ledc: Ledc,
@@ -655,6 +657,7 @@ device_set! { Peripherals; clock: (clock) CPU_HZ, [(ClockDomain::Xtal, 9), (Cloc
     0x50091 "SHA" (sha) => [];
     0x500c2 "TIMG0" (timg[0]) => [src::TG0_T0, src::TG0_T1];
     0x500c5 "I2C1" (i2c1) => [src::I2C1];
+    0x500c6 "I2S0" (i2s0) => [src::I2S0];
     0x500c7 "I2S1" (i2s1) => [src::I2S1];
     0x500c3 "TIMG1" (timg[1]) => [src::TG1_T0, src::TG1_T1];
     0x500ca "UART0" (uart[0]) => [src::UART0];
@@ -724,7 +727,7 @@ impl Peripherals {
             sha: Sha::new(), intmtx: IntMatrix::new(), clic: Clic::default(), cache: Cache::new(), hp_sys: HpSys::default(), hp_clkrst: HpClkRst::new(),
             lp: LpAon::new(), ana_mst: AnaMst::default(), assist_debug: AssistDebug::default(), rng: Rng::new(),
             dsi: Default::default(), dw_dma: Default::default(), dma2d: Default::default(), ppa: Default::default(), adc: Default::default(),
-            spi2: GpSpi::new(), i2c1: esp_periph::i2c::I2c::new(), axi_dma: AxiDma::new(), ahb_dma: AhbDma::new(), i2s1: esp_periph::I2s::new_v2_p4(CPU_HZ), ledc: Ledc::new(LedcLayout::P4), pcnt: esp_periph::Pcnt::new(esp_periph::PcntLayout::P4), mcpwm: [Self::new_mcpwm(89), Self::new_mcpwm(95)],
+            spi2: GpSpi::new(), i2c1: esp_periph::i2c::I2c::new(), axi_dma: AxiDma::new(), ahb_dma: AhbDma::new(), i2s0: esp_periph::I2s::new_v2_p4(CPU_HZ), i2s1: esp_periph::I2s::new_v2_p4(CPU_HZ), ledc: Ledc::new(LedcLayout::P4), pcnt: esp_periph::Pcnt::new(esp_periph::PcntLayout::P4), mcpwm: [Self::new_mcpwm(89), Self::new_mcpwm(95)],
             misc: Misc::new(), spi_exec: false, psram_exec: false, clock: Self::new_clock(), cycle_base: 0, last_status: [0; 4],
         }
     }
@@ -763,6 +766,7 @@ impl Peripherals {
         let fx = mmio::write32(self, addr, v);
         if addr == 0x500e_609c { self.ledc_clock(v); }
         if addr == 0x500e_6094 { self.mcpwm_clock(v); }
+        if (0x500e_604c..=0x500e_6050).contains(&addr) { self.i2s0_clock(); }
         if (0x500e_6054..=0x500e_605c).contains(&addr) { self.i2s1_clock(); }
         if fx.contains(WriteEffect::SPI_EXEC | WriteEffect::PERIPH_RESET) {
             if fx.contains(WriteEffect::PERIPH_RESET) {
@@ -774,6 +778,15 @@ impl Peripherals {
             }
             if fx.contains(WriteEffect::SPI_EXEC) { if addr >> 12 == 0x5008f { self.psram_exec = true; } else { self.spi_exec = true; } }
         }
+    }
+
+    /// ESP-IDF v5.5.4 hw_ver1/soc/hp_sys_clkrst_reg.h: I2S0 TX clock is split
+    /// over PERI_CLK_CTRL13 (enable, source, N, X) and CTRL14 (Y, Z, YN1).
+    fn i2s0_clock(&mut self) {
+        let [c13, c14] = [0x4c, 0x50].map(|off| Device::read(&mut self.hp_clkrst, off));
+        let ctrl0 = c13 >> 10 & 0x7ff;
+        let div = (c13 >> 21 & 0x1ff) | (c14 & 0x7ffff) << 9;
+        self.i2s0.set_v2_clock(ctrl0, div);
     }
 
     /// HP_SYS_CLKRST PERI_CLK_CTRL15-17, I2S1's TX clock (register/hw_ver3/soc/hp_sys_clkrst_reg.h:

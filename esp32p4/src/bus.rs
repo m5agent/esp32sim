@@ -438,17 +438,19 @@ impl SocBus {
         for (pin, level) in self.board.input_levels() { self.irq_dirty |= self.periph.gpio.g.set_input(pin, level); }
     }
 
-    /// I2S1's transmit DMA through the AHB-GDMA (trigger 4), paced by the frame rate: the frames
+    /// I2S TX through AHB-GDMA, paced by the frame rate (IDF v5.5.4 soc/gdma_channel.h:
+    /// I2S0 trigger 3, I2S1 trigger 4). The frames
     /// due since the last call are taken from the OUT chain, a descriptor at a time, each one
     /// written back to the CPU when AUTO_WRBACK is set, with OUT_DONE, OUT_EOF on a SUC_EOF one and
     /// OUT_TOTAL_EOF when that one ends the chain, as the S3's pump does (esp32s3/src/bus/dma.rs).
     /// Descriptors are read through the shared `DescriptorWalk`, with its step budget. The
     /// first slot of each frame goes to the audio sink. IDF's I2S driver keeps a ring of
     /// descriptors, so the stream runs as long as it refills them.
-    fn i2s1_tx(&mut self, cycles: u64) {
-        let (frames, bpf, sample_bytes) = { let i = &mut self.periph.i2s1; (i.frames_due(cycles), i.bytes_per_frame as usize, i.sample_bytes()) };
+    fn i2s_tx(&mut self, port: u32, cycles: u64) {
+        let i = if port == 0 { &mut self.periph.i2s0 } else { &mut self.periph.i2s1 };
+        let (frames, bpf, sample_bytes) = (i.frames_due(cycles), i.bytes_per_frame as usize, i.sample_bytes());
         if frames == 0 || bpf == 0 { return; }
-        let Some(ch) = self.periph.ahb_dma.gdma.out_channel_for(4) else { return };
+        let Some(ch) = self.periph.ahb_dma.gdma.out_channel_for(3 + port) else { return };
         let mut need = frames as usize * bpf;
         // the bytes of every descriptor taken, so a frame split between two stays whole
         let mut stream: Vec<u8> = Vec::with_capacity(need);
@@ -490,7 +492,7 @@ impl SocBus {
         let samples: Vec<i16> = stream.chunks_exact(bpf)
             .map(|f| if sample_bytes == 1 { (f[0] as i8 as i16) << 8 } else { i16::from_le_bytes([f[sample_bytes - 2], f[sample_bytes - 1]]) })
             .collect();
-        if !samples.is_empty() { let i = &mut self.periph.i2s1; i.frames_out += samples.len() as u64; i.pcm.extend_from_slice(&samples); }
+        if !samples.is_empty() { i.frames_out += samples.len() as u64; i.pcm.extend_from_slice(&samples); }
     }
 
     /// GPSPI2's transmit DMA through the AXI-GDMA (trigger 1): one finite gather per transaction,
@@ -652,7 +654,8 @@ impl SocBus {
         if self.periph.spi2.dma_tx_pending.is_some() { self.spi2_dma_tx(); }
         if self.periph.spi2.has_pending_transfer() || !self.periph.gpio.g.changes.is_empty() { self.deliver_board_events(false); }
         if self.periph.dw_dma.due.is_some_and(|due| due <= self.cycles) { self.scan_dsi(); }
-        if self.periph.i2s1.poll_active() { self.i2s1_tx(cycles as u64); }
+        if self.periph.i2s0.poll_active() { self.i2s_tx(0, cycles as u64); }
+        if self.periph.i2s1.poll_active() { self.i2s_tx(1, cycles as u64); }
         if self.periph.usb_otg.pending() { self.run_usb(); }
         if self.periph.sdmmc.timed { self.sd_time(); }
     }
@@ -754,6 +757,27 @@ impl Bus for SocBus {
 mod tests {
     use super::*;
 
+    #[test]
+    fn i2s0_consumes_its_own_dma_chain_for_tab5_playback() {
+        let mut b = SocBus::new(0x1000, [0; 6], (1, 0));
+        let (desc, buffer) = (0x4ff0_1000, 0x4ff0_2000);
+        b.write32(buffer, 0x2222_1111).unwrap();
+        for (i, word) in [0xc000_4004, buffer, 0].into_iter().enumerate() {
+            b.write32(desc + i as u32 * 4, word).unwrap();
+        }
+        let ch = &mut b.periph.ahb_dma.gdma.out[0];
+        ch.running = true;
+        ch.desc = desc;
+        ch.peri_sel = 3;
+        b.write32(0x500c_602c, 15 << 14 | 15 << 19).unwrap(); // 16-bit samples and slots
+        b.write32(0x500c_6054, 1 << 16 | 3).unwrap(); // two slots
+        b.write32(0x500c_6024, 4).unwrap(); // TX_START
+        b.i2s_tx(0, crate::periph::CPU_HZ);
+        assert_eq!(b.periph.i2s0.pcm, [0x1111]);
+        assert_eq!(b.periph.i2s1.frames_out, 0);
+        assert_eq!(b.periph.ahb_dma.gdma.out[0].int_raw & 0xb, 0xb);
+    }
+
     /// I2S1's transmit chain read from a guest-chosen descriptor address: one at the top of the
     /// address space reads unmapped words, an OUT_DSCR_ERR, not an overflow (a panic in a debug
     /// build); a chain of descriptors that loops ends at the walk's step budget, with no frames.
@@ -763,7 +787,7 @@ mod tests {
         b.periph.i2s1.write(0x24, 1 << 2);                            // TX_START
         let ch = &mut b.periph.ahb_dma.gdma.out[0];
         (ch.peri_sel, ch.running, ch.desc) = (4, true, 0xffff_fffc);
-        b.i2s1_tx(crate::periph::CPU_HZ);
+        b.i2s_tx(1, crate::periph::CPU_HZ);
         let ch = b.periph.ahb_dma.gdma.out[0];
         assert!(!ch.running && ch.int_raw & 1 << 2 != 0, "OUT_DSCR_ERR: {:#x}", ch.int_raw);
         // An owned descriptor of length 0 pointing at itself, in L2MEM.
@@ -771,7 +795,7 @@ mod tests {
         for (o, v) in [(0, 1u32 << 31), (4, d), (8, d)] { b.write32(d + o, v).unwrap(); }
         let ch = &mut b.periph.ahb_dma.gdma.out[0];
         (ch.running, ch.desc, ch.int_raw) = (true, d, 0);
-        b.i2s1_tx(crate::periph::CPU_HZ);
+        b.i2s_tx(1, crate::periph::CPU_HZ);
         assert!(b.periph.i2s1.pcm.is_empty());
         assert_eq!(b.periph.ahb_dma.gdma.out[0].int_raw & 1 << 3, 0, "no OUT_TOTAL_EOF");
     }
@@ -789,7 +813,7 @@ mod tests {
         for (a, v) in [(d1 + 0x100, 0x2222_1111), (d1 + 0x104, 0x3333), (d1 + 0x200, 0x4444)] { b.write32(a, v).unwrap(); }
         let ch = &mut b.periph.ahb_dma.gdma.out[0];
         (ch.peri_sel, ch.running, ch.desc) = (4, true, d1);
-        b.i2s1_tx(crate::periph::CPU_HZ);
+        b.i2s_tx(1, crate::periph::CPU_HZ);
         assert_eq!(b.periph.i2s1.pcm, [0x1111, 0x3333], "the first slot of each frame");
         assert!(b.periph.ahb_dma.gdma.out[0].int_raw & 1 << 3 != 0, "OUT_TOTAL_EOF");
     }
@@ -1161,7 +1185,7 @@ mod tests {
         for (o, v) in [(0, 1u32 << 31 | 1 << 30 | 4 << 12 | 4), (4, d + 0x100), (8, 0)] { b.write32(d + o, v).unwrap(); }
         let ch = &mut b.periph.ahb_dma.gdma.out[0];
         (ch.peri_sel, ch.running, ch.desc, ch.conf0) = (4, true, d, 1 << 2);
-        assert!(moves(&mut b, d, |b| b.i2s1_tx(crate::periph::CPU_HZ)), "AHB-GDMA write-back");
+        assert!(moves(&mut b, d, |b| b.i2s_tx(1, crate::periph::CPU_HZ)), "AHB-GDMA write-back");
         assert_eq!(b.read32(d).unwrap() >> 31, 0, "owner: CPU");
         let d = 0x4ff4_1000;
         for (o, v) in [(0, 1u32 << 31 | 1 << 30 | 4 << 12 | 4), (4, d + 0x100), (8, 0)] { b.write32(d + o, v).unwrap(); }

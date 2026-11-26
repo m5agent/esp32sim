@@ -227,6 +227,7 @@ impl esp_soc::SocBus for SocBus {
         p.psram1.psram_mr = old.psram1.psram_mr;      // the PSRAM keeps its mode registers
         p.gpio.g.strap = old.gpio.g.strap;
         p.gpio.g.restore_external(&old.gpio.g);         // the board still drives its inputs
+        p.i2s0.pcm = std::mem::take(&mut old.i2s0.pcm); p.i2s0.frames_out = old.i2s0.frames_out;
         p.i2s1.pcm = std::mem::take(&mut old.i2s1.pcm); p.i2s1.frames_out = old.i2s1.frames_out;   // keep the captured audio continuous
         // The card in the socket keeps its power and its state; IDF's init resets it with CMD0.
         p.sdmmc.devices = old.sdmmc.devices;
@@ -290,7 +291,10 @@ impl esp_soc::SocBus for SocBus {
     fn gpio_input(&self) -> u64 { self.periph.gpio.g.input }
     fn board(&mut self) -> &mut dyn BoardModel { &mut *self.board }
     fn board_ref(&self) -> &dyn BoardModel { &*self.board }
-    fn audio(&self) -> (&[i16], u32) { (&self.periph.i2s1.pcm, self.periph.i2s1.sample_rate) }
+    fn audio(&self) -> (&[i16], u32) {
+        let port = if self.periph.i2s0.frames_out == 0 { &self.periph.i2s1 } else { &self.periph.i2s0 };
+        (&port.pcm, port.sample_rate)
+    }
     /// `line` is the CPU interrupt line, CLIC ID - 16.
     fn irq_sources_of(&self, core: usize, line: u32) -> Vec<usize> { self.periph.sources_of(core, line + CLIC_EXT_OFFSET) }
     /// The card goes in the reference board's socket, on slot 0's IO MUX pins; firmware reaches
