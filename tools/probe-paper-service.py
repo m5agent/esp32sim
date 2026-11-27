@@ -70,7 +70,7 @@ def probe(board, binary, image, out, seconds):
                     if frames.get(3, {}).get("colors", 0) > 1:
                         break
                 if board in {"papers3", "papermono"}:
-                    send(t="service", id=4, op="touch", args="535 150 1 180" if board == "papers3" else "472 150 1 180")
+                    send(t="service", id=4, op="touch", args="24 158 1 300" if board == "papers3" else "22 128 1 300")
                 elif board == "paperdiy":
                     send(t="btn", pin=4, v=1)
                     sleep(0.2)
@@ -79,8 +79,12 @@ def probe(board, binary, image, out, seconds):
                     send(t="btn", pin=10, v=1)
                     sleep(0.2)
                     send(t="btn", pin=10, v=0)
-                sleep(1.5)
-                send(t="service", id=5, op="frame")
+                deadline = monotonic() + 12
+                while monotonic() < deadline:
+                    send(t="service", id=5, op="frame")
+                    sleep(2)
+                    if frames.get(5, {}).get("sha256") not in (None, frames.get(3, {}).get("sha256")):
+                        break
                 send(t="key", data="\r\x03\x03\r")
                 sleep(0.5)
                 send(t="key", data="print('S3D_REPL_OK', 18*7)\r")
