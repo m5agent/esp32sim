@@ -21,6 +21,8 @@ pub struct Dial {
     powered: bool,
     wakeups: u64,
     buzzer: Option<(f64, u32)>,
+    buzzer_previous: f32,
+    buzzer_filtered: f32,
 }
 
 impl Dial {
@@ -35,7 +37,7 @@ impl Dial {
         ]);
         let pins = LcdPins { clk: 6, data: 5, dc: 4, cs: 7, rst: 8 };
         Self { lcd: SpiLcd::new(pins, DcsPanel::new(240, 240), [0, 0x9a, 1]), bus, touch, rtc, rfid,
-            held: false, powered: true, wakeups: 0, buzzer: None }
+            held: false, powered: true, wakeups: 0, buzzer: None, buzzer_previous: -32768.0, buzzer_filtered: 0.0 }
     }
 }
 impl Default for Dial { fn default() -> Self { Self::new() } }
@@ -59,6 +61,18 @@ impl BoardModel for Dial {
         self.buzzer = pwm(3);
     }
     fn i2s_buzzer_pin(&self) -> Option<u8> { Some(3) }
+    fn i2s_buzzer_audio(&mut self, rate: u32, samples: &mut [i16]) {
+        // M5Unified 0.3.0 Speaker_Class uses the I2S data line as a delta-sigma
+        // driver. Convert the duty to voltage, then reject DC from static pad levels.
+        let rate = rate as f32;
+        let decay = rate / (rate + std::f32::consts::TAU * 200.0);
+        for sample in samples {
+            let voltage = ((*sample as u16).count_ones() as f32 - 8.0) * 4096.0;
+            self.buzzer_filtered = decay * (self.buzzer_filtered + voltage - self.buzzer_previous);
+            self.buzzer_previous = voltage;
+            *sample = self.buzzer_filtered.round() as i16;
+        }
+    }
     fn uses_spi_pins(&self) -> bool { true }
     fn spi_transfer_pins(&mut self, host: u8, pins: SpiPins, tx: &[u8], rx_len: usize) -> Vec<u8> {
         self.lcd.transfer(host, pins, tx, rx_len)

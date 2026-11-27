@@ -433,11 +433,8 @@ impl SocBus {
         if let Some(pin) = self.board.i2s_buzzer_pin() {
             let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
             if !routes.matrix_output(pin as usize, if which == 0 { 25 } else { 30 }) { return; }
-            // M5Unified 0.3.0 Speaker_Class: each half-word carries 16 one-bit symbols.
-            // Reduce duty to the digital amplitude supplied to the audio sink.
-            for word in &mut samples {
-                *word = (((*word as u16).count_ones() as i32 - 8) * 4096).clamp(-32768, 32767) as i16;
-            }
+            let rate = if which == 0 { self.periph.i2s0.sample_rate } else { self.periph.i2s1.sample_rate };
+            self.board.i2s_buzzer_audio(rate, &mut samples);
         }
         let i2s = if which == 0 { &mut self.periph.i2s0 } else { &mut self.periph.i2s1 };
         i2s.frames_out += samples.len() as u64;

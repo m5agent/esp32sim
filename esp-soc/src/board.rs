@@ -218,6 +218,7 @@ pub trait BoardModel {
     fn pdm_mic(&self) -> bool { false }
     /// Single-bit delta-sigma speaker on I2S data out.
     fn i2s_buzzer_pin(&self) -> Option<u8> { None }
+    fn i2s_buzzer_audio(&mut self, _rate: u32, _samples: &mut [i16]) {}
     /// Observe a short, non-wrapping RMT transfer routed to this pin.
     fn rmt_symbols(&mut self, _pin: u8, _tick_hz: u32, _symbols: &[u32]) {}
 }
