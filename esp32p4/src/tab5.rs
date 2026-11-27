@@ -27,6 +27,7 @@ impl DevicePort {
     fn new(device: impl I2cDevice + 'static) -> Self { Self(Rc::new(RefCell::new(device))) }
 }
 impl I2cDevice for DevicePort {
+    fn pins(&self) -> Option<(u8, u8)> { Some((SDA, SCL)) }
     fn start(&mut self, read: bool) -> bool { self.0.borrow_mut().start(read) }
     fn write(&mut self, b: u8) -> bool { self.0.borrow_mut().write(b) }
     fn read(&mut self) -> u8 { self.0.borrow_mut().read() }
@@ -254,7 +255,9 @@ impl BoardModel for Tab5 {
     fn i2c_devices(&mut self) -> Vec<(u8, u8, Box<dyn I2cDevice>)> {
         self.soft = SoftI2c::idle();
         self.released.push(SDA);
-        self.bus.iter().map(|(addr, device)| (0, *addr, Box::new(device.clone()) as Box<dyn I2cDevice>)).collect()
+        // M5Unified selects I2C1 while the UserDemo BSP selects I2C0 on the same pads.
+        self.bus.iter().flat_map(|(addr, device)| [0, 1].map(|bus|
+            (bus, *addr, Box::new(device.clone()) as Box<dyn I2cDevice>))).collect()
     }
     fn input_levels(&self) -> Vec<(u8, bool)> { vec![(INT, self.touch_irq)] }
     fn soc_powered(&self) -> Option<bool> { Some(self.powered) }

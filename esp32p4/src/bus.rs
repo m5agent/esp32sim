@@ -460,7 +460,11 @@ impl SocBus {
             self.periph.usb_otg.cfg.gsnpsid = 0x4f54_400a;
         }
         for (bus, address, device) in self.board.i2c_devices() {
-            if bus == 0 { self.periph.i2c1.attach(address, device); }
+            match bus {
+                0 => self.periph.i2c1.attach(address, device),
+                1 => self.periph.i2c0.attach(address, device),
+                _ => {}
+            }
         }
         for (pin, level) in self.board.input_levels() { self.irq_dirty |= self.periph.gpio.g.set_input(pin, level); }
     }
@@ -516,11 +520,12 @@ impl SocBus {
         }
         self.irq_dirty = true;
         // a frame cut short by the chain's end, an error or the step budget is dropped
-        // ESP-IDF v5.5.4 gpio_sig_map.h I2S0 output BCK/MCLK/WS/SD = 25/26/27/28.
-        let connected = self.board.i2s_codecs().filter(|codec| codec.port == port as usize).is_none_or(|codec| {
+        // ESP-IDF v5.4.2/v5.5.4 gpio_sig_map.h: I2S0 BCK/MCLK/WS/SD = 25..28, I2S1 = 31..34.
+        let signal = 25 + port * 6;
+        let connected = self.board.i2s_codecs().is_none_or(|codec| {
             let gpio = &self.periph.gpio;
-            codec.speaker_gain > 0.0 && gpio.out_signal(codec.bck) == 25 && gpio.out_signal(codec.ws) == 27 &&
-                gpio.out_signal(codec.dout) == 28 && codec.mck.is_none_or(|pin| gpio.out_signal(pin) == 26)
+            codec.speaker_gain > 0.0 && gpio.out_signal(codec.bck) == signal && gpio.out_signal(codec.ws) == signal + 2 &&
+                gpio.out_signal(codec.dout) == signal + 3 && codec.mck.is_none_or(|pin| gpio.out_signal(pin) == signal + 1)
         });
         let decode = |sample: &[u8]| {
             if !connected { 0 }

@@ -853,7 +853,7 @@ fn setup_p4<R: esp32p4::Revision>(o: &Opts) -> esp_soc::Machine<esp32p4::Esp32p4
     let board = if o.board == "atech14" { "none" } else { o.board.as_str() };   // the S3 default means "bare module" here
     match esp32p4::board::make_board(board) { Some(b) => m.bus.board = b, None => usage_error(&format!("--board {board}: none, waveshare-p4-lcd35, m5stack-tab5, m5stack-tab5-st7123 or m5stack-tab5-dsi-only on the P4")) }
     m.bus.attach_board_devices();
-    if o.service_stereo { m.bus.periph.i2s0.stereo_pcm = Some(Vec::new()); }
+    if o.service_stereo { m.bus.periph.i2s1.stereo_pcm = Some(Vec::new()); }
     for (flag, on) in [("--wifi", !o.wifi.is_empty() && o.coproc.is_none()), ("--cam-image", o.cam_image.is_some()), ("--cam-stream", o.cam_stream.is_some()), ("--cam-size", o.cam_size.is_some()), ("--flash-octal", o.flash_octal), ("--efuse-regs", o.efuse_regs.is_some()), ("--regs-init", o.regs_init.is_some()), ("--regstat", o.regstat.is_some())] {
         if on { eprintln!("{} is not available on the P4{}", flag, if flag == "--wifi" { " (it goes to a co-processor: --coproc)" } else { "" }); std::process::exit(2); }
     }

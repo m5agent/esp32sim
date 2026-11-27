@@ -30,6 +30,8 @@ pub mod src {
     pub const PPA: usize = 96;
     pub const DMA2D_IN_CH0: usize = 104;
     pub const DMA2D_OUT_CH0: usize = 106;
+    // IDF v5.4.2 and v5.5.4 ESP32-P4 soc/interrupts.h.
+    pub const I2C0: usize = 44;
     pub const I2C1: usize = 45;
     pub const LEDC: usize = 52;
     /// IDF v5.5.4 components/soc/esp32p4/include/soc/interrupts.h, ETS_PCNT_INTR_SOURCE.
@@ -59,7 +61,7 @@ pub mod src {
     /// The name IDF gives a source, for diagnostics.
     pub fn name(s: usize) -> &'static str {
         match s {
-            USB_SERIAL_JTAG => "USB_SERIAL_JTAG", SDIO_HOST => "SDIO_HOST", GPSPI2 => "SPI2", I2C1 => "I2C1", LEDC => "LEDC",
+            USB_SERIAL_JTAG => "USB_SERIAL_JTAG", SDIO_HOST => "SDIO_HOST", GPSPI2 => "SPI2", I2C0 => "I2C0", I2C1 => "I2C1", LEDC => "LEDC",
             I2S0 => "I2S0", I2S1 => "I2S1", 56..=58 => "AHB_PDMA_IN", 59..=61 => "AHB_PDMA_OUT", 62..=64 => "AXI_PDMA_IN", 65..=67 => "AXI_PDMA_OUT", UART0 => "UART0", UART1 => "UART1", TG0_T0 => "TG0_T0", TG0_T1 => "TG0_T1",
             TG1_T0 => "TG1_T0", TG1_T1 => "TG1_T1", 53 => "SYSTIMER_TARGET0", 54 => "SYSTIMER_TARGET1", 55 => "SYSTIMER_TARGET2",
             GPIO_INTR0 => "GPIO_INTR0", 79 => "FROM_CPU_INTR0", 80 => "FROM_CPU_INTR1", 81 => "FROM_CPU_INTR2", 82 => "FROM_CPU_INTR3",
@@ -626,6 +628,7 @@ pub struct Peripherals {
     pub spi2: GpSpi,
     /// I2C1 (0x500C5000), the bus Waveshare's BSP puts its touch controller and codec on: the
     /// shared model, the C6's register map less CLK_CONF, which is HP_SYS_CLKRST's here
+    pub i2c0: esp_periph::i2c::I2c,
     pub i2c1: esp_periph::i2c::I2c,
     /// AXI-GDMA: GPSPI2's DMA
     pub axi_dma: AxiDma,
@@ -688,6 +691,7 @@ device_set! { Peripherals; clock: (clock) CPU_HZ, [(ClockDomain::Xtal, 9), (Cloc
     0x5008f "PSRAM_MSPI1" (psram1) => [];
     0x50091 "SHA" (sha) => [];
     0x500c2 "TIMG0" (timg[0]) => [src::TG0_T0, src::TG0_T1];
+    0x500c4 "I2C0" (i2c0) => [src::I2C0];
     0x500c5 "I2C1" (i2c1) => [src::I2C1];
     0x500c6 "I2S0" (i2s0) => [src::I2S0];
     0x500c7 "I2S1" (i2s1) => [src::I2S1];
@@ -727,13 +731,26 @@ impl DeviceSet for Peripherals {
         // INTR_STATUS_0..3 read the source state.
         if block == 0x500d6 && !write && (0x200..=0x20c).contains(&(off & 0x7ff)) { self.intmtx.status = self.source_status(); }
         if (block == 0x50110 && off == 0x1a4 || block == 0x50126 && off == 0x4) && !write { self.rng.now = self.clock.cycles() as u32; }
-        // I2C1's clock: HP_SYS_CLKRST PERI_CLK_CTRL10 I2C1_CLK_SRC_SEL bit 26 (1 = RC_FAST),
-        // PERI_CLK_CTRL11 I2C1_CLK_DIV_NUM 7:0, NUMERATOR 15:8, DENOMINATOR 23:16
-        // (register/hw_ver3/soc/hp_sys_clkrst_reg.h:1443-1470; hal/i2c_ll.h:186-226 writes div_a to
-        // the numerator), repacked into the shared S3 CLK_CONF layout.
-        if block == 0x500c5 {
+        // IDF v5.4.2 hp_sys_clkrst_reg.h and gpio_sig_map.h: controller dividers
+        // in CTRL10/11, independently selected pads through GPIO matrix 68..71.
+        if matches!(block, 0x500c4 | 0x500c5) {
             let (c10, c11) = (self.hp_clkrst.read(0x40), self.hp_clkrst.read(0x44));
-            self.i2c1.set_external_clock_config(Some((c11 & 255) | (c11 >> 8 & 63) << 8 | (c11 >> 16 & 63) << 14 | (c10 >> 26 & 1) << 20));
+            let (i2c, divider, src, scl) = if block == 0x500c4 {
+                (&mut self.i2c0, c10 >> 2, c10 & 1, 68)
+            } else {
+                (&mut self.i2c1, c11, c10 >> 26 & 1, 70)
+            };
+            i2c.set_external_clock_config(Some((divider & 255) | (divider >> 8 & 63) << 8
+                | (divider >> 16 & 63) << 14 | src << 20));
+            if i2c.has_pinned_devices() {
+                let pin = |signal: usize| {
+                    let select = self.gpio.g.func_in_sel[signal];
+                    let pin = (select & 0x3f) as u8;
+                    (select & 0xc0 == 0x80 && pin < 55 && self.gpio.out_signal(pin) == signal as u32)
+                        .then_some(pin)
+                };
+                i2c.set_pins(pin(scl + 1).zip(pin(scl)));
+            }
         }
         if block == 0x50083 { self.sdmmc.now_ns = self.now_ns(); if self.sdmmc.timed { self.sdmmc.ciu_hz = self.hp_clkrst.sdio_ls_hz(); } }
         // CDETECT and WRTPRT read the card-detect and write-protect signals of the GPIO matrix.
@@ -759,7 +776,7 @@ impl Peripherals {
             sha: Sha::new(), intmtx: IntMatrix::new(), clic: Clic::default(), cache: Cache::new(), hp_sys: HpSys::default(), hp_clkrst: HpClkRst::new(),
             lp: LpAon::new(), ana_mst: AnaMst::default(), assist_debug: AssistDebug::default(), rng: Rng::new(),
             dsi: Default::default(), dw_dma: Default::default(), dma2d: Default::default(), ppa: Default::default(), adc: Default::default(),
-            spi2: GpSpi::new(), i2c1: esp_periph::i2c::I2c::new(), axi_dma: AxiDma::new(), ahb_dma: AhbDma::new(), i2s0: esp_periph::I2s::new_v2_p4(CPU_HZ), i2s1: esp_periph::I2s::new_v2_p4(CPU_HZ), ledc: Ledc::new(LedcLayout::P4), pcnt: esp_periph::Pcnt::new(esp_periph::PcntLayout::P4), mcpwm: [Self::new_mcpwm(89), Self::new_mcpwm(95)],
+            spi2: GpSpi::new(), i2c0: esp_periph::i2c::I2c::new(), i2c1: esp_periph::i2c::I2c::new(), axi_dma: AxiDma::new(), ahb_dma: AhbDma::new(), i2s0: esp_periph::I2s::new_v2_p4(CPU_HZ), i2s1: esp_periph::I2s::new_v2_p4(CPU_HZ), ledc: Ledc::new(LedcLayout::P4), pcnt: esp_periph::Pcnt::new(esp_periph::PcntLayout::P4), mcpwm: [Self::new_mcpwm(89), Self::new_mcpwm(95)],
             misc: Misc::new(), spi_exec: false, psram_exec: false, clock: Self::new_clock(), cycle_base: 0, last_status: [0; 4],
         }
     }
