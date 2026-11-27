@@ -70,6 +70,9 @@ def scenarios(device, case):
     elif case == "wakeup":
         base = [("", 9.0, ["1.3 press a 150"], ["--vcd", f"@{case}.vcd"]),
                 ("-idle", 9.0, [], [])]
+    elif case == "rtc" and device == "stickc-plus2":
+        wifi = "ssid=YOUR WIFI SSID NAME,psk=YOUR WIFI PASSWORD,epoch=1764000000"
+        base = [("", 10.0, [], ["--wifi", wifi, "--net", "none"]), ("-idle", 4.8, [], [])]
     elif case.startswith(("rtc", "system_")):
         base = [("", 4.8, [], []), ("-first", 1.1, [], [])]
     elif case.endswith("-2") and case.startswith(("axp192", "power")):

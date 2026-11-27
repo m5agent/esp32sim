@@ -1,5 +1,6 @@
 """Interpret Stick-family guest evidence without promoting boot-only smoke to PASS."""
 import argparse
+import hashlib
 from collections import Counter
 import json
 from pathlib import Path
@@ -200,6 +201,12 @@ def check(device, out):
             edges = [line for line in vcd.read_text().splitlines() if line in {"0s19", "1s19"}] if vcd.is_file() else []
             hit = "0s19" in edges and "1s19" in edges and len(edges) >= 4
             reason = "G19 SET/CLR edges observed through the GPIO controller" if hit else "Required GPIO19 edges absent"
+        elif case == "rtc":
+            rtc = re.search(r"\brtc=(\S+)", diag)
+            idle = re.search(r"\brtc=(\S+)", read(case + "-idle", "err"))
+            hit = bool(rtc and idle and not rtc[1].startswith("24-01-01") and idle[1].startswith("24-01-01")
+                       and screen and screen["lit"])
+            reason = "Virtual Wi-Fi/SNTP populated the hardware RTC" if hit else "No SNTP-updated hardware calendar"
         elif case.startswith("rtc-"):
             current = re.search(r"\brtc=(\S+)", diag)
             first = re.search(r"\brtc=(\S+)", read(case + "-first", "err"))
@@ -247,12 +254,17 @@ def check(device, out):
                        and re.findall(r"(?m)^K016-BTN ([01])", probe) == ["1", "0", "1"]
                        and screen and screen["lit"] == 128)
             else:
-                expected = ["T2-CCI 0006 000175a3", "T2-ONE 000093651b58", "T2-TWO 0000f93c1f40", "T2-LCD"]
+                def scene(cool, warm):
+                    payload = b"".join(struct.pack(">H", warm if 30 <= y < 90 and 40 <= x < 120 else cool)
+                                       for y in range(120) for x in range(160))
+                    return hashlib.sha256(payload).hexdigest()
+                expected = ["T2-CCI 0006 000175a3", f"T2-ONE {scene(7000, 8000)} [1, 2, 3, 4]",
+                            f"T2-TWO {scene(8000, 10000)} [1, 2, 3, 4]", "T2-LCD"]
                 scan = re.findall(r"(?m)^T2-(?:RESET-)?SCAN (\[.*?\])", probe)
                 hit = (all(marker in probe.splitlines() for marker in expected)
                        and scan == ["[42, 48, 52, 81, 104]", "[48, 52, 81, 104]"]
                        and re.findall(r"(?m)^T2-ENC ([\da-f]{4})", probe) == ["0005", "fffd", "0000"]
-                       and screen and screen["lit"] == 256)
+                       and screen and screen["lit"] == 135 * 120 and screen["colors"] == 3)
             record("probe", "PASS" if state == "0" and not fault and hit else "FAIL",
                    fault or "Controller probes check sensor input readback and native framebuffer", frame=screen)
     return results
