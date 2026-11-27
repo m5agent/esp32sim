@@ -184,7 +184,8 @@ impl BoardModel for PaperSpi {
         self.i2c.attach(0x6e, M5pm1::with_power_timer(self.pmic.clone(), CPU_HZ));
         self.i2c.attach(0x32, Rx8130::new(self.now.clone(), CPU_HZ));
         if self.mono_board() {
-            self.i2c.attach(0x4f, M5ioe1::new(Default::default(), 0).with_outputs(self.expander.clone()));
+            self.i2c.attach(M5ioe1::ADDRESS, M5ioe1::new(Default::default(), 0)
+                .with_revision(b'W').with_outputs(self.expander.clone()));
             self.i2c.attach(0x68, Bmi270::new(self.imu.clone(), CPU_HZ));
             self.i2c.attach(0x38, Ft5x06::new(self.touch.clone()));
             self.i2c.attach(0x75, Reg8Device::new("IP2315", &[]));
@@ -334,6 +335,7 @@ impl BoardModel for PaperSpi {
     fn leds(&self) -> Option<(&[[u8; 3]], u64)> {
         (!self.mono_board()).then_some((&self.leds.leds, self.leds.updates))
     }
+    fn i2s_buzzer_pin(&self) -> Option<u8> { self.mono_board().then_some(42) }
     fn i2s_codecs(&self) -> Option<I2sCodecs> {
         if self.mono_board() { return None; }
         let mut codecs = self.dac.i2s_codecs(0, 1, 40, 41, 38, 39);
@@ -365,12 +367,21 @@ impl BoardModel for PaperSpi {
                 self.nfc.borrow_mut().set_tag(tag);
                 true
             }
-            ("paper-battery", [millivolts, charging]) => {
+            ("paper-battery", [millivolts, charging, supply @ ..]) if supply.len() <= 1 => {
                 let (Ok(mv), Ok(chg)) = (millivolts.parse::<u16>(), charging.parse::<u8>()) else { return false; };
                 if !(2500..=4500).contains(&mv) || chg > 1 { return false; }
+                let vbus = match supply.first() {
+                    Some(value) => {
+                        let Ok(value) = value.parse::<u16>() else { return false; };
+                        if value > 5500 { return false; }
+                        value
+                    }
+                    None => 5000 * u16::from(chg),
+                };
                 let mut pmic = self.pmic.lock().unwrap();
                 pmic.battery_mv = mv;
                 pmic.charging = chg != 0;
+                pmic.vbus_mv = vbus;
                 true
             }
             ("sht40", [temperature, humidity]) if !self.mono_board() => {

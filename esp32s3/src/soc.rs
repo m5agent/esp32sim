@@ -48,9 +48,13 @@ impl Soc for S3 {
         c.set_ar(0, 0);
     }
     fn irqs(bus: &SocBus, out: &mut [u32]) { let (l0, l1) = bus.periph.cpu_lines_both(); out[0] = l0; out[1] = l1; }
-    /// Core 0 is always running. SYSTEM_CORE_1_CONTROL_0 controls core 1's clock gate, reset,
-    /// and run-stall state.
+    /// RTC light sleep pauses both digital cores.
+    const CORE0_CAN_HOLD: bool = true;
+
+    /// Outside light sleep, SYSTEM_CORE_1_CONTROL_0 controls core 1's clock gate,
+    /// reset, and run-stall state.
     fn core_state(bus: &SocBus, core: usize) -> CoreState {
+        if bus.rtc_sleeping() { return CoreState::Held; }
         if core == 0 { return CoreState::Running; }
         let (clk, reset, stall) = bus.periph.core1_control();
         if reset { CoreState::Reset } else if clk && !stall { CoreState::Running } else { CoreState::Held }
@@ -174,6 +178,7 @@ impl esp_soc::SocBus for SocBus {
         self.ble.restore_flash(&mut self.flash);
         self.ble.reset();
         self.flush_ticks();
+        self.rtc_sleep_target = None;
         self.cancel_spi2_timing();
         let cause = self.periph.rtc.reset_cause;
         let cold = std::mem::take(&mut self.power_on_reset);

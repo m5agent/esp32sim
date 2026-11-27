@@ -2,6 +2,7 @@ pub mod board;
 pub mod bus;
 pub mod periph;
 pub mod i2c;
+mod rtc_sleep;
 pub mod soc;
 pub mod timing;
 pub mod rough_memory;

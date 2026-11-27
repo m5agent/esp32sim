@@ -428,6 +428,11 @@ impl SocBus {
         let (frames, bpf, sample_bytes) = { let i2s = if which == 0 { &mut self.periph.i2s0 } else { &mut self.periph.i2s1 }; (i2s.frames_due(cycles), i2s.bytes_per_frame as usize, i2s.sample_bytes()) };
         if frames == 0 || bpf == 0 { return; }
         let Some(ch) = self.periph.gdma.out_channel_for(if which == 0 { 3 } else { 4 }) else { return };
+        let buzzer = self.board.i2s_buzzer_pin().filter(|_| sample_bytes == 2 && bpf == 4);
+        let buzzer_routed = buzzer.is_some_and(|pin|
+            esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux)
+                .matrix_output(pin as usize, if which == 0 { 25 } else { 30 }));
+        let rate = if which == 0 { self.periph.i2s0.sample_rate } else { self.periph.i2s1.sample_rate };
         let mut need = frames as usize * bpf;
         let mut samples: Vec<i16> = Vec::new();
         let mut walk = DescriptorWalk::new(GDMA_DESCRIPTOR_STEP_BUDGET);
@@ -450,11 +455,22 @@ impl SocBus {
             }
             let take = remaining.min(need);
             let start = d.buf.wrapping_add(c.buf_pos);
-            // Keep the first DMA channel, scaling its signed PCM sample to the 16-bit host sink.
+            // PCM capture selects the first slot. The single-bit route uses both
+            // 16-bit slots of each I2S frame as one 32-bit delta-sigma sample.
             let mut i = 0usize;
             while i + bpf <= take {
                 let addr = start.wrapping_add(i as u32);
-                let sample = if sample_bytes == 1 {
+                let sample = if buzzer_routed {
+                    self.read32_unpriced(addr).map(|word| {
+                        let voltage = (word.count_ones() as f32 - 16.0) * 2048.0;
+                        let gain = std::f32::consts::TAU * 200.0 / (rate as f32 + std::f32::consts::TAU * 200.0);
+                        let out = voltage - self.periph.buzzer_dc;
+                        self.periph.buzzer_dc += gain * out;
+                        out.round() as i16
+                    })
+                } else if buzzer.is_some() {
+                    Ok(0)
+                } else if sample_bytes == 1 {
                     self.read8_unpriced(addr).map(|v| (v as i8 as i16) << 8)
                 } else {
                     self.read16_unpriced(addr.wrapping_add((sample_bytes - 2) as u32)).map(|v| v as i16)

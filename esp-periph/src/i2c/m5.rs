@@ -8,6 +8,7 @@ use std::{cell::Cell, rc::Rc, sync::{Arc, Mutex}};
 #[derive(Debug)]
 pub struct M5pm1State {
     pub battery_mv: u16,
+    pub vbus_mv: u16,
     pub charging: bool,
     pub power_off_requested: bool,
     pub driven_high: u8,
@@ -16,7 +17,7 @@ pub struct M5pm1State {
 
 impl Default for M5pm1State {
     fn default() -> Self {
-        Self { battery_mv: 3900, charging: false, power_off_requested: false, driven_high: 0, timer: None }
+        Self { battery_mv: 3900, vbus_mv: 0, charging: false, power_off_requested: false, driven_high: 0, timer: None }
     }
 }
 
@@ -121,6 +122,7 @@ impl I2cDevice for M5pm1 {
         let state = self.state.lock().expect("M5PM1 state mutex poisoned");
         self.registers.regs[0x12] = (self.registers.regs[0x12] & !4) | (u8::from(!state.charging) << 2);
         [self.registers.regs[0x22], self.registers.regs[0x23]] = state.battery_mv.to_le_bytes();
+        [self.registers.regs[0x24], self.registers.regs[0x25]] = state.vbus_mv.to_le_bytes();
         self.registers.read()
     }
 }
@@ -142,6 +144,12 @@ pub struct M5ioe1 {
 
 impl M5ioe1 {
     pub const ADDRESS: u8 = 0x4f;
+
+    /// Use the firmware revision for the board's address family.
+    pub fn with_revision(mut self, revision: u8) -> Self {
+        self.registers.regs[0x02] = revision;
+        self
+    }
 
     /// UID is a board-supplied synthetic identity, not a fixed M5IOE1 chip ID.
     pub fn new(state: Arc<Mutex<M5ioe1State>>, uid: u16) -> Self {

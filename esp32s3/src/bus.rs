@@ -107,6 +107,7 @@ pub struct SocBus {
     board_ledc: bool,
     board_power: Option<bool>,
     pub(crate) power_on_reset: bool,
+    pub(crate) rtc_sleep_target: Option<u64>,
     /// a USB host is on the OTG port (`attach_usb_host`): only then can the core's work fall due
     pub(crate) usb_host: bool,
 }
@@ -192,7 +193,7 @@ impl SocBus {
             sram: vec![0; SRAM_SIZE], irom: vec![0; (IROM_MASK_HIGH - IROM_MASK_LOW) as usize], drom: vec![0; (DROM_MASK_HIGH - DROM_MASK_LOW) as usize],
             rtc_fast: vec![0; 8192], rtc_slow: vec![0; 8192], flash: vec![0xff; flash_size], psram: vec![0; psram_size],
             mmu: [MMU_INVALID; MMU_ENTRIES], periph: Peripherals::new(mac), board: Box::new(crate::board::Atech14::new()), uart_pins: false, cycles: 0, last_fault: None, spi2_dma_fault: None, irq_dirty: false, ena_latency: Default::default(), gpio_events: None, debug: Default::default(), board_edges: true, board_ledc: false, board_power: None, power_on_reset: false,
-            spi2_timing: false, spi2_scheduled: None, spi2_pins: None, spi3_dma_fault: None, spi3_pins: None,
+            rtc_sleep_target: None, spi2_timing: false, spi2_scheduled: None, spi2_pins: None, spi3_dma_fault: None, spi3_pins: None,
             tlb: vec![TlbEntry::EMPTY; TLB_SIZE], page_ver: Vec::new(), ver_base: [0; 7], flash_epoch: BUS_EPOCHS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) << 32, code_blk: Vec::new(), tick_pending: 0, tick_budget: 0, defer_mmio: false, mmio_deferred: false, vq_violations: 0,
             approximate_cache: None, approximate_cache_pending: 0, approximate_cache_fast_internal: false, approximate_cache_inline: false,
             approximate_cache_yield_miss: false, usb_host: false,
@@ -597,6 +598,7 @@ impl SocBus {
             self.spi3_pins = self.board.uses_spi_pins().then(|| self.periph.spi3_pins());
         }
         self.periph.write32(a, v);
+        if a == 0x6000_8018 && v & (1 << 31) != 0 { self.enter_rtc_timer_sleep(); }
         if a == 0x6004_1014 && v & (1 << 27) != 0 { self.start_lcd_i80(); }
         // Only an SDMMC register write starts a command, only a USB-OTG one can make the cable's work due.
         if matches!(a >> 12, 0x60028 | 0x60080) && (self.periph.sdmmc.pending() || self.periph.usb_otg.pending()) { self.run_dma_hosts(); }
@@ -965,6 +967,9 @@ impl SocBus {
     pub fn refresh_tick_budget(&mut self) {
         let cap = if self.cadence_active() { MAX_TICK_DEFER } else { QUIET_TICK_DEFER };
         let mut budget = if self.board_power_off() { cap } else { self.periph.cycles_until_timer().clamp(1, cap) };
+        if let Some(ticks) = self.rtc_timer_remaining() {
+            budget = self.periph.rtc_timer_cycles(ticks).clamp(1, u64::from(u32::MAX)) as u32;
+        }
         if let Some((deadline, _)) = &self.spi2_scheduled {
             let until = u64::from(self.tick_pending).saturating_add(deadline.saturating_sub(self.cycles));
             budget = budget.min(until.clamp(1, u64::from(MAX_TICK_DEFER)) as u32);
@@ -1024,6 +1029,11 @@ impl SocBus {
         if self.board_power_off() || self.power_on_reset || deadline_due {
             self.sync_board_power();
             if self.board_power_off() || self.power_on_reset { return u32::from(self.irq_dirty); }
+        }
+        if self.rtc_sleeping() {
+            self.periph.advance_rtc_sleep(u64::from(cycles));
+            if self.rtc_timer_remaining() == Some(0) { self.finish_rtc_timer_sleep(); }
+            return u32::from(self.irq_dirty);
         }
         let board_i2c = self.board_power.is_some() && self.periph.i2c.iter().any(|i2c| i2c.is_active());
         // Reads may flush before the periodic backstop. Refresh for either edge
@@ -1107,7 +1117,14 @@ impl SocBus {
     #[inline(never)]
     fn deliver_rmt_frames(&mut self) {
         for (ch, bits) in std::mem::take(&mut self.periph.rmt.done) {
-            for pin in esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux).output_pins(RMT_SIG_OUT0 + ch as u32) { self.board.rmt_frame(pin, &bits); }
+            for pin in esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux).output_pins(RMT_SIG_OUT0 + ch as u32) {
+                let old = if self.debug.has("leds") { self.board.leds().map(|(_, updates)| updates) } else { None };
+                self.board.rmt_frame(pin, &bits);
+                if let Some((pixels, _)) = old.and_then(|old| self.board.leds().filter(|(_, updates)| *updates != old)) {
+                    let rgb: Vec<_> = pixels.iter().map(|&[r, g, b]| format!("{r:02x}{g:02x}{b:02x}")).collect();
+                    eprintln!("[leds] GPIO{pin} {}", rgb.join(","));
+                }
+            }
         }
         self.irq_dirty = true;
     }

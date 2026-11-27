@@ -5,6 +5,32 @@ const SPI2: u32 = 0x6002_4000;
 const GDMA: u32 = 0x6003_f000;
 const FIRST_DESC: u32 = 0x3fc9_0100;
 
+#[test]
+fn rtc_timer_wakes_both_cores_after_light_sleep() {
+    use esp_soc::{CoreState, Soc};
+
+    const RTC: u32 = 0x6000_8000;
+    let mut bus = SocBus::new(1024, 1024, [0; 6]);
+    bus.write32(RTC + 0x04, 150_000).unwrap();
+    bus.write32(RTC + 0x3c, 1 << 18).unwrap();
+    bus.write32(RTC + 0x18, 1 << 31).unwrap();
+    assert!(matches!(crate::S3::core_state(&bus, 0), CoreState::Held));
+    assert!(matches!(crate::S3::core_state(&bus, 1), CoreState::Held));
+    let systimer_before = bus.periph.systimer.unit;
+    bus.tick(239_998_400);
+    bus.flush_ticks();
+    assert_eq!(bus.read32(RTC + 0x44).unwrap() & 1, 0);
+    assert!(bus.rtc_sleeping());
+    bus.tick(1600);
+    bus.flush_ticks();
+    assert_eq!(bus.periph.systimer.unit, systimer_before);
+    assert!(matches!(crate::S3::core_state(&bus, 0), CoreState::Running));
+    assert_eq!(bus.read32(RTC + 0x130).unwrap(), 1 << 3);
+    assert_eq!(bus.read32(RTC + 0x44).unwrap() & 1, 1);
+    bus.write32(RTC + 0x4c, 1).unwrap();
+    assert_eq!(bus.read32(RTC + 0x44).unwrap() & 1, 0);
+}
+
 struct ProbeBoard {
     events: Arc<Mutex<Vec<String>>>,
 }

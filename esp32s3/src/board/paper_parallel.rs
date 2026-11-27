@@ -80,6 +80,8 @@ impl PaperParallel {
 impl BoardModel for PaperParallel {
     fn name(&self) -> &'static str { if self.diy { "m5stack-paperdiy" } else { "m5stack-papers3" } }
 
+    fn i2s_buzzer_pin(&self) -> Option<u8> { (!self.diy).then_some(21) }
+
     fn i2c_devices(&mut self) -> Vec<(u8, u8, Box<dyn I2cDevice>)> {
         self.i2c.reset();
         if self.diy {

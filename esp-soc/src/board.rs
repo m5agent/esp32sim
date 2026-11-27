@@ -109,6 +109,8 @@ pub trait BoardModel {
     fn default_analog_inputs(&self) -> &'static [(u8, f32)] { &[] }
     /// Board-wired I2S codecs, with the current I2C-controlled signal gates.
     fn i2s_codecs(&self) -> Option<I2sCodecs> { None }
+    /// One-bit delta-sigma speaker wired to an I2S data-out pad.
+    fn i2s_buzzer_pin(&self) -> Option<u8> { None }
     /// Give the board's camera a picture to look at (RGB888).
     fn set_camera_picture(&mut self, _p: crate::picture::Picture) -> Result<(), &'static str> { Err("no camera on this board") }
     /// Next camera frame in the sensor's register-selected wire format, with its size.

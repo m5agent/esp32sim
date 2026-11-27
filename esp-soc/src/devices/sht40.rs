@@ -34,11 +34,12 @@ impl I2cDevice for Sht40 {
     }
 
     fn write(&mut self, byte: u8) -> bool {
-        let ms = match byte {
-            0xfd => 9,
-            0xf6 => 5,
-            0xe0 => 2,
-            0x89 => 1,
+        // SHT4x does not stretch SCL. Reads before maximum conversion time NACK.
+        let us = match byte {
+            0xfd => 8_300,
+            0xf6 => 4_500,
+            0xe0 => 1_700,
+            0x89 => 1_000,
             0x94 => { self.ready_at = u64::MAX; return true; }
             _ => return false,
         };
@@ -50,7 +51,8 @@ impl I2cDevice for Sht40 {
         };
         self.reply[..3].copy_from_slice(&Self::field(a));
         self.reply[3..].copy_from_slice(&Self::field(b));
-        self.ready_at = self.time.get().saturating_add(ms * self.cycles_per_ms);
+        let cycles = (us * self.cycles_per_ms).div_ceil(1000);
+        self.ready_at = self.time.get().saturating_add(cycles);
         true
     }
 
@@ -71,15 +73,17 @@ mod tests {
         assert_eq!(Sht40::field(0xbeef), [0xbe, 0xef, 0x92]);
         let time = Rc::new(Cell::new(0));
         let sample = Rc::new(Cell::new([20.0, 40.0]));
-        let mut sensor = Sht40::new(sample.clone(), time.clone(), 1, Default::default());
+        let mut sensor = Sht40::new(sample.clone(), time.clone(), 1000, Default::default());
         assert!(sensor.write(0xfd));
         assert!(!sensor.start(true));
-        time.set(9);
+        time.set(8_299);
+        assert!(!sensor.start(true));
+        time.set(8_300);
         assert!(sensor.start(true));
         let first: Vec<_> = (0..6).map(|_| sensor.read()).collect();
         sample.set([33.0, 61.0]);
         assert!(sensor.write(0xfd));
-        time.set(18);
+        time.set(16_600);
         assert!(sensor.start(true));
         let second: Vec<_> = (0..6).map(|_| sensor.read()).collect();
         assert_ne!(first[..3], second[..3]);
