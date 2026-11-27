@@ -102,7 +102,7 @@ impl<S: Soc> Machine<S> {
             for (id, leds, _) in board.led_grids() { hello.push(frame(1, format!("{{\"t\":\"grid\",\"id\":\"{}\",\"leds\":[{}]}}", id, leds_json(leds)).as_bytes())); }
             w.set_hello(hello);
         }
-        w.send_text(&format!("{{\"t\":\"stat\",\"time\":{:.2},\"insns\":{},\"frames\":{},\"behind\":{:.2},\"resyncs\":{},\"speed\":{},\"cam\":{},\"gpio_in\":\"{:x}\"}}", self.seconds(), self.insns(), board.display_frames(), self.rt.behind, self.rt.resyncs, self.rt.speed.map_or_else(|| "null".to_string(), |s| format!("{:.3}", s)), self.bus.camera_frames(), self.bus.gpio_input()));
+        w.send_text(&format!("{{\"t\":\"stat\",\"time\":{:.2},\"insns\":{},\"frames\":{},\"display_rotation\":{},\"behind\":{:.2},\"resyncs\":{},\"speed\":{},\"cam\":{},\"gpio_in\":\"{:x}\"}}", self.seconds(), self.insns(), board.display_frames(), board.display_rotation(), self.rt.behind, self.rt.resyncs, self.rt.speed.map_or_else(|| "null".to_string(), |s| format!("{:.3}", s)), self.bus.camera_frames(), self.bus.gpio_input()));
     }
 
     pub(super) fn poll_camera_input(&mut self) {
@@ -140,6 +140,15 @@ impl<S: Soc> Machine<S> {
                 "service" if w.service => self.service_command(&w, &field),
                 "btn" => { let pin: u8 = field("pin").and_then(|x| x.parse().ok()).unwrap_or(0); let v = field("v").unwrap_or_default() == "1";
                            self.bus.gpio_set_input(pin, !v); *self.bus.irq_dirty() = true; }
+                "matrix-key" if self.bus.board_ref().accepts_command("key-edge") => {
+                    if let (Some(key), Some(down)) = (field("key"), field("down")) {
+                        self.bus.board_command("key-edge", &[&key, &down]);
+                    }
+                }
+                "power-key" if self.bus.board_ref().accepts_command("pwrkey") => {
+                    // A short PMIC press, measured in guest time.
+                    self.bus.board_command("pwrkey", &["200"]);
+                }
                 "knobpress" => { let v = field("v").unwrap_or_default() == "1"; if let Some(sw) = self.bus.board_ref().named_pin("sw") { self.bus.gpio_set_input(sw, !v); *self.bus.irq_dirty() = true; } }
                 "knob" => {
                     // Bound each browser message to about one second of encoder motion.

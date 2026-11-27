@@ -40,8 +40,9 @@ function drain() {
   }
 }
 
-function loop() {
-  if (!running) return;
+let turnGeneration = 0;
+function loop(generation = turnGeneration) {
+  if (!running || generation !== turnGeneration) return;
   const now = performance.now();
   let cur = wasm.esp32sim_cycles(emu);
   let target = (now - t0) / 1000 * CPU_HZ;
@@ -73,12 +74,12 @@ function loop() {
   // Only yield immediately when this turn left catch-up work unfinished. Once we reach
   // its target, sleep even if running the guest has put us slightly behind wall time.
   // MessageChannel avoids the nested timer clamp during expensive interactive turns.
-  if (cur < target) yieldPort.postMessage(0);
-  else setTimeout(loop, Math.max(1, Math.min(20, aheadMs)));
+  if (cur < target) yieldPort.postMessage(generation);
+  else setTimeout(loop, Math.max(1, Math.min(20, aheadMs)), generation);
 }
 const yieldChannel = typeof MessageChannel === 'function' ? new MessageChannel() : null;
-const yieldPort = yieldChannel ? yieldChannel.port2 : { postMessage: () => setTimeout(loop, 0) };
-if (yieldChannel) yieldChannel.port1.onmessage = loop;
+const yieldPort = yieldChannel ? yieldChannel.port2 : { postMessage: generation => setTimeout(loop, 0, generation) };
+if (yieldChannel) yieldChannel.port1.onmessage = event => loop(event.data);
 
 // A network runs on its own clock: network time in nanoseconds paced to the wall clock, with
 // each node's console and LED drained per turn. The medium and the stepping are in the module
@@ -127,6 +128,7 @@ onmessage = async (ev) => {
       // Keep credits for already posted frames until their ACKs arrive, but never send
       // a retained frame from the emulator being replaced.
       pendingFrame = null;
+      turnGeneration++;
       pacing = createPacing();
       pendingInputTrace = [];
       if (emu) { wasm.esp32sim_delete(emu); emu = 0; }
@@ -180,7 +182,17 @@ onmessage = async (ev) => {
     else if (m.op === 'net-load') { const rc = withBytes(new Uint8Array(m.data), (p, n) => wasm.esp32sim_net_load(net, m.node, m.kind, p, n)); postMessage({ loaded: 'n' + m.node + ':' + m.kind, ok: rc === 0 }); }
     else if (m.op === 'net-stub') { if (withBytes(enc.encode(m.spec), (p, n) => wasm.esp32sim_net_stub_spec(net, m.node, p, n)) !== 0) setupError ||= 'invalid stub for node ' + m.node + ': ' + m.spec; }
     else if (m.op === 'net-start') { if (setupError) throw new Error(setupError); const rc = wasm.esp32sim_net_boot(net); if (rc === 0) { running = true; netT0 = performance.now(); netLoop(); } postMessage({ started: rc === 0 }); }
-    else if (m.op === 'stop') { running = false; postMessage({ stopped: 0 }); }
+    else if (m.op === 'stop') { running = false; turnGeneration++; postMessage({ stopped: 0 }); }
+    else if (m.op === 'resume') {
+      if (emu && !running) {
+        const now = performance.now(), cycles = wasm.esp32sim_cycles(emu);
+        t0 = now - cycles / CPU_HZ * 1000;
+        lastStat = { wall: now, cycles, insns: wasm.esp32sim_insns(emu) };
+        running = true;
+        loop();
+        postMessage({ resumed: running });
+      } else postMessage({ resumed: false });
+    }
     else if (m.op === 'text') {
       if (traceEnabled && m.touchTrace) {
         postMessage({ touchTrace: { stage: 'worker-receive', ...m.touchTrace, atMs: traceNow(), cycles: wasm.esp32sim_cycles(emu) } });
@@ -188,6 +200,7 @@ onmessage = async (ev) => {
       }
       pacing.input(performance.now());
       withBytes(enc.encode(m.data), (p, n) => wasm.esp32sim_in_text(emu, p, n));
+      if (m.inputId !== undefined) postMessage({ inputQueued: m.inputId, time: wasm.esp32sim_cycles(emu) / CPU_HZ });
     }
     else if (m.op === 'bin') {
       pacing.input(performance.now());

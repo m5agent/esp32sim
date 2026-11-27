@@ -348,7 +348,7 @@ impl BoardModel for CardputerAdv {
         [SDA, SCL, LCD_DATA].into_iter().filter(|&pin| pins & (1 << pin) != 0).collect()
     }
     fn accepts_command(&self, verb: &str) -> bool {
-        matches!(verb, "key" | "imu") || (self.cap.is_some() && matches!(verb, "cap-gps" | "cap-tag"))
+        matches!(verb, "key" | "key-edge" | "imu") || (self.cap.is_some() && matches!(verb, "cap-gps" | "cap-tag"))
     }
     fn board_command(&mut self, cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
         if verb == "imu" {
@@ -361,6 +361,14 @@ impl BoardModel for CardputerAdv {
             }
             let [ax, ay, az, gx, gy, gz] = values;
             self.imu.borrow_mut().set_sample([ax, ay, az], [gx, gy, gz], None);
+            return true;
+        }
+        if verb == "key-edge" {
+            let [name, state] = args else { return false; };
+            let Some((row, col)) = Self::key_position(name) else { return false; };
+            let down = match *state { "1" => true, "0" => false, _ => return false };
+            self.key_up.retain(|&(r, c, _)| (r, c) != (row, col));
+            self.keyboard.borrow_mut().key(row, col, down);
             return true;
         }
         if verb != "key" { return self.cap.as_mut().is_some_and(|cap| cap.command(cycle, verb, args)); }
@@ -381,6 +389,13 @@ impl BoardModel for CardputerAdv {
     }
     fn display(&self) -> Option<(u32, u32, Vec<u16>, u64)> { Some((WIDTH as u32, HEIGHT as u32, self.visible(), self.display_version())) }
     fn display_frames(&self) -> u64 { self.lcd.frames }
+    fn display_rotation(&self) -> i8 {
+        // Without MADCTL.MV, logical +X follows the physical Y axis. The
+        // glass reverses columns and MADCTL.MX reverses them a second time.
+        if !self.lcd.on || self.lcd.madctl & 0x20 != 0 { 0 }
+        else if self.lcd.madctl & 0x40 != 0 { 90 }
+        else { -90 }
+    }
     fn display_version(&self) -> u64 { self.lcd_version + self.lcd.pixels_written }
     fn gram(&self) -> Option<(Vec<u16>, usize, usize)> { Some((self.lcd.gram.clone(), self.lcd.cols, self.lcd.rows)) }
     fn report(&self) -> String {
