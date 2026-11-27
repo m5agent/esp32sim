@@ -84,6 +84,8 @@ def scenarios(device, case):
         base += [("-text", 3.4, [], [])]
     elif case == "quickstart-scrollgraph":
         base += [("-first", 0.7, [], [])]
+    elif case == "display" and device == "stickc-plus-se":
+        base = [("", 2.2, [], []), ("-first", 0.55, [], [])]
     elif case in {"display", "quickstart-display"}:
         base += [("-first", 0.55, [], [])]
     elif case.startswith(("rtc", "system_")):
