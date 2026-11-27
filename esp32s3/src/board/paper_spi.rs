@@ -26,9 +26,25 @@ const LORA_CS: u64 = 1 << 41;
 // M5IOE1.h exposes their zero-based latch bits as 9 and 1.
 const LORA_RESET: u16 = 1 << 9;
 const LORA_ANTENNA_TX: u16 = 1 << 1;
+// The e-paper docs set M5IOE1 GPIO4 (zero-based latch bit 3) to enable NFC.
+const NFC_POWER: u16 = 1 << 3;
 
 struct Microphone(Rc<RefCell<Es7210>>);
 impl I2cDevice for Microphone {
+    fn start(&mut self, read: bool) -> bool { self.0.borrow_mut().start(read) }
+    fn write(&mut self, byte: u8) -> bool { self.0.borrow_mut().write(byte) }
+    fn read(&mut self) -> u8 { self.0.borrow_mut().read() }
+}
+
+struct Clock(Rc<RefCell<Rx8130>>);
+impl I2cDevice for Clock {
+    fn start(&mut self, read: bool) -> bool { self.0.borrow_mut().start(read) }
+    fn write(&mut self, byte: u8) -> bool { self.0.borrow_mut().write(byte) }
+    fn read(&mut self) -> u8 { self.0.borrow_mut().read() }
+}
+
+struct InertialSensor(Rc<RefCell<Bmi270>>);
+impl I2cDevice for InertialSensor {
     fn start(&mut self, read: bool) -> bool { self.0.borrow_mut().start(read) }
     fn write(&mut self, byte: u8) -> bool { self.0.borrow_mut().write(byte) }
     fn read(&mut self) -> u8 { self.0.borrow_mut().read() }
@@ -43,7 +59,7 @@ struct NfcI2c {
 impl I2cDevice for NfcI2c {
     fn start(&mut self, read: bool) -> bool {
         if !read { self.chip.borrow_mut().deselect(); }
-        self.outputs.get() & (1 << 4) != 0
+        self.outputs.get() & NFC_POWER != 0
     }
     fn write(&mut self, byte: u8) -> bool {
         self.chip.borrow_mut().exchange(byte, self.time.get(), US);
@@ -103,9 +119,11 @@ pub struct PaperSpi {
     display: Display,
     i2c: PaperI2c,
     pmic: Arc<Mutex<M5pm1State>>,
+    rtc: Rc<RefCell<Rx8130>>,
     expander: Rc<Cell<u16>>,
     touch: Ft5x06Points,
     imu: Arc<ImuMotion>,
+    imu_chip: Rc<RefCell<Bmi270>>,
     env: Rc<Cell<[f32; 2]>>,
     measurements: Rc<Cell<u64>>,
     now: Rc<Cell<VirtualCycle>>,
@@ -114,11 +132,15 @@ pub struct PaperSpi {
     dac: Es8311,
     adc: Rc<RefCell<Es7210>>,
     leds: Ws2812Chain,
+    mono_led: [[u8; 3]; 1],
+    mono_led_changes: u64,
     sd: Option<Box<SpiSdCard>>,
     output: u64,
     soc_was_on: bool,
     sd_selected: bool,
     busy_level: bool,
+    rtc_high: bool,
+    pmic_irq_high: bool,
     nfc_level: bool,
     radio_levels: [bool; 2],
     edges: Vec<BoardEdge>,
@@ -134,19 +156,24 @@ impl PaperSpi {
     pub fn color() -> Self { Self::new(Display::Color(Ed2208::new(MS)), (3, 2), true) }
 
     fn new(display: Display, pins: (u8, u8), busy_level: bool) -> Self {
+        let now = Rc::new(Cell::new(0));
+        let imu = Arc::new(ImuMotion::default());
         Self {
             display, i2c: PaperI2c::new(pins),
             pmic: Default::default(), expander: Default::default(),
-            touch: Default::default(), imu: Default::default(),
-            env: Rc::new(Cell::new([23.0, 45.0])), measurements: Default::default(), now: Default::default(),
+            touch: Default::default(), imu_chip: Rc::new(RefCell::new(Bmi270::new(imu.clone(), CPU_HZ).with_any_motion())), imu,
+            env: Rc::new(Cell::new([23.0, 45.0])), measurements: Default::default(),
+            rtc: Rc::new(RefCell::new(Rx8130::new(now.clone(), CPU_HZ))), now,
             nfc: Default::default(), radio: None, dac: Es8311::new(),
             adc: Rc::new(RefCell::new(Es7210::new())), leds: Ws2812Chain::new(2),
+            mono_led: [[0; 3]], mono_led_changes: 0,
             sd: None, output: 0, soc_was_on: true, sd_selected: false, busy_level, nfc_level: false,
-            radio_levels: [false; 2], edges: Vec::new(),
+            rtc_high: true, pmic_irq_high: true, radio_levels: [false; 2], edges: Vec::new(),
         }
     }
 
     fn mono_board(&self) -> bool { matches!(self.display, Display::Mono(_)) }
+    fn rtc_pmic_pin(&self) -> u8 { if self.mono_board() { 0 } else { 2 } }
 
     fn display_deadline(&self) -> Option<u64> {
         match &self.display { Display::Mono(p) => p.deadline(), Display::Color(p) => p.deadline() }
@@ -181,12 +208,13 @@ impl BoardModel for PaperSpi {
 
     fn i2c_devices(&mut self) -> Vec<(u8, u8, Box<dyn I2cDevice>)> {
         self.i2c.reset();
-        self.i2c.attach(0x6e, M5pm1::with_power_timer(self.pmic.clone(), CPU_HZ));
-        self.i2c.attach(0x32, Rx8130::new(self.now.clone(), CPU_HZ));
+        self.i2c.attach(0x6e, M5pm1::with_power_timer(self.pmic.clone(), CPU_HZ)
+            .with_wake_input(self.rtc_pmic_pin()));
+        self.i2c.attach(0x32, Clock(self.rtc.clone()));
         if self.mono_board() {
             self.i2c.attach(M5ioe1::ADDRESS, M5ioe1::new(Default::default(), 0)
                 .with_revision(b'W').with_outputs(self.expander.clone()));
-            self.i2c.attach(0x68, Bmi270::new(self.imu.clone(), CPU_HZ));
+            self.i2c.attach(0x68, InertialSensor(self.imu_chip.clone()));
             self.i2c.attach(0x38, Ft5x06::new(self.touch.clone()));
             self.i2c.attach(0x75, Reg8Device::new("IP2315", &[]));
             self.i2c.attach(0x50, NfcI2c { chip: self.nfc.clone(), time: self.now.clone(), outputs: self.expander.clone() });
@@ -202,8 +230,8 @@ impl BoardModel for PaperSpi {
         let mut pins = self.i2c.levels().to_vec();
         // G12/G13 are the SDMMC command/clock lines. With no powered card
         // they follow the SoC's pad pulls, including the driver's board probe.
-        if self.mono_board() { pins.extend([(2, true), (3, true), (4, true), (5, false), (6, false), (18, self.busy_level), (21, false)]); }
-        else { pins.extend([(1, true), (9, true), (10, true), (11, self.busy_level)]); }
+        if self.mono_board() { pins.extend([(1, self.pmic_irq_high), (2, true), (3, true), (4, true), (5, false), (6, false), (18, self.busy_level), (21, false)]); }
+        else { pins.extend([(1, true), (7, self.rtc_high), (9, true), (10, true), (11, self.busy_level)]); }
         pins
     }
 
@@ -273,6 +301,7 @@ impl BoardModel for PaperSpi {
     fn next_deadline(&self) -> Option<u64> {
         self.display_deadline().into_iter()
             .chain(self.pmic.lock().unwrap().power_deadline())
+            .chain(self.rtc.borrow().timer_deadline())
             .chain(self.nfc.borrow().deadline())
             .chain(self.radio.as_ref().and_then(|r| r.chip.deadline(self.now.get())))
             .chain(self.radio.as_ref().filter(|r| r.active && r.peer.is_some()).map(|r| r.next_poll))
@@ -285,11 +314,33 @@ impl BoardModel for PaperSpi {
     }
     fn advance_to(&mut self, cycle: VirtualCycle) {
         self.now.set(cycle);
+        let rtc_high = !self.rtc.borrow_mut().irq();
+        let rtc_pin = self.rtc_pmic_pin();
+        let motion_level = if self.mono_board() {
+            self.imu.cycle.store(cycle, std::sync::atomic::Ordering::Relaxed);
+            self.imu_chip.borrow_mut().motion_int1()
+        } else { None };
         let soc_on = {
             let mut pmic = self.pmic.lock().unwrap();
             pmic.advance_power_timer(cycle);
+            pmic.gpio_input(rtc_pin, rtc_high);
+            if let Some(level) = motion_level { pmic.gpio_input(4, level); }
             !pmic.power_off_requested
         };
+        if self.mono_board() {
+            let pmic = self.pmic.lock().unwrap();
+            let irq_high = !pmic.gpio_irq(1);
+            let outputs = self.expander.get();
+            let next_rgb = [pmic.led_enabled, outputs & (1 << 7) != 0, outputs & (1 << 8) != 0]
+                .map(|high| u8::from(high) * 255);
+            if next_rgb != self.mono_led[0] {
+                self.mono_led[0] = next_rgb;
+                self.mono_led_changes += 1;
+            }
+            Self::pin_change(&mut self.edges, cycle, 1, &mut self.pmic_irq_high, irq_high);
+        } else {
+            Self::pin_change(&mut self.edges, cycle, 7, &mut self.rtc_high, rtc_high);
+        }
         if self.soc_was_on && !soc_on {
             match &mut self.display {
                 Display::Mono(panel) => panel.power_loss(),
@@ -298,7 +349,6 @@ impl BoardModel for PaperSpi {
             self.nfc.borrow_mut().reset();
         }
         self.soc_was_on = soc_on;
-        if self.mono_board() { self.imu.cycle.store(cycle, std::sync::atomic::Ordering::Relaxed); }
         match &mut self.display { Display::Mono(p) => p.advance_to(cycle), Display::Color(p) => p.advance_to(cycle) }
         self.nfc.borrow_mut().advance(cycle);
         if let Some(radio) = &mut self.radio {
@@ -333,7 +383,8 @@ impl BoardModel for PaperSpi {
         if !self.mono_board() && pin == 21 { self.leds.from_bits(bits); }
     }
     fn leds(&self) -> Option<(&[[u8; 3]], u64)> {
-        (!self.mono_board()).then_some((&self.leds.leds, self.leds.updates))
+        if self.mono_board() { Some((&self.mono_led, self.mono_led_changes)) }
+        else { Some((&self.leds.leds, self.leds.updates)) }
     }
     fn i2s_buzzer_pin(&self) -> Option<u8> { self.mono_board().then_some(42) }
     fn i2s_codecs(&self) -> Option<I2sCodecs> {

@@ -14,7 +14,6 @@ pub struct Rx8130 {
     address_next: bool,
     timer_start: u64,
 }
-
 impl Rx8130 {
     pub fn new(time: Rc<Cell<u64>>, hz: u64) -> Self {
         let mut regs = [0; 64];
@@ -28,13 +27,31 @@ impl Rx8130 {
     fn tick(&mut self) {
         let now = self.time.get();
         self.calendar.advance_to(now);
-        let count = u64::from(u16::from_le_bytes([self.regs[0x1a], self.regs[0x1b]]));
-        let select = usize::from(self.regs[0x1c] & 7);
-        if let Some(&cycles) = [self.hz / 4096, self.hz / 64, self.hz, self.hz * 60, self.hz * 3600].get(select) {
-            if self.regs[0x1c] & 0x10 != 0 && count != 0 && now - self.timer_start >= cycles.saturating_mul(count) {
+        if let Some(period) = self.timer_period() {
+            let elapsed = now.saturating_sub(self.timer_start);
+            if elapsed >= period {
+                self.timer_start += elapsed / period * period;
                 self.regs[0x1d] |= 0x10;
             }
         }
+    }
+
+    fn timer_period(&self) -> Option<u64> {
+        let count = u64::from(u16::from_le_bytes([self.regs[0x1a], self.regs[0x1b]]));
+        if count == 0 || self.regs[0x1c] & 0x10 == 0 { return None; }
+        let select = usize::from(self.regs[0x1c] & 7);
+        let cycles = [self.hz / 4096, self.hz / 64, self.hz, self.hz * 60, self.hz * 3600].get(select).copied()?;
+        Some(cycles.saturating_mul(count).max(1))
+    }
+
+    pub fn timer_deadline(&self) -> Option<u64> {
+        if self.regs[0x1d] & 0x10 != 0 { return None; }
+        Some(self.timer_start.saturating_add(self.timer_period()?))
+    }
+
+    pub fn irq(&mut self) -> bool {
+        self.tick();
+        self.regs[0x1d] & self.regs[0x1e] & 0x18 != 0
     }
 
     fn read_calendar(&mut self) {

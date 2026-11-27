@@ -26,7 +26,9 @@ pub struct St25r3916 {
     fifo: VecDeque<u8>,
     phase: Phase,
     uid: Vec<u8>,
-    pending: Option<(u64, Vec<u8>)>,
+    tag_present: bool,
+    pending: Option<(u64, Vec<u8>, u8)>,
+    fifo_last_bits: u8,
     halted: bool,
     selected: bool,
     type2: [u8; 80],
@@ -35,47 +37,56 @@ pub struct St25r3916 {
 impl Default for St25r3916 {
     fn default() -> Self {
         Self { registers: [[0; 64]; 2], fifo: VecDeque::new(), phase: Phase::Header,
-               uid: Vec::new(), pending: None, halted: false, selected: false, type2: [0; 80], uid_reads: 0 }
+               uid: Vec::new(), tag_present: false, pending: None, fifo_last_bits: 0,
+               halted: false, selected: false, type2: [0; 80], uid_reads: 0 }
     }
 }
 impl St25r3916 {
     pub fn reset(&mut self) {
         self.registers = [[0; 64]; 2];
         self.fifo.clear();
+        self.fifo_last_bits = 0;
         self.pending = None;
         self.halted = false;
         self.selected = false;
         self.deselect();
     }
     pub fn set_tag(&mut self, uid: Vec<u8>) {
-        self.type2 = [0; 80];
-        if let &[a, b, c, d, e, f, g] = uid.as_slice() {
-            self.type2[..12].copy_from_slice(&[a, b, c, 0x88 ^ a ^ b ^ c, d, e, f, g, d ^ e ^ f ^ g, 0x48, 0, 0]);
+        self.tag_present = !uid.is_empty();
+        if self.tag_present && uid != self.uid {
+            self.type2 = [0; 80];
+            if let &[a, b, c, d, e, f, g] = uid.as_slice() {
+                self.type2[..12].copy_from_slice(&[a, b, c, 0x88 ^ a ^ b ^ c, d, e, f, g, d ^ e ^ f ^ g, 0x48, 0, 0]);
+                self.type2[12..17].copy_from_slice(&[0xe1, 0x10, 0x06, 0, 0xfe]);
+            }
+            self.uid = uid;
         }
-        self.uid = uid;
         self.halted = false;
         self.selected = false;
         self.fifo.clear();
+        self.fifo_last_bits = 0;
         self.pending = None;
     }
     pub fn deselect(&mut self) { self.phase = Phase::Header; }
     pub fn irq(&self) -> bool {
         (0..4).any(|i| self.registers[0][0x1a + i] & !self.registers[0][0x16 + i] != 0)
     }
-    pub fn deadline(&self) -> Option<u64> { self.pending.as_ref().map(|(due, _)| *due) }
+    pub fn deadline(&self) -> Option<u64> { self.pending.as_ref().map(|(due, _, _)| *due) }
     pub fn advance(&mut self, now: u64) {
         if self.deadline().is_some_and(|due| now >= due) {
-            if let Some((_, data)) = self.pending.take() {
+            if let Some((_, data, bits)) = self.pending.take() {
                 if data.is_empty() {
                     self.registers[0][0x1b] |= 0x40; // Timer expired without a response.
                 } else {
                     self.fifo = data.into();
+                    self.fifo_last_bits = bits;
                     self.registers[0][0x1a] |= 0x30; // RX start and RX end.
                 }
             }
         }
     }
     fn cascade(&self, command: u8) -> Option<[u8; 5]> {
+        if !self.tag_present { return None; }
         let uid = match (command, self.uid.as_slice()) {
             (0x93, &[a, b, c, d]) => [a, b, c, d],
             (0x93, &[a, b, c, _, _, _, _]) => [0x88, a, b, c],
@@ -88,17 +99,18 @@ impl St25r3916 {
         if (0xc4..=0xc7).contains(&command) { self.registers[0][0x1a] |= 0x08; }
         match command {
             0xc1 => self.reset(),
-            0xc2 | 0xdb => { self.fifo.clear(); self.pending = None; }
-            0xc6 | 0xc7 if !self.uid.is_empty() && (!self.halted || command == 0xc7) => {
+            0xc2 | 0xdb => { self.fifo.clear(); self.fifo_last_bits = 0; self.pending = None; }
+            0xc6 | 0xc7 if self.tag_present && (!self.halted || command == 0xc7) => {
                 self.halted = false;
                 self.selected = false;
                 let atqa = if self.uid.len() == 7 { 0x44 } else { 0x04 };
-                self.pending = Some((now.saturating_add(250 * cycles_per_us), vec![atqa, 0]));
+                self.pending = Some((now.saturating_add(250 * cycles_per_us), vec![atqa, 0], 0));
             }
-            0xc6 | 0xc7 => self.pending = Some((now.saturating_add(2500 * cycles_per_us), Vec::new())),
+            0xc6 | 0xc7 => self.pending = Some((now.saturating_add(2500 * cycles_per_us), Vec::new(), 0)),
             0xc4 | 0xc5 => {
                 let frame: Vec<_> = self.fifo.drain(..).collect();
                 if self.halted { return; }
+                let mut bits = 0;
                 let response = match (command, frame.as_slice()) {
                     (0xc5, [sel, 0x20]) => self.cascade(*sel).map(|uid| uid.to_vec()),
                     (0xc4, [sel, 0x70, bytes @ ..]) if self.cascade(*sel).is_some_and(|uid| uid == bytes) => {
@@ -113,15 +125,22 @@ impl St25r3916 {
                         let bytes = (0..16).map(|i| self.type2[(usize::from(*page) * 4 + i) % self.type2.len()]);
                         Some(bytes.collect())
                     }
+                    (0xc4, [0xa2, page, bytes @ ..]) if self.selected && self.uid.len() == 7
+                        && (3..20).contains(page) && bytes.len() == 4 => {
+                        let offset = usize::from(*page) * 4;
+                        self.type2[offset..offset + 4].copy_from_slice(bytes);
+                        bits = 4;
+                        Some(vec![0x0a])
+                    }
                     _ => None,
                 };
                 self.pending = Some(match response {
                     Some(mut data) => {
                         // DS12484 §2.2.13: the decoder keeps received CRC bytes in the FIFO.
-                        if command == 0xc4 { append_crc_a(&mut data); }
-                        (now.saturating_add(250 * cycles_per_us), data)
+                        if command == 0xc4 && bits == 0 { append_crc_a(&mut data); }
+                        (now.saturating_add(250 * cycles_per_us), data, bits)
                     }
-                    None => (now.saturating_add(2500 * cycles_per_us), Vec::new()),
+                    None => (now.saturating_add(2500 * cycles_per_us), Vec::new(), 0),
                 });
             }
             _ => {}
@@ -146,7 +165,7 @@ impl St25r3916 {
                     return match (bank, addr) {
                         (0, 0x1a..=0x1d) => std::mem::take(&mut self.registers[bank][addr]),
                         (0, 0x1e) => self.fifo.len() as u8,
-                        (0, 0x1f) => ((self.fifo.len() >> 8) as u8) << 6,
+                        (0, 0x1f) => (((self.fifo.len() >> 8) as u8) << 6) | (self.fifo_last_bits << 1),
                         (0, 0x31) => (self.registers[0][2] & 0x80) >> 3,
                         (0, 0x3f) => 0x2a,
                         _ => old,

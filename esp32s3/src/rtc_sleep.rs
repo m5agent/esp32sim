@@ -6,6 +6,7 @@ use esp_soc::SocBus as _;
 
 const TIMER_WAKE: u32 = 1 << 3;
 const TIMER_MASK: u64 = (1 << 48) - 1;
+const DIGITAL_WRAP_POWER_DOWN: u32 = 1 << 31;
 
 impl SocBus {
     pub(crate) fn rtc_sleeping(&self) -> bool {
@@ -14,15 +15,15 @@ impl SocBus {
 
     pub(crate) fn enter_rtc_timer_sleep(&mut self) {
         let rtc = &self.periph.rtc.ram;
-        // DG_WRAP_PD_EN selects deep sleep. This path retains digital state.
-        if rtc.read(0x90) & (1 << 31) != 0 || rtc.read(0x3c) & (TIMER_WAKE << 15) == 0 {
+        if rtc.read(0x3c) & (TIMER_WAKE << 15) == 0 {
             return;
         }
         let target = u64::from(rtc.read(4)) | (u64::from(rtc.read(8) & 0xffff) << 32);
         self.rtc_sleep_target = Some(target);
         self.irq_dirty = true;
         if self.debug.has("rtc-sleep") {
-            eprintln!("[rtc-sleep] enter timer light sleep t={:.6}s", self.cycles() as f64 / CPU_HZ as f64);
+            let mode = if self.periph.rtc.ram.read(0x90) & DIGITAL_WRAP_POWER_DOWN != 0 { "deep" } else { "light" };
+            eprintln!("[rtc-sleep] enter timer {mode} sleep t={:.6}s", self.cycles() as f64 / CPU_HZ as f64);
         }
         if self.rtc_timer_remaining() == Some(0) {
             self.finish_rtc_timer_sleep();
@@ -40,6 +41,12 @@ impl SocBus {
         rtc.write(0x18, rtc.read(0x18) & !(1 << 31));
         rtc.write(0x130, TIMER_WAKE);
         rtc.write(0x44, rtc.read(0x44) | 1);
+        if rtc.read(0x90) & DIGITAL_WRAP_POWER_DOWN != 0 {
+            // The S3 loses digital CPU state on deep sleep wake. The existing
+            // RTC reset keeps its slow clock and its fast/slow retention RAM.
+            self.periph.rtc.reset_cause = 5;
+            self.periph.rtc.sw_reset = true;
+        }
         self.irq_dirty = true;
         if self.debug.has("rtc-sleep") {
             eprintln!("[rtc-sleep] timer wake t={:.6}s", self.cycles() as f64 / CPU_HZ as f64);
