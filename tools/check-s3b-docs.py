@@ -118,14 +118,17 @@ def power_case(out, board, case, serial, report):
         wire_lines = {"m5pm1-1": 16, "m5pm1-2": 18, "m5pm1-3": 19, "wakeup-2": 16}
         if (case in wire_lines and "PM1 initialization successful" in serial and "unexpected nack" in serial
                 and re.search(r"L7set_pin\w*\(a2=0x1 a3=0x2f a4=0x30\)", report)
-                and "[i2c0] transfer without a bidirectional pin route" in report):
+                and "[i2c0] transfer without a bidirectional pin route" in report
+                and "[peek after run]\n60004610: 0000005c\n60004614: 0000005b" in report):
             name = case.replace("-", "_")
             raise DocsDefect(f"{name}.ino:{wire_lines[case]} assigns Wire/I2C0 to GPIO47/48. "
                              "M5.update polls PM1 through M5GFX I2C1, which rewrites the same GPIO output selectors. "
                              "The later Wire operation fails after the I2C1 remap.")
         if (case == "wakeup-1" and "esp_sleep_enable_timer_wakeup(a2=0x4c4b40" in report
                 and "M5PM1_Class8powerOffEv(" in report and "powered=false timer_wakes=0" in report
-                and "esp_deep_sleep_start(" not in report):
+                and "[i2c] start addr 0x6e read=false\n[i2c]   write 0x0c\n[i2c]   write 0xa1" in report
+                and "esp_deep_sleep_start: 1 functions" in report and "esp_deep_sleep_start(" not in report
+                and not re.search(r"addr 0x6e read=false\n\[i2c\]   write 0x3[89abcd]\n\[i2c\]   write", report)):
             raise DocsDefect("wakeup_1.ino:18 calls timerSleep(5). The pinned library arms the ESP RTC timer "
                              "then cuts the ESP's supply through PM1 before entering deep sleep. No PM1 timer was armed.")
     if case in {"m5pm1-1", "m5pm1_m5ioe1-1", "wakeup-2"}:
@@ -151,8 +154,12 @@ def power_case(out, board, case, serial, report):
         wav = out / (case + "-output.wav")
         require(all(heard_tone(wav, hz, 180, 10) for hz in (4000, 6000)), "audible phases missing")
         if heard_tone(wav, 10000, 180, 10):
-            require(re.search(r"_speaker_enabled_cb_stopwatch\w*\(a2=0x[0-9a-f]+ a3=0x1", report),
-                    "unexpected 10 kHz PCM without a trace of the firmware enabling the speaker")
+            callbacks = re.split(r"\[fn\] [^\n]*_speaker_enabled_cb_stopwatch\w*\([^\n]*a3=(0x[01])[^\n]*\n", report)
+            expander_write = "[i2c] start addr 0x4f read=false\n[i2c]   write 0x"
+            require(any(enabled == "0x1" and expander_write + "05\n[i2c]   write 0x9d" in writes
+                        and expander_write + "06\n[i2c]   write 0x03" in writes
+                        for enabled, writes in zip(callbacks[1::2], callbacks[2::2])),
+                    "unexpected 10 kHz PCM without traced audio rail and amplifier restoration")
             raise DocsDefect("m5pm1_m5ioe1_6.ino:75–78 and :107–113 call tone() and begin() after turning off "
                              "the amplifier or audio rail. The traced enable callback restores both before "
                              "the 10 kHz PCM reaches the speaker. Connector selection and motor duty passed.")
