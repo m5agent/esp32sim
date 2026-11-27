@@ -256,7 +256,13 @@ impl esp_soc::SocBus for SocBus {
             .unwrap_or_default()
     }
     fn board_command(&mut self, verb: &str, args: &[&str]) -> bool {
-        self.board.board_command(self.cycles, verb, args)
+        let accepted = self.board.board_command(self.cycles, verb, args);
+        if accepted && self.board_power.is_some() {
+            // A command can restore power while the SoC has no pending device deadline.
+            // Deliver the transition before the scheduler skips the remainder of the run.
+            self.deliver_board_inputs();
+        }
+        accepted
     }
     fn board(&mut self) -> &mut dyn BoardModel {
         &mut *self.board

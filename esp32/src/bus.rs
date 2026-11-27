@@ -358,7 +358,7 @@ impl SocBus {
             self.deliver_board_inputs();
         }
     }
-    fn deliver_board_inputs(&mut self) {
+    pub(crate) fn deliver_board_inputs(&mut self) {
         let periph = &self.periph;
         self.board.advance_inputs_with_clock(self.cycles, &|pin| periph.pwm_output(u32::from(pin)));
         for edge in self.board.take_edges() {

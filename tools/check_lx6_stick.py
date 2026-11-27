@@ -243,6 +243,9 @@ def check(device, out):
             hit = (all(hits) and "ax:" in read("imu-idle", "log")) or bool(three_frames())
             if hit:
                 reason = "UART reports both injected accelerometer vectors and the idle control ran"
+        elif case == "imu-5":
+            hit = bool(three_frames())
+            reason = "The documented temperature display changed for both injected ADC words"
         elif case == "imu" or case in {"imu-2", "imu-3", "imu-4"}:
             hit = bool(three_frames())
             if hit:

@@ -18,7 +18,8 @@ GY GZ` in sensor axes, with acceleration in g and angular velocity in degrees
 per second. M5Stick also accepts `mag X Y Z` in microteslas. Apply
 `battery-mv MILLIVOLTS` for the I²C PMICs. On Plus2, `adc 38 VOLTS` sets the
 voltage after the 2:1 battery divider. `vbus-mv 0` disconnects the simulated
-USB supply. `pmic-key short` and `pmic-key long` latch AXP192 power-key flags.
+USB supply. `imu-temp-raw -1634` selects a signed MPU6886 temperature ADC word.
+`pmic-key short` and `pmic-key long` latch AXP192 power-key flags.
 A short Plus2 event grants a two-second initial power window for the guest
 to assert G4. The BM8563 RTC advances in virtual time.
 

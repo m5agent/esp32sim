@@ -47,6 +47,9 @@ def scenarios(device, case):
                 pulse += ["1.1 press b 350"]
             end = 1.65 if case == "button" else 1.2
             base = [("", end, pulse, []), ("-idle", end, [], []), ("-held", 0.8, pulse[:1], [])]
+    elif case == "imu-5":
+        inputs = ["0.3 imu-temp-raw -1634", "1.3 imu-temp-raw 3268"]
+        base = [("", 2.2, inputs, []), ("-idle", 2.2, [], []), ("-first", 1.1, inputs[:1], [])]
     elif case.startswith("imu") and case != "imu-1":
         inputs = ["0.8 imu 0.5 -0.25 1 125 -50 25", "2.0 imu -0.75 0.375 0.25 -100 80 -30"]
         base = [("", 3.45, inputs, []), ("-idle", 3.45, [], []), ("-first", 1.9, inputs[:1], [])]
@@ -59,7 +62,7 @@ def scenarios(device, case):
             args = []
         base = [("", 1.45, inputs[1], args), ("-idle", 1.45, [], args), ("-first", 1.45, inputs[0], args)]
     elif case in {"axp192_m5stickc-3", "power-3"}:
-        base = [("", 4.0, [], []), ("-first", 1.8, [], []), ("-restart", 6.0, ["4.1 pmic-key short"], [])]
+        base = [("", 4.0, [], []), ("-first", 1.8, [], []), ("-restart", 5.4, ["4.1 pmic-key short"], [])]
     elif case in {"axp192_m5stickc-5", "power-5"}:
         base = [("", 1.8, [], []), ("-first", 0.9, [], [])]
     elif case == "mic":

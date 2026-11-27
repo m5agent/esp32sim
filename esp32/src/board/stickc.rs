@@ -282,7 +282,7 @@ impl BoardModel for Stick {
 
     fn accepts_command(&self, verb: &str) -> bool {
         match verb {
-            "imu" => self.imu.is_some(),
+            "imu" | "imu-temp-raw" => self.imu.is_some(),
             "battery-mv" => self.axp.is_some(),
             "pmic-key" => true,
             "vbus-mv" => true,
@@ -299,6 +299,10 @@ impl BoardModel for Stick {
                 let values = [x, y, z, gx, gy, gz];
                 if !values.iter().all(|v| v.is_finite()) { return false; }
                 imu.borrow_mut().set_sample(values);
+            }
+            ("imu-temp-raw", [value]) => {
+                let (Some(imu), Ok(value)) = (&self.imu, value.parse()) else { return false; };
+                imu.borrow_mut().set_temperature_raw(value);
             }
             ("battery-mv", [mv]) => {
                 let (Some(axp), Ok(mv)) = (&self.axp, mv.parse()) else { return false; };
