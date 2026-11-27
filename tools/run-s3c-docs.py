@@ -44,8 +44,26 @@ STACK = {
 }
 NFC_TOUCH = ("3.2 touch 155 105 1\n3.4 touch 155 105 0\n"
              "5.2 touch 155 105 1\n5.4 touch 155 105 0\n")
-STACK.update({f"nfc-{index}": "3 nfc-tag 04a1b2c3d4e5f6\n5 nfc-tag 0456abcd123456\n" + NFC_TOUCH
-              for index in (1, 4, 5, 6)})
+STACK["nfc-1"] = "3 nfc-tag 04a1b2c3d4e5f6\n5 nfc-tag 0456abcd123456\n" + NFC_TOUCH
+CLASSIC_TOUCH = (
+    "3 nfc-tag 04314253\n3.2 touch 155 105 1\n3.4 touch 155 105 0\n"
+    "5 nfc-tag none\n5.25 nfc-tag 04765432\n5.4 touch 155 105 1\n6.4 touch 155 105 0\n"
+)
+STACK["nfc-4"] = CLASSIC_TOUCH
+STACK["nfc-6"] = CLASSIC_TOUCH
+STACK["nfc-3"] = (
+    "3 nfc-field on\n3.1 nfc-reader 26\n3.2 nfc-reader 9320\n3.3 nfc-reader 937088043456ee\n"
+    "3.4 nfc-reader 9520\n3.5 nfc-reader 9570789abcde80\n"
+    "4 nfc-reader 3000\n4.2 nfc-reply\n5 nfc-reader 3004\n5.2 nfc-reply\n6 nfc-field off\n"
+)
+STACK["nfc-5"] = (
+    "3 nfc-tag 04a1b2c3d4e5f6\n"
+    "3.2 touch 155 105 1\n3.4 touch 155 105 0\n"
+    "3.7 nfc-tag none\n3.85 nfc-tag 04a1b2c3d4e5f6\n"
+    "4 touch 155 105 1\n5 touch 155 105 0\n"
+    "5.4 nfc-tag none\n5.6 nfc-tag 04a1b2c3d4e5f6\n"
+    "6 touch 155 105 1\n6.2 touch 155 105 0\n"
+)
 STACK["nfc-2"] = ("3 nfc-tag 04a1b2c3d4e5f6\n3.2 touch 45 239 1\n3.4 touch 45 239 0\n"
                   "5 nfc-tag 0456abcd123456\n5.2 touch 45 239 1\n5.4 touch 45 239 0\n")
 ALTERNATE = {
@@ -62,7 +80,7 @@ DURATIONS = {"display": 1.5, "servo-1": 6, "servo-2": 7, "imu": 5, "battery": 5,
              "modbus-2": 12, "wakeup": 13, "wav": 16}
 CONTROL_CASES = {
     "stamplc": {"button", "input_output-2", "modbus-1", "sd_card", "sensor"},
-    "stackchan": {"battery", "button", "imu", "ltr553", "mic", "nfc-1", "pic", "sdcard",
+    "stackchan": {"battery", "button", "imu", "ltr553", "mic", "nfc-1", "nfc-3", "nfc-4", "nfc-6", "pic", "sdcard",
                  "servo-2", "touch", "touchsensor", "wakeup"},
 }
 

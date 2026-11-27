@@ -229,7 +229,10 @@ Both profiles expose their SPI microSD sockets through `--sd` and `--sd-rw`.
 | StackChan | `base-supply MILLIVOLTS MILLIAMPS` | Set the base INA226 input. |
 | StackChan | `servo-pose YAW PITCH` | Displace the two virtual servos to the supplied encoder counts (0–1000). |
 | StackChan | `servo-angle` | Print the current yaw and pitch in degrees relative to factory zero. |
-| StackChan | `nfc-tag HEX_UID\|none` | Insert a synthetic NFC-A tag with a 4- or 7-byte UID, or remove it. |
+| StackChan | `nfc-tag HEX_UID\|none` | Insert a synthetic Classic 1K (four-byte UID) or Ultralight EV1 (seven-byte UID) tag, or remove it. |
+| StackChan | `nfc-field on\|off` | Turn the virtual reader field on or off for guest passive tag emulation. |
+| StackChan | `nfc-reader HEX_BYTES` | Send a reader frame for NFC-A selection or access. The model adds CRC-A to access frames. |
+| StackChan | `nfc-reply` | Print the latest guest tag response after its scheduled SPI or I²C work. |
 
 StackChan inherits the CoreS3 touch, PMIC key, camera, audio and `als` and `imu`
 controls. Its RGB ring comes from the PY32 expander and the yaw and pitch

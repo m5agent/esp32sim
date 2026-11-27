@@ -208,6 +208,33 @@ def stack(root, case, serial, log, frame):
                 "PICC NOT exists" in control and "==== Dump" not in control,
                 "guest did not identify and reactivate both NFC-A tags with the no-tag control")
         return "guest identifies and reactivates two Type 2 tags, with a no-tag control"
+    if case == "nfc-3":
+        idle_serial, idle_log, _ = capture(root, case + "-control", (320, 240))
+        active = re.findall(r"(?m)^([OIRA])\r?$", serial)
+        require(active == ["O", "I", "R", "A", "O"] and "Emulation:MIFARE Ultralight" in serial
+                and "NFC auto response: [44, 00]" in log
+                and "NFC guest response: [04, 34, 56, ee, 78, 9a, bc, de, 80, a3, 00, 00, e1, 10, 06, 00," in log
+                and "NFC guest response: [03, 25, 91, 01, 0d, 55, 04, 6d, 35, 73, 74, 61, 63, 6b, 2e, 63," in log
+                and not re.search(r"(?m)^[IRA]\r?$", idle_serial) and "NFC guest response:" not in idle_log,
+                "field state or two NFC-A memory readbacks differ")
+        return "virtual NFC reader selects the firmware tag and checks two NDEF memory reads"
+    if case in ("nfc-4", "nfc-6"):
+        control, _, _ = capture(root, case + "-control", (320, 240))
+        require(all(f"PICC:{uid} MIFARE Classic" in serial for uid in ("04314253", "04765432"))
+                and "PICC:" not in control, "both Classic tag values and idle control were not observed")
+        if case == "nfc-4":
+            require("VERIFY:OK" in serial and "Verify OK" in serial and "CLEAR" in serial,
+                    "authenticated Classic block/sector write, readback and clear did not complete")
+            return "two authenticated Classic tags with single-block and cross-sector write/readback"
+        require("==== Increment done" in serial and serial.count("==== Decrement done") == 2
+                and serial.count("==== To be normal block") == 2 and "Can NOT increment" in serial,
+                "Classic value decrement, conditional increment and restoration did not complete")
+        return "two Classic value block flows demonstrate decrement, increment denial and permitted increment"
+    if case == "nfc-5":
+        require("Data format is NOT NDEF" in serial and "Write NDEF OK!" in serial
+                and "https://m5stack.com/" in serial and field(log, "nfc-selections") >= 3,
+                "blank tag, NDEF write and URI readback did not all reach the guest")
+        return "guest formats and writes a synthetic Type 2 tag, then reads the NDEF URI"
     if case in ("sdcard", "pic"):
         disk = root / f"sd-{case}.img"
         stem = "cores3_test_picture" if case == "sdcard" else "TestPicture"
@@ -276,16 +303,20 @@ def check_matrix(board, root, cases, selected=None):
                     require(re.search(r"(?m)^S3C_REPL_OK\r?$", serial) and "script done" in log,
                             "stock USB-OTG CDC-ACM REPL marker missing")
                     reason = "stock UIFlow2 home visible after input and USB CDC REPL round-tripped"
+                elif case == "nfc-2":
+                    require("Please put the PICC and click BtnA" in serial and field(log, "nfc-selections") == 0
+                            and log.count("Touch(45, 239") == 4, "BtnA fixture did not reach the documented touch limit")
+                    verdicts[case] = {
+                        "status": "DOCS-DEFECT",
+                        "reason": ("Pinned nfc.md line 205 snippet leaves touch-button height at zero. "
+                                   "BtnA requires raw y ≥ 240 and StackChan's FT6336 range ends at 239."),
+                        "expected": row.get("expected"),
+                    }
+                    print(f"{case:17} DOCS-DEFECT {verdicts[case]['reason']}")
+                    continue
                 else:
                     reason = (plc if board == "stamplc" else stack)(root, case, serial, log, frame)
-                nfc_gaps = {
-                    "nfc-2": "sketch awaits BtnA, outside the modeled FT6336 touch range",
-                    "nfc-3": "guest booted, virtual reader and passive-target exchange unavailable",
-                    "nfc-4": "guest booted, authenticated MIFARE Classic read/write unavailable",
-                    "nfc-5": "guest booted, writable NDEF tag unavailable",
-                    "nfc-6": "guest booted, authenticated MIFARE Classic value blocks unavailable",
-                }
-                result = ("PASS", reason) if reason else ("NOT RUN", nfc_gaps.get(case, "behavioral assertion pending"))
+                result = ("PASS", reason) if reason else ("NOT RUN", "behavioral assertion pending")
             except (OSError, KeyError, ValueError, struct.error, zlib.error) as error:
                 result = ("FAIL", str(error))
         verdicts[case] = {"status": result[0], "reason": result[1], "expected": row.get("expected")}

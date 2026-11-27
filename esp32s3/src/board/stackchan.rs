@@ -202,7 +202,7 @@ impl StackChan {
     pub fn leds(&self) -> (&[[u8; 3]], u64) { (&self.leds, self.updates) }
 
     pub fn accepts_command(verb: &str) -> bool {
-        matches!(verb, "head-touch" | "base-supply" | "nfc-tag" | "servo-angle" | "servo-pose")
+        matches!(verb, "head-touch" | "base-supply" | "nfc-tag" | "nfc-field" | "nfc-reader" | "nfc-reply" | "servo-angle" | "servo-pose")
     }
     pub fn command(&mut self, verb: &str, args: &[&str]) -> bool {
         let mut hw = self.hw.borrow_mut();
@@ -215,6 +215,22 @@ impl StackChan {
             ("base-supply", [mv, ma]) => {
                 let (Ok(mv), Ok(ma)) = (mv.parse(), ma.parse()) else { return false };
                 hw.ina.supply(mv, ma);
+            }
+            ("nfc-field", ["on"]) => hw.nfc.set_external_field(true),
+            ("nfc-field", ["off"]) => hw.nfc.set_external_field(false),
+            ("nfc-reader", [hex]) if hex.len().is_multiple_of(2) && (2..=512).contains(&hex.len()) && hex.is_ascii() => {
+                let bytes: Option<Vec<_>> = (0..hex.len()).step_by(2)
+                    .map(|i| u8::from_str_radix(&hex[i..i+2], 16).ok()).collect();
+                let Some(bytes) = bytes else { return false };
+                let cycle = hw.cycle;
+                if let Some(reply) = hw.nfc.reader_frame(cycle, CPU_HZ / 1_000_000, &bytes) {
+                    eprintln!("[emu] StackChan NFC auto response: {reply:02x?}");
+                }
+            }
+            ("nfc-reply", []) => {
+                if let Some(reply) = hw.nfc.take_target_reply() {
+                    eprintln!("[emu] StackChan NFC guest response: {reply:02x?}");
+                }
             }
             ("nfc-tag", ["none"]) => hw.nfc.set_tag(Vec::new()),
             ("nfc-tag", [hex]) if matches!(hex.len(), 8 | 14) && hex.is_ascii() => {
