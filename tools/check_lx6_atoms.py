@@ -132,8 +132,13 @@ def check(device, out):
                 with wave.open(str(path), "rb") as wav:
                     rate = wav.getframerate()
                     samples = struct.unpack(f"<{wav.getnframes()}h", wav.readframes(wav.getnframes()))
-            record("stock-speaker", bool(samples) and max(samples) > min(samples),
-                   {"samples": len(samples), "nonzero": sum(x != 0 for x in samples), "rate": rate})
+            rises = [i for i in range(2, len(samples))
+                     if samples[i - 2] < 0 and samples[i - 1] <= 0 < samples[i]]
+            hz = rate * (len(rises) - 1) / (rises[-1] - rises[0]) if len(rises) > 2 else 0
+            record("stock-speaker", bool(re.search(r"(?m)^LX6-SPEAKER True", log("audio-733")))
+                   and len(rises) > 100 and abs(hz - 440) < 4,
+                   {"samples": len(samples), "nonzero": sum(x != 0 for x in samples),
+                    "rate": rate, "measured_hz": round(hz, 3)})
     return rows
 
 
