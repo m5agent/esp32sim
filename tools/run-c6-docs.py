@@ -48,7 +48,9 @@ def run(board):
     for case in ("button", "touch", "imu") if is_nesso else ("button",):
         cases.append((case + "-control", args.firmware_dir / case / "sketch.merged.bin", 3.0, "", []))
     if is_nesso:
-        cases.append(("imu-motion", args.firmware_dir / "imu/sketch.merged.bin", 12.0, "",
+        cases.append(("imu-motion", args.firmware_dir / "imu/sketch.merged.bin", 7.0, "",
+                      ["--imu-motion", "1"]))
+        cases.append(("imu-motion-first", args.firmware_dir / "imu/sketch.merged.bin", 5.0, "",
                       ["--imu-motion", "1"]))
         cases.append(("touch-first", args.firmware_dir / "touch/sketch.merged.bin", 2.5,
                       SCRIPTS["nesso-n1", "touch"], []))

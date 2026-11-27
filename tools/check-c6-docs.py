@@ -116,14 +116,16 @@ def nesso_cases(out, peers):
     lora_rx = read(peers / "lora-peer", "lora-2.log")
     lora_tx = read(peers / "lora-peer", "lora-1.log")
     lora_control = read(peers / "lora-isolated", "lora-2.log")
-    rest = set(re.findall(r"ax:.*", log("imu-control")))
-    moving = set(re.findall(r"ax:.*", log("imu-motion")))
     btn_events = ("A Btn Pressed", "A Btn Released", "B Btn Pressed", "B Btn Released")
     return {
         "button": all(e in log("button") and e not in log("button-control") for e in btn_events),
         "buzzer": buzzer_capture(out) and alive_board(err("buzzer")),
         "display": alive_board(err("display")),
-        "imu": bool(rest) and len(moving - rest) >= 2,
+        "imu": (alive_board(err("imu")) and not frame_diff(out, "imu", "imu-control")
+                and (out / "imu-control.png").is_file()
+                and frame_diff(out, "imu-control", "imu-motion-first")
+                and frame_diff(out, "imu-control", "imu-motion")
+                and frame_diff(out, "imu-motion-first", "imu-motion")),
         "ir_nec": number(err("ir_nec"), "nec_frames") >= 2,
         "led": number(err("led"), "led_changes") > 2,
         "lora-1": lora_tx.count("transmission finished!") >= 2 and "Hello world from M5Stack!" in lora_rx,
