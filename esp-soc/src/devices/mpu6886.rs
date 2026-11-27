@@ -1,4 +1,4 @@
-//! MPU6886 polling over I2C. M5Unified 0.3.0 MPU6886_Class.inl uses
+//! TDK MPU6886 polling over I2C (register map rev. 1.1). M5Unified 0.3.0 uses
 //! WHO_AM_I, PWR_MGMT_1, INT_STATUS and a 14-byte big-endian sample burst.
 //! FIFO, self-test and interrupt pins are outside this model.
 use esp_periph::i2c::I2cDevice;
@@ -7,13 +7,12 @@ pub struct Mpu6886 {
     regs: [u8; 128],
     ptr: u8,
     select_register: bool,
-    accel: [f64; 3],
-    gyro: [f64; 3],
+    sample: [f64; 6],
 }
 
 impl Default for Mpu6886 {
     fn default() -> Self {
-        let mut sensor = Self { regs: [0; 128], ptr: 0, select_register: true, accel: [0.0, 0.0, 1.0], gyro: [0.0; 3] };
+        let mut sensor = Self { regs: [0; 128], ptr: 0, select_register: true, sample: [0.0, 0.0, 1.0, 0.0, 0.0, 0.0] };
         sensor.reset();
         sensor
     }
@@ -28,10 +27,9 @@ impl Mpu6886 {
         self.regs[0x75] = 0x19;
     }
 
-    /// Set accelerometer and gyroscope readings in sensor axes, in g and dps.
-    pub fn set_sample(&mut self, [ax, ay, az, gx, gy, gz]: [f64; 6]) {
-        self.accel = [ax, ay, az];
-        self.gyro = [gx, gy, gz];
+    /// Set readings in sensor axes in the order ax, ay, az (g), gx, gy, gz (dps).
+    pub fn set_sample(&mut self, sample: [f64; 6]) {
+        self.sample = sample;
     }
 
     fn latch(&mut self) {
@@ -41,7 +39,8 @@ impl Mpu6886 {
         }
         let accel_range = 2 << ((self.regs[0x1c] >> 3) & 3);
         let gyro_range = 250 << ((self.regs[0x1b] >> 3) & 3);
-        for (start, axes, range) in [(0x3b, self.accel, accel_range), (0x43, self.gyro, gyro_range)] {
+        let [ax, ay, az, gx, gy, gz] = self.sample;
+        for (start, axes, range) in [(0x3b, [ax, ay, az], accel_range), (0x43, [gx, gy, gz], gyro_range)] {
             for (word, sample) in self.regs[start..start + 6].as_chunks_mut::<2>().0.iter_mut().zip(axes) {
                 let value = (sample * 32768.0 / f64::from(range)).round() as i16;
                 word.copy_from_slice(&value.to_be_bytes());
@@ -114,6 +113,24 @@ mod tests {
         select(&mut imu, 0x6b);
         imu.write(0x80);
         select(&mut imu, 0x3a);
+        imu.start(true);
+        assert_eq!(imu.read(), 0);
+    }
+
+    #[test]
+    fn data_burst_latches_and_clips_signed_samples() {
+        let mut imu = Mpu6886::default();
+        select(&mut imu, 0x6b);
+        imu.write(1);
+        select(&mut imu, 0x1c);
+        imu.write(0x10);
+        imu.set_sample([1.0, -0.5, 12.0, 0.0, 0.0, 0.0]);
+        select(&mut imu, 0x3b);
+        imu.start(true);
+        imu.set_sample([0.0; 6]);
+        let raw: Vec<_> = (0..6).map(|_| imu.read()).collect();
+        assert_eq!(raw, [0x10, 0, 0xf8, 0, 0x7f, 0xff]);
+        select(&mut imu, 0x3b);
         imu.start(true);
         assert_eq!(imu.read(), 0);
     }
