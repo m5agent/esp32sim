@@ -551,7 +551,7 @@ impl Ieee802154 {
 
     fn register_bytes<const N: usize>(&self, base: u32) -> [u8; N] {
         let mut bytes = [0; N];
-        for (i, word) in bytes.chunks_exact_mut(4).enumerate() {
+        for (i, word) in bytes.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             word.copy_from_slice(&self.ram.read(base + 4 * i as u32).to_le_bytes());
         }
         bytes
