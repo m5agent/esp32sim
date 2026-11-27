@@ -279,6 +279,10 @@ impl SocBus {
         let frame_bytes = i2s.inner.bytes_per_frame as usize;
         let sample_bytes = i2s.inner.sample_bytes();
         let cfg = i2s.ram.read(0x60);
+        // IDF v5.5.4 dac_dma.c: I2S0 in ADC/DAC mode sends unsigned
+        // samples to the enabled RTC DAC pads. Only the high 8 bits are used.
+        let dac_mode = port == 0 && i2s.ram.read(0xa8) & 0x21 == 0x20;
+        let dac_channels = if dac_mode { self.periph.adc.i2s_dac_channels() } else { 0 };
         let mut out = i2s.out;
         let audible = self.board.i2s_codecs().is_none_or(|codec| {
             // IDF v5.5.4 ESP32 gpio_sig_map.h I2S{0,1}O_{BCK,WS,DATA_OUT23}.
@@ -309,6 +313,11 @@ impl SocBus {
             };
             let inner = &mut self.periph.i2s[port].inner;
             inner.pcm.extend(self.dram[range].chunks_exact(frame_bytes).map(|frame| {
+                if dac_mode {
+                    if dac_channels == 0 { return 0; }
+                    let selected = if dac_channels == 2 && frame_bytes >= sample_bytes * 2 { 2 } else { 1 };
+                    return (i16::from(frame[selected * sample_bytes - 1]) - 128) << 8;
+                }
                 if !audible { return 0; }
                 i16::from_le_bytes([frame[sample_bytes - 2], frame[sample_bytes - 1]])
             }));

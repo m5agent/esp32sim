@@ -6,6 +6,7 @@ pub mod aw88298;
 pub mod axp2101;
 pub mod axp192;
 pub mod ip5306;
+pub mod ina3221;
 
 pub mod bm8563;
 pub mod bmi270;

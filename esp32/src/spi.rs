@@ -13,6 +13,7 @@ const USER_MOSI: u32 = 1 << 27;
 pub(crate) struct Transfer {
     pub tx: Vec<u8>,
     pub rx_len: usize,
+    pub rx_bits: usize,
     pub dma_tx_len: usize,
     pub dma_rx: bool,
     pub cs: Option<(usize, bool)>,
@@ -126,15 +127,20 @@ impl ClassicGpSpi {
         let dma_tx_len = if self.out_active { mosi_len } else { 0 };
         if dma_tx_len == 0 {
             let base = if user & (1 << 25) != 0 { 8 } else { 0 };
-            for i in 0..mosi_len.min((16 - base) * 4) {
-                tx.push((self.w[base + i / 4] >> (8 * (i % 4))) as u8);
+            // IDF v5.5.4 spi_reg.h SPI_USR_MOSI_DBITLEN can exceed the
+            // register buffer. The classic master wraps around it (M5GFX
+            // Bus_SPI::writeDataRepeat uses a 2048-bit CPU transfer).
+            let words = 16 - base;
+            for i in 0..mosi_len {
+                tx.push((self.w[base + (i / 4) % words] >> (8 * (i % 4))) as u8);
             }
         }
-        let rx_len = if user & USER_MISO != 0 {
-            ((self.regs.read(0x2c) & 0x00ff_ffff) + 1).div_ceil(8) as usize
+        let rx_bits = if user & USER_MISO != 0 {
+            ((self.regs.read(0x2c) & 0x00ff_ffff) + 1) as usize
         } else {
             0
         };
+        let rx_len = rx_bits.div_ceil(8);
         let pin = self.regs.read(0x34);
         let cs = (0..3)
             .find(|cs| pin & (1 << cs) == 0)
@@ -142,6 +148,7 @@ impl ClassicGpSpi {
         self.pending = Some(Transfer {
             tx,
             rx_len,
+            rx_bits,
             dma_tx_len,
             dma_rx: self.in_active && rx_len != 0,
             cs,
@@ -319,6 +326,20 @@ mod tests {
         assert_eq!(transfer.tx, [0x2c, 0x12, 0x34, 0x56, 0xde, 0xad]);
         spi.finish(transfer, &[], 0x3ff0_0abc, 0);
         assert_eq!(spi.read(0x114) & 0x1c0, 0x1c0);
+    }
+
+    #[test]
+    fn cpu_repeat_transfer_wraps_fifo_without_entering_dma() {
+        let mut spi = ClassicGpSpi::new();
+        spi.write(0x1c, USER_MOSI);
+        spi.write(0x28, 2047);
+        spi.write(0x80, 0x0403_0201);
+        spi.write(0xbc, 0x8070_6050);
+        spi.write(0, USR);
+        let transfer = spi.take_transfer().unwrap();
+        assert_eq!(transfer.tx.len(), 256);
+        assert_eq!(&transfer.tx[60..68], &[0x50, 0x60, 0x70, 0x80, 1, 2, 3, 4]);
+        assert_eq!(transfer.dma_tx_len, 0);
     }
 
     #[test]

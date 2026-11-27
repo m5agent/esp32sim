@@ -564,7 +564,7 @@ impl SocBus {
                 miso: gpio.input_pin(miso_signal),
                 cs: gpio.low_outputs(),
             };
-            self.board.spi_transfer_pins(host as u8, pins, &transfer.tx, transfer.rx_len)
+            self.board.spi_transfer_pins_bits(host as u8, pins, &transfer.tx, transfer.rx_bits)
             } else { self.board.spi_transfer(host as u8, &transfer.tx, transfer.rx_len) };
             let mut in_eof = 0;
             if dma_rx && rx_len != 0 {
