@@ -1,0 +1,17 @@
+3.0 uart0-cr from machine import I2C, Pin, SPI; bus=I2C(0,scl=Pin(22),sda=Pin(21)); print('K016'+'-SCAN',bus.scan())
+3.35 uart0-cr print('K016'+'-ID',bus.readfrom_mem(0x68,0x75,1).hex()); print('K016'+'-BAT',bus.readfrom_mem(0x75,0x78,1).hex())
+3.55 uart0-cr bus.writeto_mem(0x68,0x37,b'\x02'); print('K016'+'-MAG-ID',bus.readfrom_mem(0x0c,0,1).hex()); bus.writeto_mem(0x0c,0x0a,b'\x16')
+3.9 imu 0.5 -0.25 1 125 -50 25
+3.9 mag 15 -30 45
+3.9 battery-mv 3450
+4.05 uart0-cr print('K016'+'-ONE',bus.readfrom_mem(0x68,0x3b,6).hex(),bus.readfrom_mem(0x0c,3,7).hex(),bus.readfrom_mem(0x75,0x78,1).hex())
+4.3 imu -0.75 0.375 0.25 -100 80 -30
+4.3 mag -15 30 -45
+4.3 battery-mv 4080
+4.5 uart0-cr print('K016'+'-TWO',bus.readfrom_mem(0x68,0x3b,6).hex(),bus.readfrom_mem(0x0c,3,7).hex(),bus.readfrom_mem(0x75,0x78,1).hex())
+4.8 uart0-cr a=Pin(35,Pin.IN); print('K016'+'-BTN',a.value())
+5.1 press a 600
+5.4 uart0-cr print('K016'+'-BTN',a.value())
+5.9 uart0-cr print('K016'+'-BTN',a.value())
+6.2 uart0-cr oled=SPI(2,sck=Pin(18),mosi=Pin(23),miso=Pin(19),baudrate=1000000); cs=Pin(14,Pin.OUT,value=1); dc=Pin(27,Pin.OUT); rst=Pin(33,Pin.OUT,value=1); rst(0); rst(1)
+6.6 uart0-cr cs(0); dc(0); oled.write(bytes([0xaf,0xb0,0x00,0x10])); dc(1); oled.write(bytes([0x81])*64); cs(1); print('K016'+'-OLED')

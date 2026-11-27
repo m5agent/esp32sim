@@ -27,6 +27,9 @@ pub trait I2cDevice {
     fn stop(&mut self) {}
 }
 
+const INT_RXFIFO_FULL: u32 = 1 << 0;
+const INT_TXFIFO_EMPTY: u32 = 1 << 1;
+const INT_TRANS_START: u32 = 1 << 9;
 pub const INT_END_DETECT: u32 = 1 << 3;
 pub const INT_TRANS_COMPLETE: u32 = 1 << 7;
 pub const INT_TIMEOUT: u32 = 1 << 8;
@@ -55,9 +58,13 @@ pub struct I2c<const N: usize = 8> {
 
 struct Program<const N: usize> {
     cmd: [u32; N],
+    fifo_wait: Option<FifoWait>,
     /// C6 supplies its PCR divider in the S3/C3 CLK_CONF layout.
     external_clock_config: Option<u32>,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FifoWait { Tx, Rx }
 
 impl I2c { pub fn new() -> Self { Self::with_slots() } }
 /// IDF v5.5.4 esp32 i2c_reg.h: sixteen slots; i2c_ll.h: opcodes 0/1/2/3/4.
@@ -66,7 +73,7 @@ impl I2c<16> { pub fn new_classic() -> Self { Self::with_slots() } }
 macro_rules! i2c_impl { ($n:literal) => {
 impl I2c<$n> {
     fn with_slots() -> Self {
-        I2c { regs: RegRam::new(), tx: VecDeque::new(), rx: VecDeque::new(), int_raw: 0, int_ena: 0, program: Box::new(Program { cmd: [0; $n], external_clock_config: None }),
+        I2c { regs: RegRam::new(), tx: VecDeque::new(), rx: VecDeque::new(), int_raw: 0, int_ena: 0, program: Box::new(Program { cmd: [0; $n], fifo_wait: None, external_clock_config: None }),
               devices: Vec::new(), cur: Vec::new(), remaining: None, pins: None, expect_addr: false, nack: false, log: false, transactions: 0,
               command_index: 0, byte_index: 0 }
     }
@@ -115,7 +122,11 @@ impl I2c<$n> {
             // failed. The classic controller keeps its old value: nothing reads it there.
             0x08 => (if $n == 16 { self.nack } else { !self.nack } as u32) | ((self.is_active() as u32) << 4) | (u32::from($n == 16 && self.int_raw & INT_TIMEOUT != 0) << 2) | ((self.rx.len() as u32 & 0x3f) << 8) | ((self.tx.len() as u32 & 0x3f) << 18),   // SR: resp_rec, bus_busy, rxfifo_cnt, txfifo_cnt
             0x14 => ((self.rx.len() as u32 & 0x1f) << 5) | ((self.tx.len() as u32 & 0x1f) << 15),                        // FIFO_ST: waddr = count, raddr = 0
-            0x1c => self.rx.pop_front().unwrap_or(0) as u32,
+            0x1c => {
+                let value = self.rx.pop_front().unwrap_or(0);
+                if $n == 16 { self.resume_fifo(FifoWait::Rx); }
+                u32::from(value)
+            }
             0x20 => self.int_raw,
             0x28 => self.int_ena,
             0x2c => self.int_raw & self.int_ena,
@@ -143,9 +154,17 @@ impl I2c<$n> {
                 if v & (1 << 5) != 0 { self.run(); }
             }               // CTR.TRANS_START
             0x18 => { if v & (1 << 13) != 0 { self.tx.clear(); } if v & (1 << 12) != 0 { self.rx.clear(); } self.regs.write(off, v & !(3 << 12)); }
-            0x1c => { if self.tx.len() < 32 { self.tx.push_back(v as u8); } }
+            0x1c => {
+                if self.tx.len() < 32 { self.tx.push_back(v as u8); }
+                if $n == 16 { self.resume_fifo(FifoWait::Tx); }
+            }
             0x24 => self.int_raw &= !v,
-            0x28 => self.int_ena = v,
+            0x28 => {
+                if $n == 16 && (v & !self.int_ena) & INT_TXFIFO_EMPTY != 0 {
+                    self.classic_tx_watermark();
+                }
+                self.int_ena = v;
+            }
             0x58..=0x74 => self.program.cmd[((off - 0x58) / 4) as usize] = v & !(1 << 31),
             0x78..=0x94 if $n == 16 => self.program.cmd[((off - 0x58) / 4) as usize] = v & !(1 << 31),
             _ => self.regs.write(off, v),
@@ -181,20 +200,24 @@ impl I2c<$n> {
     // S3 i2c_reg.h:16-26, 932-1006 gives 9-bit periods and 7-bit wait-high.
     fn schedule(&mut self) {
         if usize::from(self.command_index) >= $n { self.remaining = None; return; }
-        let mask = 0x1ff;
+        // Classic uses APB directly and has 14-bit SCL periods.
+        let mask = if $n == 16 { 0x3fff } else { 0x1ff };
         let cycles = match self.op() {
             1 | 3 if self.program.cmd[usize::from(self.command_index)] & 255 != 0 => {
                 let high = self.regs.read(0x38);
-                let extra = (high >> 9) & 127;
+                let extra = if $n == 16 { 0 } else { (high >> 9) & 127 };
                 ((self.regs.read(0) & mask) + 1 + (high & mask) + extra) * 9
             }
             op @ (6 | 2) => {
                 let off = if op == 6 { 0x40 } else { 0x48 };
-                (self.regs.read(off) & mask) + (self.regs.read(off + 4) & mask) + 2
+                // Classic ESP32 i2c_reg.h:625–655. Only STOP_HOLD is 14 bits.
+                let setup_mask = if $n == 16 { 0x3ff } else { mask };
+                let hold_mask = if op == 2 { mask } else { setup_mask };
+                (self.regs.read(off) & hold_mask) + (self.regs.read(off + 4) & setup_mask) + 2
             }
             _ => 0,
         };
-        self.remaining = Some(self.clock_ticks(cycles.into()));
+        self.remaining = Some(if $n == 16 { u64::from(cycles.max(1)) } else { self.clock_ticks(cycles.into()) });
     }
 
     fn run(&mut self) {
@@ -203,16 +226,59 @@ impl I2c<$n> {
         self.transactions += 1;
         self.command_index = 0;
         self.byte_index = 0;
+        self.program.fifo_wait = None;
         self.schedule();
-        // Classic adapter retains its synchronous transaction model; modern controllers
-        // retain #199's scheduled byte callbacks and clock selection.
-        if $n == 16 { self.advance(u64::MAX); }
+        if $n == 16 {
+            self.int_raw |= INT_TRANS_START;
+            // Interrupt-filled FIFO drivers can start before the first address byte
+            // is queued. The prefilled command path retains synchronous completion.
+            if self.int_ena & (INT_TXFIFO_EMPTY | INT_RXFIFO_FULL | INT_TRANS_START) == 0 {
+                self.advance(u64::MAX);
+            }
+        }
+    }
+
+    fn classic_tx_watermark(&mut self) {
+        let threshold = (self.regs.read(0x18) >> 5) & 31;
+        if self.tx.len() as u32 <= threshold { self.int_raw |= INT_TXFIFO_EMPTY; }
+    }
+
+    fn resume_fifo(&mut self, fifo: FifoWait) {
+        if self.program.fifo_wait == Some(fifo) {
+            self.program.fifo_wait = None;
+            self.schedule();
+        }
+    }
+
+    fn wait_for_classic_fifo(&mut self) -> bool {
+        let count = self.program.cmd[usize::from(self.command_index)] as u8;
+        if self.byte_index >= count { return false; }
+        let fifo = match self.op() {
+            1 if self.tx.is_empty() => FifoWait::Tx,
+            3 if self.rx.len() == 32 => FifoWait::Rx,
+            _ => return false,
+        };
+        self.program.fifo_wait = Some(fifo);
+        let irq = match fifo { FifoWait::Tx => INT_TXFIFO_EMPTY, FifoWait::Rx => INT_RXFIFO_FULL };
+        self.int_raw |= irq;
+        self.remaining = Some(u64::from((self.regs.read(0x0c) & 0xfffff).max(1)));
+        true
     }
 
     fn advance(&mut self, mut ticks: u64) {
         while let Some(remaining) = self.remaining {
             if ticks < remaining { self.remaining = Some(remaining - ticks); return; }
             ticks -= remaining;
+            if $n == 16 {
+                if self.program.fifo_wait.take().is_some() {
+                    self.remaining = None;
+                    for &k in &self.cur { self.devices[k].1.stop(); }
+                    self.cur.clear();
+                    self.int_raw |= INT_TIMEOUT;
+                    return;
+                }
+                if self.wait_for_classic_fifo() { return; }
+            }
             self.step();
             if self.is_active() { self.schedule(); }
         }
@@ -226,6 +292,7 @@ impl I2c<$n> {
             6 => self.expect_addr = true,
             1 if self.byte_index < n => {
                 let b = self.tx.pop_front().unwrap_or(0);
+                if $n == 16 { self.classic_tx_watermark(); }
                 let ack = if self.expect_addr {
                     self.expect_addr = false;
                     let addr = b >> 1; let rd = b & 1 != 0;
@@ -260,6 +327,9 @@ impl I2c<$n> {
                 for &k in &self.cur { b &= self.devices[k].1.read(); }
                 if self.log { eprintln!("[i2c]   read  {b:#04x}"); }
                 if self.rx.len() < 32 { self.rx.push_back(b); }
+                if $n == 16 && self.rx.len() as u32 >= (self.regs.read(0x18) & 31).max(1) {
+                    self.int_raw |= INT_RXFIFO_FULL;
+                }
                 self.byte_index += 1;
                 if self.byte_index < n { return; }
             }

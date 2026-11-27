@@ -11,6 +11,12 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#ifdef LX6_RECEIVER_STICK
+enum { IR_RX = 33, PDM_CLK = 0, PDM_DATA = 34, MODE0 = 37, MODE1 = 39 };
+#else
+enum { IR_RX = 32, PDM_CLK = 5, PDM_DATA = 19, MODE0 = 16, MODE1 = 17 };
+#endif
+
 static bool rmt_received(rmt_channel_handle_t rx, const rmt_rx_done_event_data_t *event, void *context)
 {
     BaseType_t wake = pdFALSE;
@@ -22,7 +28,7 @@ static void receive_nec(bool idle)
 {
     rmt_channel_handle_t rx;
     const rmt_rx_channel_config_t config = {
-        .gpio_num = 32,
+        .gpio_num = IR_RX,
         .clk_src = RMT_CLK_SRC_APB,
         .resolution_hz = 1000000,
         .mem_block_symbols = 64,
@@ -78,7 +84,7 @@ static void receive_raw_pdm(void)
     const i2s_pdm_rx_config_t pdm = {
         .clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG(640000),
         .slot_cfg = I2S_PDM_RX_SLOT_RAW_FMT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
-        .gpio_cfg = {.clk = 5, .din = 19},
+        .gpio_cfg = {.clk = PDM_CLK, .din = PDM_DATA},
     };
     ESP_ERROR_CHECK(i2s_new_channel(&config, NULL, &rx));
     ESP_ERROR_CHECK(i2s_channel_init_pdm_rx_mode(rx, &pdm));
@@ -131,13 +137,13 @@ static void play_dac(void)
 void app_main(void)
 {
     const gpio_config_t selector = {
-        .pin_bit_mask = (UINT64_C(1) << 16) | (UINT64_C(1) << 17),
+        .pin_bit_mask = (UINT64_C(1) << MODE0) | (UINT64_C(1) << MODE1),
         .mode = GPIO_MODE_INPUT,
     };
     ESP_ERROR_CHECK(gpio_config(&selector));
     puts("LX6 RECEIVERS READY");
     vTaskDelay(pdMS_TO_TICKS(900));
-    unsigned mode = (unsigned)gpio_get_level(16) | ((unsigned)gpio_get_level(17) << 1);
+    unsigned mode = (unsigned)gpio_get_level(MODE0) | ((unsigned)gpio_get_level(MODE1) << 1);
     printf("LX6 MODE %u\n", mode);
     switch (mode) {
         case 0: receive_nec(false); break;

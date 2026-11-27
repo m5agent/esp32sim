@@ -9,11 +9,14 @@ const USER_COMMAND: u32 = 1 << 31;
 const USER_ADDR: u32 = 1 << 30;
 const USER_MISO: u32 = 1 << 28;
 const USER_MOSI: u32 = 1 << 27;
+// ESP-IDF 5.5.4 esp32/spi_reg.h: SPI_USER.SIO shares the MOSI wire.
+const SIO: u32 = 1 << 16;
 
 pub(crate) struct Transfer {
     pub tx: Vec<u8>,
     pub rx_len: usize,
     pub rx_bits: usize,
+    pub shared_data: bool,
     pub dma_tx_len: usize,
     pub dma_rx: bool,
     pub cs: Option<(usize, bool)>,
@@ -149,6 +152,7 @@ impl ClassicGpSpi {
             tx,
             rx_len,
             rx_bits,
+            shared_data: user & SIO != 0,
             dma_tx_len,
             dma_rx: self.in_active && rx_len != 0,
             cs,

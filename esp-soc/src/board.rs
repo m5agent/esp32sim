@@ -242,6 +242,8 @@ pub trait BoardModel {
     fn rmt_symbols(&mut self, _pin: u8, _tick_hz: u32, _symbols: &[u32]) {}
     /// Completed LCD_CAM I80 data phase, in physical bus byte order.
     fn lcd_i80_data(&mut self, _pins: LcdI80Pins, _data: &[u8]) {}
+    /// Piezo element wired straight to a serialized single-bit I2S stream.
+    fn i2s_bitstream_pin(&self) -> Option<u8> { None }
 }
 
 pub type Board = Box<dyn BoardModel>;

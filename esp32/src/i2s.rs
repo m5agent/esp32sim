@@ -359,6 +359,9 @@ impl SocBus {
                 && routes.matrix_output(usize::from(codec.ws), ws)
                 && routes.matrix_output(usize::from(codec.dout), data)
         });
+        let buzzer = self.board.i2s_bitstream_pin();
+        let buzzer_connected = buzzer.is_some_and(|pin| self.periph.gpio.routes()
+            .matrix_output(usize::from(pin), [163, 189][port]));
         let mut irq = 0;
         let mut walk = esp_periph::gdma::DescriptorWalk::new(4096);
         while out.running && frames != 0 {
@@ -383,6 +386,13 @@ impl SocBus {
                     if dac_channels == 0 { return 0; }
                     let selected = if dac_channels == 2 && frame_bytes >= sample_bytes * 2 { 2 } else { 1 };
                     return (i16::from(frame[selected * sample_bytes - 1]) - 128) << 8;
+                }
+                if buzzer.is_some() {
+                    if !buzzer_connected { return 0; }
+                    // M5Unified drives the piezo with delta-sigma bits on DOUT.
+                    // Average a complete stereo time slot to approximate baseband.
+                    let ones: u32 = frame.iter().map(|value| value.count_ones()).sum();
+                    return (ones as i32 * 65534 / (frame.len() * 8) as i32 - 32767) as i16;
                 }
                 if !audible { return 0; }
                 i16::from_le_bytes([frame[sample_bytes - 2], frame[sample_bytes - 1]])
@@ -428,6 +438,15 @@ impl SocBus {
                 } else {
                     [false; 2]
                 }
+            });
+            let lanes = self.board.pdm_mic().map_or(lanes, |(clock, data)| {
+                let routes = self.periph.gpio.routes();
+                let (data_signal, clock_signal) = [(155, 28), (181, 165)][port];
+                let rx = &self.periph.i2s[port].inner;
+                let connected = rx.rx_pdm() && !rx.rx_slave()
+                    && routes.matrix_input(data_signal) == Some(data)
+                    && routes.matrix_output(usize::from(clock), clock_signal);
+                [connected; 2]
             });
             let data = if self.periph.i2s[port].camera_mode {
                 self.camera_dma_data(cycles).unwrap_or_else(|| self.periph.i2s[port].data(cycles, self.cycles, port, &self.periph.gpio, bank.as_deref_mut(), lanes))

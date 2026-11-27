@@ -8,6 +8,9 @@ pub mod tdisplay;
 pub mod aithinker;
 pub(crate) mod atom;
 mod core;
+pub(crate) mod stickc;
+mod stickc_panel;
+mod m5stick;
 pub mod ulanzi;
 pub mod cyd;
 
@@ -21,9 +24,11 @@ pub fn make_board(name: &str) -> Option<esp_soc::Board> {
         "none" | "bare" | "esp32dev" => Some(Box::new(esp_soc::NoBoard)),
         "ttgo-tdisplay" | "tdisplay" => Some(Box::new(TtgoTDisplay::new())),
         "ai-thinker-cam" | "esp32cam" => Some(Box::new(aithinker::AiThinkerCam::default())),
+        "m5stack-m5stick" => Some(Box::new(m5stick::M5Stick::new())),
         "cyd" | "esp32-2432s028" => Some(Box::new(cyd::Cyd::new())),
         "ulanzi-tc001" | "tc001" => Some(Box::new(ulanzi::UlanziTc001::new())),
         _ => atom::AtomKind::from_name(name).map(|kind| Box::new(atom::Atom::new(kind)) as esp_soc::Board)
+            .or_else(|| stickc::StickKind::from_name(name).map(|kind| Box::new(stickc::Stick::new(kind)) as esp_soc::Board))
             .or_else(|| crate::spi::make_board(name)),
     }
 }

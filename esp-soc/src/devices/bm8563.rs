@@ -126,6 +126,9 @@ impl Bm8563 {
         c & (AF | AIE) == (AF | AIE)
             || (c & TIE != 0 && if c & PULSE != 0 { self.cycle < self.pulse_end } else { c & TF != 0 })
     }
+    pub fn calendar_bcd(&self) -> [u8; 7] {
+        self.regs[2..9].try_into().expect("fixed register range")
+    }
     pub fn control2(&self) -> u8 { self.regs[1] }
     pub fn next_deadline(&self) -> Option<VirtualCycle> {
         let alarm = (self.regs[0] & STOP == 0 && self.regs[1] & (AF | AIE) == AIE && self.alarm_enabled())

@@ -8,11 +8,12 @@ pub struct Mpu6886 {
     ptr: u8,
     select_register: bool,
     sample: [f64; 6],
+    temperature: i16,
 }
 
 impl Default for Mpu6886 {
     fn default() -> Self {
-        let mut sensor = Self { regs: [0; 128], ptr: 0, select_register: true, sample: [0.0, 0.0, 1.0, 0.0, 0.0, 0.0] };
+        let mut sensor = Self { regs: [0; 128], ptr: 0, select_register: true, sample: [0.0, 0.0, 1.0, 0.0, 0.0, 0.0], temperature: 0 };
         sensor.reset();
         sensor
     }
@@ -32,6 +33,11 @@ impl Mpu6886 {
         self.sample = sample;
     }
 
+    /// Set the raw temperature ADC word, before the guest applies its conversion.
+    pub fn set_temperature_raw(&mut self, temperature: i16) {
+        self.temperature = temperature;
+    }
+
     fn latch(&mut self) {
         if self.regs[0x6b] & 0x40 != 0 {
             self.regs[0x3a..0x49].fill(0);
@@ -46,6 +52,7 @@ impl Mpu6886 {
                 word.copy_from_slice(&value.to_be_bytes());
             }
         }
+        self.regs[0x41..0x43].copy_from_slice(&self.temperature.to_be_bytes());
         self.regs[0x3a] = 1;
     }
 }
@@ -104,11 +111,12 @@ mod tests {
         imu.write(0x18);
         imu.write(0x10);
         imu.set_sample([-0.5, 0.25, 1.0, -125.0, 250.0, -500.0]);
+        imu.set_temperature_raw(-1634);
         select(&mut imu, 0x3a);
         imu.start(true);
         assert_eq!(imu.read(), 1);
         let words: Vec<_> = (0..7).map(|_| i16::from_be_bytes([imu.read(), imu.read()])).collect();
-        assert_eq!(words, [-2048, 1024, 4096, 0, -2048, 4096, -8192]);
+        assert_eq!(words, [-2048, 1024, 4096, -1634, -2048, 4096, -8192]);
 
         select(&mut imu, 0x6b);
         imu.write(0x80);

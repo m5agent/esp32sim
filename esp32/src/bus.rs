@@ -70,6 +70,7 @@ pub struct SocBus {
     pub(crate) pins_active: bool,
     pub ble: esp_soc::ble::vhci::Ble,
     pub(crate) deep_sleep: bool,
+    pub(crate) board_power: Option<bool>,
     // One allocation shared by CPU translation and the command adapter (no flat CPU window).
     pub(crate) psram: Vec<u8>,
 }
@@ -99,6 +100,7 @@ impl SocBus {
             pins_active: false,
             ble: Default::default(),
             deep_sleep: false,
+            board_power: None,
             psram: Vec::new(),
         }
     }
@@ -308,7 +310,7 @@ impl SocBus {
         if a == 0x3ff4_8100 && v & (1 << 8) != 0 {
             self.periph.rtc.memory_crc(&self.rtc_fast);
         }
-        if matches!(a & !0xfff, 0x3ff4_4000 | 0x3ff4_9000) && self.board.uses_gpio_waveform() {
+        if matches!(a & !0xfff, 0x3ff4_4000 | 0x3ff4_9000) && self.board.observes_gpio_pads() {
             self.board.gpio_waveform_at(self.cycles, self.periph.gpio.routes());
         }
         // IDF v5.5.4 rtc_cntl_reg.h:247-252,1281-1287: SLEEP_EN and
@@ -356,7 +358,7 @@ impl SocBus {
             self.deliver_board_inputs();
         }
     }
-    fn deliver_board_inputs(&mut self) {
+    pub(crate) fn deliver_board_inputs(&mut self) {
         let periph = &self.periph;
         self.board.advance_inputs_with_clock(self.cycles, &|pin| periph.pwm_output(u32::from(pin)));
         for edge in self.board.take_edges() {
@@ -366,6 +368,14 @@ impl SocBus {
             if let Some(events) = &mut self.gpio_events { events.push((edge.cycle, edge.pin, edge.level)); }
         }
         for pin in self.board.released_inputs() { esp_soc::SocBus::gpio_release_input(self, pin); }
+        if let Some(previous) = self.board_power {
+            let powered = self.board.soc_powered().unwrap_or(true);
+            if previous != powered {
+                self.board_power = Some(powered);
+                self.irq_dirty = true;
+                if powered { esp_soc::SocBus::request_reset(self, 1); }
+            }
+        }
     }
     #[inline]
     fn flush_rmt(&mut self) {
@@ -431,9 +441,17 @@ impl SocBus {
             self.periph.gpio.atom_sense_link = atom.sense_link();
             self.periph.adc.set_touch_idle(27, atom.touch_idle());
         }
-        if self.board.uses_gpio_waveform() {
+        if let Some(stick) = crate::board::stickc::StickKind::from_name(self.board.name()) {
+            // ESP-IDF v5.5.4 esp32/efuse_defs.h: PICO-D4=5, PICO-V3-02=6.
+            let package = if stick == crate::board::stickc::StickKind::Plus2 { 6 } else { 5 };
+            let word = self.periph.efuse.ram.read(0x0c);
+            self.periph.efuse.ram.write(0x0c, (word & !(7 << 9)) | (package << 9));
+        }
+        self.periph.adc.analog.set_defaults(self.board.default_analog_inputs());
+        if self.board.observes_gpio_pads() {
             self.board.gpio_waveform_at(self.cycles, self.periph.gpio.routes());
         }
+        self.board_power = self.board.soc_powered();
         self.pins_active = self.board.uses_gpio_edges() || self.board.uses_uart_pins();
         for (pin, level) in self.board.input_levels() { self.periph.gpio.set_input(pin, level); }
         if self.pins_active { self.deliver_board_inputs(); }
@@ -559,11 +577,13 @@ impl SocBus {
             self.flush_gpio();
             let rx = if self.board.uses_spi_pins() {
             let gpio = &self.periph.gpio;
-            let pins = esp_soc::board::SpiPins {
-                sclk: gpio.output_pins(clock_signal), mosi: gpio.output_pins(mosi_signal),
-                miso: gpio.input_pin(miso_signal),
-                cs: gpio.low_outputs(),
+            let mosi = gpio.output_pins(mosi_signal);
+            let miso = if transfer.shared_data {
+                (mosi != 0).then(|| mosi.trailing_zeros() as u8)
+            } else {
+                gpio.input_pin(miso_signal)
             };
+            let pins = esp_soc::board::SpiPins { sclk: gpio.output_pins(clock_signal), mosi, miso, cs: gpio.low_outputs() };
             self.board.spi_transfer_pins_bits(host as u8, pins, &transfer.tx, transfer.rx_bits)
             } else { self.board.spi_transfer(host as u8, &transfer.tx, transfer.rx_len) };
             let mut in_eof = 0;
@@ -655,6 +675,7 @@ impl Bus for SocBus {
             self.deliver_board_inputs();
             for input in self.board.uart_rx(self.cycles) { self.periph.uart_pin_input(&input); self.irq_dirty = true; }
         }
+        if self.board_power == Some(false) { return u32::from(self.irq_dirty); }
         let irq_changed = self.periph.tick(elapsed);
         self.irq_dirty |= irq_changed;
         if self.deep_sleep { self.timer_wake(); }

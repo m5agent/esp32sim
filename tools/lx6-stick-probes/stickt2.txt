@@ -1,0 +1,19 @@
+3.0 uart0-cr from machine import I2C, SPI, Pin; bus=I2C(0,scl=Pin(22),sda=Pin(21)); print('T2'+'-SCAN',bus.scan())
+3.3 uart0-cr cs=Pin(0,Pin.OUT,value=1); rst=Pin(26,Pin.OUT,value=0); print('T2'+'-RESET-SCAN',bus.scan())
+3.5 uart0-cr rst(1); cci=lambda r,n:bus.readfrom_mem(0x2a,r,n,addrsize=16); cciw=lambda r,b:bus.writeto_mem(0x2a,r,b,addrsize=16)
+3.8 uart0-cr cciw(4,b'\x02\x14')
+4.0 uart0-cr print('T2'+'-CCI',cci(2,2).hex(),cci(6,4).hex()); cciw(6,b'\x00\x01\x00\x05'); cciw(4,b'\x48\x55')
+4.4 uart0-cr import hashlib; spi=SPI(2,baudrate=20000000,polarity=1,phase=1,sck=Pin(2),miso=Pin(25),mosi=Pin(32)); p=bytearray(164); buf=bytearray(38400); ids=[]
+4.5 uart0-cr exec("def read_frame():\n ids.clear()\n cs(0)\n for n in range(240):\n  spi.readinto(p)\n  assert p[1]==n%60\n  if n%60==20: ids.append(p[0]>>4)\n  buf[n*160:(n+1)*160]=p[4:]\n cs(1)\n return hashlib.sha256(buf).digest().hex()")
+4.6 thermal 7000 8000
+4.7 uart0-cr print('T2'+'-ONE',read_frame(),ids)
+5.5 thermal 8000 10000
+5.7 uart0-cr print('T2'+'-TWO',read_frame(),ids)
+6.05 encoder-step 5
+6.15 uart0-cr print('T2'+'-ENC',bus.readfrom_mem(0x30,0,2).hex()); bus.writeto_mem(0x30,0x20,b'\xff')
+6.35 encoder-step -3
+6.45 uart0-cr print('T2'+'-ENC',bus.readfrom_mem(0x30,0,2).hex()); bus.writeto_mem(0x30,0x20,b'\xff'); print('T2'+'-ENC',bus.readfrom_mem(0x30,0,2).hex())
+6.8 uart0-cr spi.deinit(); lcd=SPI(2,baudrate=10000000,sck=Pin(13),miso=Pin(14),mosi=Pin(15)); lcd_cs=Pin(5,Pin.OUT,value=1); dc=Pin(23,Pin.OUT); lcd_rst=Pin(18,Pin.OUT,value=1); lcd_rst(0); lcd_rst(1)
+7.1 uart0-cr lcd_cs(0); dc(0); lcd.write(b'\x11'); lcd.write(b'\x29'); lcd.write(b'\x2a'); dc(1); lcd.write(bytes([0,52,0,186])); dc(0); lcd.write(b'\x2b'); dc(1); lcd.write(bytes([0,40,0,159]))
+7.4 uart0-cr exec("def draw_frame():\n row=bytearray(270)\n dc(0)\n lcd.write(b'\\x2c')\n dc(1)\n for y in range(120):\n  for x in range(135):\n   warm=buf[y*320+x*2]>32\n   row[x*2]=248 if warm else 0\n   row[x*2+1]=0 if warm else 31\n  lcd.write(row)\n lcd_cs(1)")
+7.6 uart0-cr draw_frame(); print('T2'+'-LCD')

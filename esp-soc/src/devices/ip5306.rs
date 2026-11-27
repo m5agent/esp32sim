@@ -11,17 +11,35 @@ pub struct Ip5306 {
     gauge: u8,
     charging: bool,
     full: bool,
+    supply: Option<(u16, bool)>,
 }
 
 impl Default for Ip5306 {
     fn default() -> Self {
         let mut regs = [0; 0x25];
         regs[0] = 0xbe;
-        Self { regs, pointer: None, selecting: true, gauge: 0x0f, charging: false, full: false }
+        Self { regs, pointer: None, selecting: true, gauge: 0x0f, charging: false, full: false, supply: None }
     }
 }
 
 impl Ip5306 {
+    pub fn m5stick() -> Self {
+        let mut pmic = Self::default();
+        pmic.supply(3900, true);
+        pmic
+    }
+
+    pub fn supply(&mut self, millivolts: u16, usb: bool) {
+        let full = millivolts >= 4200 + u16::from((self.regs[0x22] >> 2) & 3) * 100;
+        let bars = match millivolts { 4000.. => 4, 3800.. => 3, 3650.. => 2, 3450.. => 1, _ => 0 };
+        self.set_battery(bars, usb && millivolts != 0 && !full, full);
+        self.supply = Some((millivolts, usb));
+    }
+
+    pub fn output_on(&self) -> bool {
+        self.supply.is_none_or(|(mv, usb)| usb || mv >= 3000 && self.regs[0] & 0x20 != 0)
+    }
+
     /// The gauge exposes four cumulative LED bits, with a set bit meaning off.
     pub fn set_battery(&mut self, bars: u8, charging: bool, full: bool) {
         self.gauge = (0x0f << bars.min(4)) & 0x0f;
@@ -42,6 +60,9 @@ impl I2cDevice for Ip5306 {
             self.selecting = false;
         } else if let Some(reg @ (0..=2 | 6 | 0x20..=0x24)) = self.pointer {
             self.regs[usize::from(reg)] = byte;
+            if let Some((mv, usb)) = self.supply.filter(|_| reg == 0x22) {
+                self.supply(mv, usb);
+            }
         }
         true
     }
@@ -51,7 +72,8 @@ impl I2cDevice for Ip5306 {
             Some(0x70) => u8::from(self.charging && self.regs[0] & 0x10 != 0) << 3,
             Some(0x71) => u8::from(self.full) << 3,
             Some(0x78) => (self.gauge << 4) | 0x0f,
-            Some(0x72 | 0x77) => 0,
+            Some(0x72) => u8::from(!self.output_on()) << 2,
+            Some(0x77) => 0,
             Some(reg) => self.regs.get(usize::from(reg)).copied().unwrap_or(0xff),
             None => 0xff,
         }
@@ -64,6 +86,19 @@ mod tests {
 
     fn read_at(dev: &mut Ip5306, reg: u8) -> u8 {
         dev.start(false); dev.write(reg); dev.start(true); dev.read()
+    }
+
+    #[test]
+    fn stick_supply_updates_the_gauge_and_boost_with_the_same_registers() {
+        let mut dev = Ip5306::m5stick();
+        assert_eq!(read_at(&mut dev, 0x78), 0x8f);
+        assert_eq!(read_at(&mut dev, 0x70), 8);
+        dev.supply(3500, false);
+        assert_eq!(read_at(&mut dev, 0x78), 0xef);
+        assert_eq!(read_at(&mut dev, 0x70), 0);
+        dev.start(false); dev.write(0); dev.write(0);
+        assert!(!dev.output_on());
+        assert_eq!(read_at(&mut dev, 0x72), 4);
     }
 
     #[test]

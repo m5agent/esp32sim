@@ -5,7 +5,7 @@
 //! Adapter completion behavior is inferred;
 //! no hardware timing validation is claimed.
 pub use crate::crypto::{ClassicAes, ClassicRsa, ClassicSha};
-use crate::{timers::ClassicTimer, rmt::ClassicRmt, spi::ClassicGpSpi, ledc::ClassicLedc};
+use crate::{timers::{ClassicTimer, Frc2}, rmt::ClassicRmt, spi::ClassicGpSpi, ledc::ClassicLedc};
 use crate::adc::ClassicAdc;
 use emu_core::{ClockDomain, ClockTree};
 use esp_periph::{
@@ -52,6 +52,7 @@ const SRC_UART1: usize = 35;
 const SRC_UART2: usize = 36;
 const SRC_RTC_CORE: usize = 46;
 // IDF v5.5.4 interrupts.h:75,79: edge sources 58/62; source 57 is ETS_TIMER2.
+const SRC_FRC2: usize = 57;
 const SRC_TG0_T0_EDGE: usize = 58;
 const SRC_TG1_T0_EDGE: usize = 62;
 
@@ -843,6 +844,7 @@ pub struct Peripherals {
     pub slc: ClassicSlc,
     pub sha: ClassicSha,
     pub timg: [ClassicTimer; 2],
+    pub frc2: Frc2,
     pub i2c: [esp_periph::i2c::I2c<16>; 2],
     pub misc: Misc,
     pub spi_exec: bool,
@@ -877,6 +879,7 @@ device_set! { Peripherals; clock: (clock) CPU_HZ, [(ClockDomain::RtcSlow, 1600)]
     0x73 "WIFI_MAC" (wifi) => [SRC_WIFI_MAC];
     0x74 "WIFI_MAC" alias (wifi) delta 0x1000 => [];
     0x75 "WIFI_MAC" alias (wifi) delta 0x2000 => [];
+    0x47 "FRC2" optional (frc2) => [SRC_FRC2];
     0x48 "RTC_IO" alias (adc.rtc_io) delta -0x400 @ 0x400..=0x4ff => [];
     0x48 "SENS" alias (adc) delta -0x800 @ 0x800..=0x8ff => [];
     0x48 "RTCCNTL" (rtc) => [SRC_RTC_CORE];
@@ -946,6 +949,7 @@ impl Peripherals {
             slc: ClassicSlc::new(),
             sha: ClassicSha::new(),
             timg: [ClassicTimer::new(0), ClassicTimer::new(1)],
+            frc2: Frc2::default(),
             i2c: [esp_periph::i2c::I2c::new_classic(), esp_periph::i2c::I2c::new_classic()],
             misc: Misc::new(),
             spi_exec: false, mcpwm_on: false,
@@ -1050,7 +1054,7 @@ impl Peripherals {
         };
         if let Some(bus) = i2c.filter(|_| addr & 0xfff == 0x04 && v & (1 << 5) != 0) {
             let (scl, sda) = I2C_SIGNALS[bus];
-            // Reuse the shared physical route decoder before the synchronous classic
+            // Reuse the shared physical route decoder before the classic
             // command list. IDF v5.5.4 esp32/include/soc/gpio_sig_map.h:73-76,200-203
             // gives I2CEXT0/1 SCL/SDA input/output signals; no new addressing path.
             let routes = esp_soc::pins::ChipPins::ESP32.routes(&self.gpio.gpio, &self.gpio.route_mux);
@@ -1136,6 +1140,21 @@ impl Peripherals {
             let before = timer.irq_sources();
             timer.tick(ticks);
             irq_changed |= before != timer.irq_sources();
+        }
+        if self.frc2.active() {
+            let before = self.frc2.irq_sources();
+            self.frc2.tick(ticks);
+            if before != self.frc2.irq_sources() {
+                self.refresh_optional(0x47);
+                irq_changed = true;
+            }
+        }
+        for i2c in &mut self.i2c {
+            if i2c.is_active() {
+                let before = i2c.irq();
+                i2c.tick(ticks);
+                irq_changed |= before != i2c.irq();
+            }
         }
         // Pace queued host bytes. Only when some UART has any (off the hot path); cpu_scale_half() is half reference
         // ticks per CPU clock (12/6/3/2 = 40/80/160/240 MHz), so this is the current CPU clock.
@@ -1223,7 +1242,7 @@ impl Peripherals {
                 best = best.min(t.saturating_sub(1).saturating_mul(self.apb_divider()));
             }
         }
-        for device in [&self.ledc as &dyn Device, &self.rmt as &dyn Device] {
+        for device in [&self.ledc as &dyn Device, &self.rmt, &self.frc2, &self.i2c[0], &self.i2c[1]] {
             if let Some(t) = device.next_deadline() {
                 best = best.min(t.saturating_sub(1).saturating_mul(self.apb_divider()));
             }
@@ -1522,6 +1541,50 @@ mod tests {
         p.write32(BASE + 0x04, 1 << 5);
         assert_ne!(p.source_status(0)[SRC_I2C1 / 32] & (1 << (SRC_I2C1 % 32)), 0);
         assert_ne!(p.cpu_lines(0) & (1 << 9), 0);
+    }
+
+    #[test]
+    fn classic_i2c_advances_an_interrupt_filled_fifo_on_apb() {
+        use esp_periph::i2c::{Reg8Device, INT_NACK, INT_TIMEOUT, INT_TRANS_COMPLETE};
+
+        const BASE: u32 = 0x3ff5_3000;
+        const RX_FULL: u32 = 1 << 0;
+        const TX_EMPTY: u32 = 1 << 1;
+        const START: u32 = 1 << 9;
+        let mut p = Peripherals::new([0; 6]);
+        p.i2c[0].attach(0x68, Box::new(Reg8Device::new("imu", &[(0x75, 0x71)])));
+        configure_i2c0_pins(&mut p);
+        p.write32(0x3ff0_0104 + 4 * SRC_I2C0 as u32, 7);
+        p.write32(BASE + 0x0c, 1000);
+        p.write32(BASE + 0x18, 1);
+        for (index, (op, bytes)) in [(0, 0), (1, 2), (0, 0), (1, 1), (2, 1), (3, 0)].into_iter().enumerate() {
+            p.write32(BASE + 0x58 + 4 * index as u32, command(op, bytes));
+        }
+        p.write32(BASE + 0x28, RX_FULL | TX_EMPTY | START | INT_NACK | INT_TRANS_COMPLETE);
+        assert_eq!(p.read32(BASE + 0x2c), TX_EMPTY);
+        p.write32(BASE + 0x04, 1 << 5);
+        p.tick(120);
+        assert_eq!(p.read32(BASE + 0x2c), TX_EMPTY | START);
+        assert!(p.i2c[0].is_active());
+        assert_ne!(p.cpu_lines(0) & (1 << 7), 0);
+        assert!(p.cycles_until_timer() < u32::MAX);
+
+        for value in [0xd0, 0x75, 0xd1] { p.write32(BASE + 0x1c, value); }
+        p.write32(BASE + 0x28, RX_FULL | INT_NACK | INT_TRANS_COMPLETE);
+        p.write32(BASE + 0x24, TX_EMPTY | START);
+        assert_eq!(p.read32(BASE + 0x2c), 0);
+        assert!(p.tick(600));
+        assert_eq!(p.read32(BASE + 0x2c), RX_FULL | INT_TRANS_COMPLETE);
+        assert_eq!(p.read32(BASE + 0x1c), 0x71);
+        assert!(!p.i2c[0].is_active());
+
+        p.write32(BASE + 0x24, u32::MAX);
+        p.write32(BASE + 0x28, TX_EMPTY | INT_NACK | INT_TIMEOUT);
+        p.write32(BASE + 0x04, 1 << 5);
+        p.tick(120);
+        p.tick(6_000);
+        assert_eq!(p.read32(BASE + 0x2c), TX_EMPTY | INT_TIMEOUT);
+        assert!(!p.i2c[0].is_active());
     }
 
     #[test]

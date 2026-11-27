@@ -118,7 +118,12 @@ impl esp_soc::SocBus for SocBus {
     fn cpu_cycles_for_bus(&self, cycles: u64) -> u64 {
         cycles.saturating_mul(2).saturating_sub(self.clock_half).div_ceil(self.periph.cpu_scale_half())
     }
+    fn has_board_power(&self) -> bool { self.board_power.is_some() }
+    fn soc_power_off(&self) -> bool { self.board_power == Some(false) }
     fn next_deadline(&self) -> Option<u64> {
+        if self.soc_power_off() {
+            return self.board.next_deadline().map(|at| self.cpu_cycles_for_bus(at.saturating_sub(self.cycles)).max(1));
+        }
         let timer = match self.periph.cycles_until_timer() {
             u32::MAX => None,
             n => Some(self.cpu_cycles_for_bus(u64::from(n)).max(1)),
@@ -255,6 +260,15 @@ impl esp_soc::SocBus for SocBus {
             .as_mut()
             .map(std::mem::take)
             .unwrap_or_default()
+    }
+    fn board_command(&mut self, verb: &str, args: &[&str]) -> bool {
+        let accepted = self.board.board_command(self.cycles, verb, args);
+        if accepted && self.board_power.is_some() {
+            // A command can restore power while the SoC has no pending device deadline.
+            // Deliver the transition before the scheduler skips the remainder of the run.
+            self.deliver_board_inputs();
+        }
+        accepted
     }
     fn board(&mut self) -> &mut dyn BoardModel {
         &mut *self.board
