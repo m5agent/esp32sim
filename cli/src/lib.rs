@@ -24,7 +24,7 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!("                        (Espressif's, not in the tarball: tools/fetch-rom-elfs.sh DIR downloads all of them)");
     eprintln!("  --board NAME          board model (S3: atech14, waveshare-lcd4b, waveshare-amoled18-v2, waveshare-cam, stopwatch, m5stack-cores3, m5stack-cardputer-adv, none;");
     eprintln!("                        m5stack-atoms3[-lite|-gc9107], m5stack-atoms3u, m5stack-atoms3r[-gc9107|-cam|-m12], m5stack-atom-echos3r;");
-    eprintln!("                        C6: waveshare-c6-lcd147, xiao-esp32c6, m5stack-nanoc6, arduino-nesso-n1, none; P4: waveshare-p4-lcd35, m5stack-tab5, m5stack-tab5-st7123, none; S31: mosaico, none;");
+    eprintln!("                        C6: waveshare-c6-lcd147, xiao-esp32c6, m5stack-nanoc6[-enviii], arduino-nesso-n1, none; P4: waveshare-p4-lcd35, m5stack-tab5, m5stack-tab5-st7123, none; S31: mosaico, none;");
     eprintln!("                        classic: ttgo-tdisplay, cyd, ulanzi-tc001, ai-thinker-cam, esp32dev, none)");
     eprintln!("  --flash-mb N, --psram-mb N   memory sizes (S3 default 8 / 2, Cardputer-ADV 8 / 0, C3, C6 and classic 4 / 0, P4 16 / 0, S31 2, mosaico 16 / 16)");
     eprintln!("  --max-seconds S       stop after S emulated seconds (always give one: the run returns)");
@@ -754,7 +754,7 @@ fn setup_c6(o: &Opts) -> esp32c6::Machine {
         Box::new(board)
     } else {
         esp32c6::board::make_board(name).unwrap_or_else(|| usage_error(&format!(
-            "--board {name}: none, waveshare-c6-lcd147, xiao-esp32c6, m5stack-nanoc6 or arduino-nesso-n1 on the C6")))
+            "--board {name}: none, waveshare-c6-lcd147, xiao-esp32c6, m5stack-nanoc6[-enviii] or arduino-nesso-n1 on the C6")))
     };
     set_imu_motion(m.bus.board.as_mut(), o);
     m.bus.attach_board_devices();

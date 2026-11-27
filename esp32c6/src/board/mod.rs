@@ -26,6 +26,7 @@ pub use xiao::XiaoEsp32C6;
 pub fn make_board(name: &str) -> Option<Board> {
     match name {
         "m5stack-nanoc6" => Some(Box::new(nanoc6::NanoC6::default())),
+        "m5stack-nanoc6-enviii" => Some(Box::new(nanoc6::NanoC6::with_enviii())),
         "arduino-nesso-n1" => Some(Box::new(nesso_n1::NessoN1::new())),
         "none" | "bare" => Some(Box::new(NoBoard)),
         "waveshare-c6-lcd147" | "c6-lcd147" | "lcd147" => Some(Box::new(WaveshareC6Lcd147::new())),
@@ -38,7 +39,7 @@ pub fn make_board(name: &str) -> Option<Board> {
 mod tests {
     #[test]
     fn the_c6_boards_are_named_and_the_others_are_not() {
-        for name in ["m5stack-nanoc6", "arduino-nesso-n1", "none", "bare", "waveshare-c6-lcd147", "c6-lcd147", "lcd147", "xiao-esp32c6", "xiao-c6", "xiao"] {
+        for name in ["m5stack-nanoc6", "m5stack-nanoc6-enviii", "arduino-nesso-n1", "none", "bare", "waveshare-c6-lcd147", "c6-lcd147", "lcd147", "xiao-esp32c6", "xiao-c6", "xiao"] {
             assert!(super::make_board(name).is_some(), "{name}");
         }
         for name in ["atech14", "waveshare-lcd4b", "ttgo-tdisplay", "waveshare-cam"] {

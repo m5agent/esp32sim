@@ -440,3 +440,18 @@ no display.
   unknown register with `--log-periph` the moment a firmware wants it. The registers hello_world
   still touches without a model are PMU, IO_MUX, HP_SYSTEM, APB_SARADC and a few LP blocks —
   all of them configuration the firmware only writes and reads back.
+
+### NanoC6 Grove ENV-III and paired radio replay
+
+Use `--board m5stack-nanoc6-enviii` for a NanoC6 with Unit ENV-III on
+Grove I2C0 (GPIO2 SDA, GPIO1 SCL). The SHT30 at 0x44 responds to the
+single-shot commands with the temperature and humidity words and their
+CRC bytes. A script line such as `12 enviii 24.0 45` changes temperature
+in Celsius and relative humidity in percent before the next conversion.
+The QMP6988 at 0x70 exposes its ID, configuration, trim and a fixed
+nominal pressure and temperature sample.
+
+The native Cooja peer replay can observe board LED transitions with
+`--observe-leds` and request a firmware-preserving reset with
+`--reset SECONDS NODE`. The latter takes the ROM software-reset path
+inside that mote and retains its Flash and the shared radio timeline.

@@ -15,6 +15,7 @@ pub mod bq27220;
 pub mod cc1101;
 pub mod co5300;
 pub mod dcs_panel;
+pub mod enviii;
 pub mod es7210;
 pub mod es8311;
 pub mod ft5x06;

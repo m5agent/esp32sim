@@ -100,7 +100,7 @@ if __name__ == "__main__":
     parser.add_argument("rom", type=Path)
     parser.add_argument("images", type=Path, nargs="+")
     parser.add_argument("output", type=Path)
-    parser.add_argument("--board", choices=("m5stack-nanoc6", "arduino-nesso-n1"), default="m5stack-nanoc6")
+    parser.add_argument("--board", choices=("m5stack-nanoc6", "m5stack-nanoc6-enviii", "arduino-nesso-n1"), default="m5stack-nanoc6")
     parser.add_argument("--console", choices=("usb", "uart0"), default="usb")
     parser.add_argument("--commit", required=True)
     parser.add_argument("--seconds", type=float, default=45)
