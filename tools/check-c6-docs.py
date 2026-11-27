@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Check guest and board markers from the C6 docs and peer runners."""
 import argparse
+from array import array
+from math import cos, hypot, sin, tau
 import json
 from pathlib import Path
 import re
+import sys
 import wave
 
 
@@ -77,10 +80,30 @@ def frame_diff(out, first, second):
 def buzzer_capture(out):
     try:
         with wave.open(str(out / "buzzer.wav")) as wav:
-            raw = wav.readframes(wav.getnframes())
-            return wav.getsampwidth() == 2 and len(set(raw)) > 4
+            if wav.getsampwidth() != 2 or wav.getnchannels() != 1:
+                return False
+            rate = wav.getframerate()
+            samples = array("h", wav.readframes(wav.getnframes()))
+            if sys.byteorder == "big":
+                samples.byteswap()
     except (FileNotFoundError, wave.Error, EOFError):
         return False
+    size = rate // 100
+    if rate <= 20000 or len(samples) < size:
+        return False
+
+    def has_tone(hz):
+        cosines = [cos(tau * hz * i / rate) for i in range(size)]
+        sines = [sin(tau * hz * i / rate) for i in range(size)]
+        for start in range(0, len(samples) - size + 1, size):
+            window = samples[start:start + size]
+            a = sum(v * basis for v, basis in zip(window, cosines))
+            b = sum(v * basis for v, basis in zip(window, sines))
+            if hypot(a, b) / size > 1500:
+                return True
+        return False
+
+    return has_tone(4000) and has_tone(10000)
 
 
 def nesso_cases(out, peers):
@@ -102,7 +125,7 @@ def nesso_cases(out, peers):
         "display": alive_board(err("display")),
         "imu": bool(rest) and len(moving - rest) >= 2,
         "ir_nec": number(err("ir_nec"), "nec_frames") >= 2,
-        "led": number(err("led"), "led_changes") >= 2,
+        "led": number(err("led"), "led_changes") > 2,
         "lora-1": lora_tx.count("transmission finished!") >= 2 and "Hello world from M5Stack!" in lora_rx,
         "lora-2": ("Hello world from M5Stack!" in lora_rx and "Hello Arduino Nesso N1 #" in lora_rx
                    and "Received packet!" not in lora_control and bool(lora_control)),
