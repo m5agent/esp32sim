@@ -343,6 +343,7 @@ impl SocBus {
         self.uart_pins = self.board.uses_uart_pins();
         self.board_edges = self.board.uses_gpio_edges();
         self.board_ledc = self.board.observes_ledc();
+        self.periph.twai.peer = self.board.name() == "m5stack-stamplc";
         self.board_power = self.board.soc_powered();
         for (bus, address, device) in self.board.i2c_devices() {
             self.periph.i2c[bus as usize].attach(address, device);
@@ -514,6 +515,12 @@ impl SocBus {
         }
         let a = addr & !3;
         if a >> 12 == 0x60028 { return self.sdmmc_read(addr); }
+        if a == 0x6002_b00c {
+            let v = self.periph.read32(addr);
+            esp_periph::Dispatch::refresh_optional(&mut self.periph, 0x2b);
+            self.irq_dirty = true;
+            return v;
+        }
         // Popping a receive status can lower RXFLVL or raise a completion interrupt.
         if a == 0x6008_0020 && self.periph.usb_otg.slave_mode() {
             let before = self.periph.usb_otg.irq();

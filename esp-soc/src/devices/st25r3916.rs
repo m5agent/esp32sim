@@ -19,12 +19,14 @@ pub struct St25r3916 {
     uid: Vec<u8>,
     pending: Option<(u64, Vec<u8>)>,
     halted: bool,
+    selected: bool,
+    type2: [u8; 80],
     pub uid_reads: u64,
 }
 impl Default for St25r3916 {
     fn default() -> Self {
         Self { registers: [[0; 64]; 2], fifo: VecDeque::new(), phase: Phase::Header,
-               uid: Vec::new(), pending: None, halted: false, uid_reads: 0 }
+               uid: Vec::new(), pending: None, halted: false, selected: false, type2: [0; 80], uid_reads: 0 }
     }
 }
 impl St25r3916 {
@@ -33,11 +35,17 @@ impl St25r3916 {
         self.fifo.clear();
         self.pending = None;
         self.halted = false;
+        self.selected = false;
         self.deselect();
     }
     pub fn set_tag(&mut self, uid: Vec<u8>) {
+        self.type2 = [0; 80];
+        if let &[a, b, c, d, e, f, g] = uid.as_slice() {
+            self.type2[..12].copy_from_slice(&[a, b, c, 0x88 ^ a ^ b ^ c, d, e, f, g, d ^ e ^ f ^ g, 0x48, 0, 0]);
+        }
         self.uid = uid;
         self.halted = false;
+        self.selected = false;
         self.fifo.clear();
         self.pending = None;
     }
@@ -49,8 +57,12 @@ impl St25r3916 {
     pub fn advance(&mut self, now: u64) {
         if self.deadline().is_some_and(|due| now >= due) {
             if let Some((_, data)) = self.pending.take() {
-                self.fifo = data.into();
-                self.registers[0][0x1a] |= 0x10; // RX end
+                if data.is_empty() {
+                    self.registers[0][0x1b] |= 0x40; // Timer expired without a response.
+                } else {
+                    self.fifo = data.into();
+                    self.registers[0][0x1a] |= 0x30; // RX start and RX end.
+                }
             }
         }
     }
@@ -64,14 +76,17 @@ impl St25r3916 {
         Some([uid[0], uid[1], uid[2], uid[3], uid.into_iter().fold(0, |a, b| a ^ b)])
     }
     fn command(&mut self, command: u8, now: u64, cycles_per_us: u64) {
+        if (0xc4..=0xc7).contains(&command) { self.registers[0][0x1a] |= 0x08; }
         match command {
             0xc1 => self.reset(),
             0xc2 | 0xdb => { self.fifo.clear(); self.pending = None; }
             0xc6 | 0xc7 if !self.uid.is_empty() && (!self.halted || command == 0xc7) => {
                 self.halted = false;
+                self.selected = false;
                 let atqa = if self.uid.len() == 7 { 0x44 } else { 0x04 };
                 self.pending = Some((now.saturating_add(250 * cycles_per_us), vec![atqa, 0]));
             }
+            0xc6 | 0xc7 => self.pending = Some((now.saturating_add(2500 * cycles_per_us), Vec::new())),
             0xc4 | 0xc5 => {
                 let frame: Vec<_> = self.fifo.drain(..).collect();
                 if self.halted { return; }
@@ -79,13 +94,22 @@ impl St25r3916 {
                     (0xc5, [sel, 0x20]) => self.cascade(*sel).map(|uid| uid.to_vec()),
                     (0xc4, [sel, 0x70, bytes @ ..]) if self.cascade(*sel).is_some_and(|uid| uid == bytes) => {
                         let more = self.uid.len() == 7 && *sel == 0x93;
-                        if !more { self.uid_reads += 1; }
+                        if !more { self.uid_reads += 1; self.selected = true; }
                         Some(vec![if more { 0x04 } else if self.uid.len() == 4 { 0x08 } else { 0 }])
                     }
-                    (0xc4, [0x50, 0]) => { self.halted = true; None }
+                    (0xc4, [0x50, 0]) => { self.halted = true; self.selected = false; None }
+                    (0xc4, [0x60]) if self.selected && self.uid.len() == 7 =>
+                        Some(vec![0, 4, 3, 1, 1, 0, 0x0b, 3]), // Ultralight EV1 MF0UL11.
+                    (0xc4, [0x30, page]) if self.selected && self.uid.len() == 7 && *page < 20 => {
+                        let bytes = (0..16).map(|i| self.type2[(usize::from(*page) * 4 + i) % self.type2.len()]);
+                        Some(bytes.collect())
+                    }
                     _ => None,
                 };
-                self.pending = response.map(|data| (now.saturating_add(250 * cycles_per_us), data));
+                self.pending = Some(match response {
+                    Some(data) => (now.saturating_add(250 * cycles_per_us), data),
+                    None => (now.saturating_add(2500 * cycles_per_us), Vec::new()),
+                });
             }
             _ => {}
         }

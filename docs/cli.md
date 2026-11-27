@@ -212,6 +212,34 @@ duration. `battery <mV> <percent> <charging 0|1> [vbus 0|1]` supplies battery
 readings and optionally disconnects VBUS (0) or supplies 5 V (1). Omitting VBUS
 keeps its previous value.
 
+### StamPLC and StackChan inputs
+
+Select `--board m5stack-stamplc` for the K141 profile (8 MiB flash, no PSRAM),
+or `--board m5stack-stackchan` for the K151 profile (16 MiB flash, 8 MiB PSRAM).
+Both profiles expose their SPI microSD sockets through `--sd` and `--sd-rw`.
+
+| Board | Script action | Effect |
+| --- | --- | --- |
+| StamPLC | `plc-key a\|b\|c MS` | Press a front key on the PI4IOE5V6408 for the specified duration. |
+| StamPLC | `plc-input 0..7 0\|1` | Set a level at an AW9523 optocoupler input. |
+| StamPLC | `plc-supply MILLIVOLTS MILLIAMPS` | Set the INA226 supply and load input. |
+| StamPLC | `plc-temperature MILLICELSIUS` | Set the LM75B input temperature. |
+| StamPLC | `plc-modbus-coil 0..3 0\|1` | Issue a Modbus RTU coil write from the virtual peer. |
+| StackChan | `head-touch 0..2 0..3` | Set the capacitive pad intensity. Zero releases the pad. |
+| StackChan | `base-supply MILLIVOLTS MILLIAMPS` | Set the base INA226 input. |
+| StackChan | `servo-angle` | Print the current yaw and pitch in degrees relative to factory zero. |
+| StackChan | `nfc-tag HEX_UID\|none` | Insert a synthetic NFC-A tag with a 4- or 7-byte UID, or remove it. |
+
+StackChan inherits the CoreS3 touch, PMIC key, camera, audio and `als` and `imu`
+controls. Its RGB ring comes from the PY32 expander and the yaw and pitch
+feedback come from two SCSCL addresses on UART1. The NFC model covers
+UID selection and the read-only Ultralight EV1 subset.
+
+The StamPLC UART2 fixture supports selected Modbus RTU coil and input-register
+functions at 115200 baud. The TWAI fixture acknowledges routed frames and returns
+the transmitted payload with the next identifier. Both fixtures are local to the
+simulator process.
+
 ### ADC inputs
 
 Scripts accept `adc <gpio> <volts>` for a constant voltage and

@@ -22,6 +22,7 @@ pub mod lm75b;
 pub mod ltr553;
 pub mod pi4ioe5v6408;
 pub mod rx8130;
+pub mod scscl;
 pub mod soft_i2c;
 pub mod spi_bitbang;
 pub mod st25r3916;

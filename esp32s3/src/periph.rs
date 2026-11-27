@@ -26,6 +26,8 @@ pub const SRC_SPI3: usize = 22;
 pub const SRC_PWM0: usize = 31;
 pub const SRC_PWM1: usize = 32;
 pub const SRC_LEDC: usize = 35;
+// ESP-IDF v5.4.2 ESP32-S3 soc/interrupts.h, ETS_TWAI_INTR_SOURCE.
+const SRC_TWAI: usize = 37;
 pub const SRC_PCNT: usize = 41;
 pub const SRC_AES: usize = 77;
 pub const SRC_LCD_CAM: usize = 24;
@@ -300,6 +302,7 @@ pub struct Peripherals {
     pub sdmmc: Box<Sdmmc>,
     /// CPU cycles before this peripheral set was built: the card's time runs on through a chip reset
     pub sd_cycle_base: u64,
+    pub(crate) twai: crate::twai::Twai,
 }
 
 /// The USB-OTG and SDMMC blocks, whose entries in the table below are optional.
@@ -358,6 +361,7 @@ device_set! { Peripherals; clock: (clock) CPU_HZ, [(ClockDomain::Systimer, 15), 
     0x3c "RSA" (rsa) => [SRC_RSA];
     0x06 "FE" (fe) @ 0x174..=0x177 => [];
     0x80 "USB_OTG" optional (usb_otg) => [SRC_USB_OTG];
+    0x2b "TWAI" optional (twai) => [SRC_TWAI];
     0x28 "SDMMC" optional (sdmmc) => [SRC_SDIO_HOST];
 }
 
@@ -391,7 +395,7 @@ impl Peripherals {
             io_mux: RegRam::new(), misc: Misc::new(), fake_reads: std::env::var("ESP_EMU_FAKE_READ").ok().map(|v| v.split(',').filter_map(|e| { let mut p = e.split(':'); let a = u32::from_str_radix(p.next()?.trim_start_matches("0x"), 16).ok()?; let o = u32::from_str_radix(p.next().unwrap_or("0").trim_start_matches("0x"), 16).ok()?; let m = u32::from_str_radix(p.next().unwrap_or("ffffffff").trim_start_matches("0x"), 16).ok()?; Some((a, (o, m))) }).collect()).unwrap_or_default(),
             clock: Self::new_clock(),
             spi_exec: false, last_status: [0; 4], intmatrix_dirty: false,
-            usb_otg: Self::new_usb_otg(), sdmmc: Box::new(Sdmmc::new(SdmmcLayout::Esp32)), sd_cycle_base: 0,
+            usb_otg: Self::new_usb_otg(), sdmmc: Box::new(Sdmmc::new(SdmmcLayout::Esp32)), sd_cycle_base: 0, twai: Default::default(),
         }
     }
 
@@ -519,6 +523,17 @@ impl Peripherals {
         if addr == PERIPH_BASE + 0xc0020 && v & (1 << 11) != 0 { self.ledc = Ledc::new(LedcLayout::S3); }
         if addr == PERIPH_BASE + 0xc0020 {
             for (group, bit) in [17, 20].iter().enumerate() { if v & (1 << bit) != 0 { self.mcpwm[group] = Mcpwm::new(160 + group as u32 * 6, 9); } }
+        }
+        if addr == 0x600c_0020 && v & (1 << 13) != 0 {
+            let peer = self.twai.peer;
+            self.twai = crate::twai::Twai::default();
+            self.twai.peer = peer;
+            self.refresh_optional(0x2b);
+        }
+        if addr == 0x6002_b004 {
+            // IDF v5.4.2 ESP32-S3 gpio_sig_map.h, TWAI_TX/RX = matrix signal 116.
+            let pins = esp_soc::pins::ChipPins::S3.routes(&self.gpio, &self.io_mux);
+            self.twai.wired = self.twai.peer && pins.matrix_output(42, 116) && pins.input_pin(116) == Some(43);
         }
         let fx = mmio::write32(self, addr, v);
         if matches!(addr, 0x6000_8120 | 0x6003_9000 | 0x600c_0020 | 0x600c_0024) { self.usb_sd_control(addr, v); }

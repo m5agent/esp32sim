@@ -14,7 +14,7 @@
 //!   AUX bus), 0x51 BM8563, 0x23 LTR553, 0x36 AW88298, 0x40 ES7210, 0x21 GC0308 (SCCB).
 //! - Touch INT -> AW9523 P1_2 -> AW9523 INTN -> GPIO 21 (active low). M5GFX only reads the touch
 //!   controller while GPIO 21 is low and clears INTN by reading AW9523 input registers 0x00/0x01.
-use super::soft_i2c::{SoftI2c, SoftOp};
+use super::{soft_i2c::{SoftI2c, SoftOp}, stackchan::{StackChan, IR_RX, IR_TX}};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -158,6 +158,7 @@ pub struct Cores3 {
     edges: Vec<BoardEdge>,
     pub gpio_events: u64,
     pub spi_bytes: u64,
+    stackchan: Option<StackChan>,
 }
 
 impl Default for Cores3 { fn default() -> Self { Self::new() } }
@@ -176,7 +177,15 @@ impl Cores3 {
             lcd_in_reset: true, lcd_id_offset: None, panel_version: 0, sd: None,
         };
         Cores3 { hw: Rc::new(RefCell::new(hw)), soft: SoftI2c::idle(), sda_release: false, imu, lcd_cs_low: false, sd_cs_low: false, cycle: 0, int_level: true, powered: true,
-                 edges: Vec::new(), gpio_events: 0, spi_bytes: 0 }
+                 edges: Vec::new(), gpio_events: 0, spi_bytes: 0, stackchan: None }
+    }
+
+    pub fn stackchan() -> Self {
+        let mut board = Self::new();
+        let base = StackChan::new();
+        board.hw.borrow_mut().others.extend(base.ports());
+        board.stackchan = Some(base);
+        board
     }
 
     fn addresses(&self) -> Vec<u8> {
@@ -231,7 +240,23 @@ impl Cores3 {
 }
 
 impl BoardModel for Cores3 {
-    fn name(&self) -> &'static str { "m5stack-cores3" }
+    fn name(&self) -> &'static str {
+        if self.stackchan.is_some() { "m5stack-stackchan" } else { "m5stack-cores3" }
+    }
+    fn uses_uart_pins(&self) -> bool { self.stackchan.is_some() }
+    fn uart_tx(&mut self, cycle: u64, route: esp_soc::uart::UartRoute, byte: u8) {
+        if let Some(base) = &mut self.stackchan { base.uart_tx(cycle, route, byte); }
+    }
+    fn uart_rx(&mut self, cycle: u64) -> Vec<esp_soc::uart::UartInput> {
+        self.stackchan.as_mut().map_or_else(Vec::new, |base| base.uart_rx(cycle))
+    }
+    fn observes_ledc(&self) -> bool { self.stackchan.is_some() }
+    fn ledc_output_at(&mut self, cycle: u64, pwm: &dyn Fn(u8) -> Option<(f64, u32)>) {
+        if let Some(level) = self.stackchan.as_mut().and_then(|base| base.pwm_ir(cycle, pwm(IR_TX))) {
+            self.edges.push(BoardEdge { cycle, pin: IR_RX, level });
+        }
+    }
+    fn leds(&self) -> Option<(&[[u8; 3]], u64)> { self.stackchan.as_ref().map(StackChan::leds) }
     fn gpio_changes(&mut self, changes: &[(u8, bool)]) {
         let mut hw = self.hw.borrow_mut();
         for &(pin, level) in changes {
@@ -251,6 +276,10 @@ impl BoardModel for Cores3 {
         if !changes.is_empty() { self.gpio_changes(changes); }
         let level = |pin: u8| enabled >> pin & 1 == 0 || output >> pin & 1 != 0;
         let (scl, sda) = (level(PIN_CORES3_I2C_SCL), level(PIN_CORES3_I2C_SDA));
+        let ir = enabled & (1 << IR_TX) != 0 && output & (1 << IR_TX) != 0;
+        if let Some(level) = self.stackchan.as_mut().and_then(|base| base.gpio_ir(cycle, ir)) {
+            self.edges.push(BoardEdge { cycle, pin: IR_RX, level });
+        }
         let sd_cs_low = !level(PIN_CORES3_SD_CS);
         if self.sd_cs_low && !sd_cs_low {
             if let Some(sd) = &mut self.hw.borrow_mut().sd { sd.deselect(); }
@@ -346,7 +375,11 @@ impl BoardModel for Cores3 {
     }
     fn set_imu_motion(&mut self, mode: u32) -> bool { self.imu.mode.store(mode, std::sync::atomic::Ordering::Relaxed); true }
     fn imu_motion(&self) -> u32 { self.imu.mode.load(std::sync::atomic::Ordering::Relaxed) }
-    fn input_levels(&self) -> Vec<(u8, bool)> { vec![(PIN_CORES3_I2C_INT, self.int_level)] }
+    fn input_levels(&self) -> Vec<(u8, bool)> {
+        let mut levels = vec![(PIN_CORES3_I2C_INT, self.int_level)];
+        if self.stackchan.is_some() { levels.push((IR_RX, true)); }
+        levels
+    }
     fn touch(&mut self, x: u16, y: u16, down: bool) {
         {
             let mut hw = self.hw.borrow_mut();
@@ -359,11 +392,13 @@ impl BoardModel for Cores3 {
     fn soc_powered(&self) -> Option<bool> { Some(self.hw.borrow().pmic.powered()) }
     fn next_deadline(&self) -> Option<VirtualCycle> {
         let hw = self.hw.borrow();
-        hw.rtc.next_deadline().into_iter().chain(hw.pmic.next_deadline()).min()
+        hw.rtc.next_deadline().into_iter().chain(hw.pmic.next_deadline())
+            .chain(self.stackchan.as_ref().and_then(StackChan::deadline)).min()
     }
     fn advance_to(&mut self, cycle: VirtualCycle) {
         self.cycle = self.cycle.max(cycle);
         let mut hw = self.hw.borrow_mut();
+        if let Some(base) = &mut self.stackchan { base.advance(self.cycle); }
         hw.rtc.advance_to(self.cycle);
         hw.pmic.advance_to(self.cycle);
         // CoreS3 schematic v1.0: BM8563 INT pulls down the AXP_WAKEUP net at AXP2101 IRQ.
@@ -385,9 +420,14 @@ impl BoardModel for Cores3 {
         drop(hw);
         self.update_int();
     }
-    fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "pwrkey" | "battery" | "imu" | "als") }
+    fn accepts_command(&self, verb: &str) -> bool {
+        matches!(verb, "pwrkey" | "battery" | "imu" | "als") || self.stackchan.is_some() && StackChan::accepts_command(verb)
+    }
     fn board_command(&mut self, cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
         self.advance_to(cycle);
+        if StackChan::accepts_command(verb) {
+            return self.stackchan.as_mut().is_some_and(|base| base.command(verb, args));
+        }
         let mut hw = self.hw.borrow_mut();
         let flag = |s: &str| match s { "0" => Some(false), "1" => Some(true), _ => None };
         match (verb, args) {
@@ -442,6 +482,7 @@ impl BoardModel for Cores3 {
                 hw.pmic.powered(), hw.pmic.backlight_mv(), hw.pmic.off_cause(), hw.pmic.last_off, hw.pmic.on_cause(), hw.pmic.last_on,
                 hw.rtc.control2(), hw.rtc.last_timer_expiry);
         if let Some(sd) = &hw.sd { report += &format!("\n{}; ALDO4 {}", sd.report(), if hw.sd_powered() { "on" } else { "off" }); }
+        if let Some(base) = &self.stackchan { report += &format!("\n{}", base.report()); }
         report
     }
 }
