@@ -130,8 +130,12 @@ impl ClassicGpSpi {
         let dma_tx_len = if self.out_active { mosi_len } else { 0 };
         if dma_tx_len == 0 {
             let base = if user & (1 << 25) != 0 { 8 } else { 0 };
-            for i in 0..mosi_len.min((16 - base) * 4) {
-                tx.push((self.w[base + i / 4] >> (8 * (i % 4))) as u8);
+            // Classic SPI wraps the W-register bank for a data phase longer
+            // than the CPU buffer. M5GFX Bus_SPI::writeDataRepeat uses up to
+            // 2048 bits from this 512-bit ring on ESP32 to draw solid fills.
+            let words = 16 - base;
+            for i in 0..mosi_len {
+                tx.push((self.w[base + (i / 4) % words] >> (8 * (i % 4))) as u8);
             }
         }
         let rx_bits = if user & USER_MISO != 0 { (self.regs.read(0x2c) & 0x00ff_ffff) as usize + 1 } else { 0 };
@@ -341,5 +345,25 @@ mod tests {
         assert_eq!(spi.irq_sources(), 2);
         spi.write(0x11c, 1 << 8);
         assert_eq!(spi.irq_sources(), 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_buffer_repeats_when_the_data_phase_wraps_the_fifo() {
+        let mut spi = ClassicGpSpi::new();
+        spi.write(0x1c, USER_MOSI);
+        spi.write(0x28, 2047);
+        spi.write(0x80, 0xfedcba98);
+        spi.write(0xbc, 0x76543210);
+        spi.write(0, USR);
+        let tx = spi.take_transfer().unwrap().tx;
+        assert_eq!(tx.len(), 256);
+        assert!(tx.chunks_exact(64).all(|chunk| {
+            chunk[..4] == [0x98, 0xba, 0xdc, 0xfe] && chunk[60..] == [0x10, 0x32, 0x54, 0x76]
+        }));
     }
 }
