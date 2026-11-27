@@ -58,10 +58,10 @@ reader. All three share the clock and data wires with the microSD socket and
 use their own chip selects.
 
 For a packet link, launch two native sessions with swapped `--cap-peer IN:OUT`
-ports. The link uses nonblocking IPv4 loopback UDP. Each datagram contains a
-one-byte radio type followed by ten channel bytes and the raw packet payload.
-A host peer can replay the entire datagram from the configured source port.
-The receiver accepts a packet while listening on a matching configuration.
+ports. See [paired radios](cli.md#paired-sx1262-and-cc1101-radios) for guest
+time and startup behavior. Each frame carries the radio type, ten channel
+bytes and the raw packet payload. The receiver accepts a packet while
+listening on a matching configuration.
 
 | Type | Ten channel bytes in wire order |
 | --- | --- |

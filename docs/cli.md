@@ -105,6 +105,9 @@ with `ESP32SIM_ROM_DIR`, and a FAT32 image with `CORE_SD_SEED`.
 | `--web PORT [--web-dir DIR]` | browser UI (implies real time). With `--wifi` the page gets a Network panel: the station's Ethernet frames live (time, ↑ sent / ↓ received, a dissection summary from [dpkt-js](https://www.npmjs.com/package/dpkt-js) 0.1.0, vendored under web/vendor/dpkt-js and loaded when the panel is first opened or a row clicked; until then, length and hex), a filter, pause, clear, the dissection tree of a clicked frame and a pcap download of the frames the page received. They arrive as binary WebSocket messages `[5][dir: 0 sent, 1 received][emulated µs, u64 LE][frame]`, only while a page is connected; at most 512 frames or 1 MiB wait between pushes, the rest are dropped |
 | `--cam-image F`, `--cam-fps N` | camera source for boards with a camera |
 | `--service-fd FD` | Unix Device Service integration. Uses an inherited stream socket and enables real-time execution. Cannot be used with `--web`. |
+| `--cap NAME` | Cardputer-ADV radio accessory, one of `lora1262`, `lora868` or `cc1101` |
+| `--cap-peer IN:OUT` | synchronized radio pair for Cardputer-ADV with `--cap`, or Arduino Nesso N1's built-in SX1262 |
+| `--lora-peer IN:OUT` | synchronized radio pair for PaperMono's built-in SX1262 |
 | `--cooja` (C6) | run as a Cooja-NG external mote: the lock-step NDJSON protocol on stdin/stdout, the guest console as `log` events, the 802.15.4 frames as `tx`/`rx`. Honors `--no-reboot` and `--max-seconds` (see [esp32c6.md](esp32c6.md), "Cooja-NG lock-step") |
 | `--cooja-slice-us N` | how long a busy guest runs before asking csim to step it again (default 100; `hello.args.slice_us` overrides). A transmission reaches csim's medium at the end of the slice it started in, so this bounds how late it is |
 | `--cooja-rx-timing start\|end` | what an `rx` at `t` is: the frame's start (default — csim hands a frame-consuming mote the frame when it starts: `t` is the first preamble byte, the SFD five byte times later, RX_DONE after the whole PPDU, the ACK 192 µs after that) or its end, complete at `t` |
@@ -161,6 +164,25 @@ Where esp32sim differs from Espressif's esp-emu, whose flag names these follow:
 - `--timeout` exits with status 124; a run given `--exit-on` that never matched exits with 1.
 - There is no `--control-tcp` (resets and flash operations over a second socket), and flash and eFuse
   changes are not saved back to a file at exit.
+
+## Paired SX1262 and CC1101 radios
+
+Launch both native processes with reciprocal loopback TCP ports, for example
+`--lora-peer 42101:42102` on one PaperMono and `--lora-peer 42102:42101` on
+the other. Either process can launch first. They wait for each other before
+starting guest execution. Omit the peer flag for an isolated radio.
+
+The guests share a guest-time origin and exchange transmissions at each 1 ms
+barrier. The receiver schedules each packet for the sender's virtual TX
+completion time plus 2 ms of fixed delivery delay. At that time the receiver
+must be powered, listening and on the matching channel. Use guest-time limits
+and scripted inputs for replay. A peer reaching its limit closes the link
+after sending its final frames, and the surviving peer runs through its own
+limit. A missing or stalled configured peer times out after 60 seconds of
+waiting and reports a transport failure.
+
+The synchronized stream protocol replaces the previous raw UDP datagrams.
+It models packet delivery, with no RF propagation or analog measurements.
 
 ## Outputs
 | Flag | Meaning |

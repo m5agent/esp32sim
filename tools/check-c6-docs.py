@@ -135,9 +135,16 @@ def nesso_cases(out, peers):
     lora_tx = read(peers / "lora-peer", "lora-1.log")
     lora_control = read(peers / "lora-isolated", "lora-2.log")
     lora_control_tx = read(peers / "lora-isolated", "lora-1.log")
+    expected = ["Hello world from M5Stack!"] + [f"Hello Arduino Nesso N1 #{i}" for i in range(13)]
+    received = re.findall(r"\[SX1262\] Data:\s+([^\r\n]+)", lora_rx)
+    lora_sent_ok = (lora_tx.count("transmission finished!") == 14
+                    and number(read(peers / "lora-peer", "lora-1.err"), "lora_tx") == 14)
+    lora_recv_ok = (received == expected and lora_rx.count("Received packet!") == 14
+                    and number(read(peers / "lora-peer", "lora-2.err"), "lora_rx") == 14)
     lora_control_ok = ("Initializing ... success!" in lora_control
                        and "transmission finished!" in lora_control_tx
-                       and "Received packet!" not in lora_control)
+                       and "Received packet!" not in lora_control
+                       and number(read(peers / "lora-isolated", "lora-2.err"), "lora_rx") == 0)
     btn_events = ("A Btn Pressed", "A Btn Released", "B Btn Pressed", "B Btn Released")
     return {
         "button": all(e in log("button") and e not in log("button-control") for e in btn_events),
@@ -150,9 +157,8 @@ def nesso_cases(out, peers):
                 and frame_diff(out, "imu-motion-first", "imu-motion")),
         "ir_nec": number(err("ir_nec"), "nec_frames") >= 2,
         "led": number(err("led"), "led_changes") > 2,
-        "lora-1": lora_tx.count("transmission finished!") >= 2 and "Hello world from M5Stack!" in lora_rx,
-        "lora-2": ("Hello world from M5Stack!" in lora_rx and "Hello Arduino Nesso N1 #" in lora_rx
-                   and lora_control_ok),
+        "lora-1": lora_sent_ok and lora_recv_ok,
+        "lora-2": lora_sent_ok and lora_recv_ok and lora_control_ok,
         "power-2": (number(err("power-2"), "grove_changes") >= 2 and alive_board(err("power-2"))
                     and frame_diff(out, "power-2", "power-other")),
         "quickstart-bargraph": alive_board(err("quickstart-bargraph")),

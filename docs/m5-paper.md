@@ -36,7 +36,7 @@ Additional script inputs:
 - `sht40 CELSIUS PERCENT_RH` on PaperColor.
 - `imu AX AY AZ GX GY GZ` on PaperMono, with acceleration in g and angular velocity in degrees per second.
 - `paper-tag HEX_UID` or `paper-tag none` on PaperMono. The modeled NFC-A reader supports 4- or 7-byte UIDs.
-- `--lora-peer IN:OUT` connects two PaperMono processes on loopback UDP. The peer uses the Cardputer-ADV CAP channel header and SX1262 packet engine. Give the other process the reversed port pair.
+- `--lora-peer IN:OUT` synchronizes two PaperMono processes over loopback TCP. Give the other process the reversed port pair. See [paired radios](cli.md#paired-sx1262-and-cc1101-radios).
 
 The board matrix runners in `tools/run-*-docs.sh` accept a simulator binary,
 a directory containing prebuilt `CASE/sketch.merged.bin` images, and a new

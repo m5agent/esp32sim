@@ -36,6 +36,7 @@ pub mod mpu6886;
 pub mod mpu9250;
 pub mod nec;
 pub mod pi4ioe5v6408;
+pub mod radio_peer;
 pub mod rx8130;
 pub mod scscl;
 pub mod sh1107;

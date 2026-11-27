@@ -51,8 +51,8 @@ devices use the board's SPI and I²C routes. For scripted input, use
 `--imu-motion 1` selects scripted motion. A board script line
 `<seconds> battery MV MA SOC VIN` sets gauge inputs in millivolts, signed
 milliamps and integer percent, and sets VIN present (`1`) or absent (`0`).
-`--cap-peer IN:OUT` connects the built-in SX1262 to another process via
-loopback UDP using the Cardputer-ADV CAP packet format.
+`--cap-peer IN:OUT` connects the built-in SX1262 to a synchronized peer
+process over loopback TCP. See [paired radios](cli.md#paired-sx1262-and-cc1101-radios).
 
 The docs runners take prebuilt merged images arranged as
 `<firmware-dir>/<case>/sketch.merged.bin` and emit a hash-bound receipt.

@@ -1,8 +1,8 @@
 //! Cardputer-ADV EXT bus pinout from UIFlow2 release/2.5.3
 //! m5stack/libs/cap/{lora868,cc1101}.py.
 use std::io;
-use std::net::{Ipv4Addr, UdpSocket};
 
+use esp_soc::devices::radio_peer::{RadioPeer, CC1101, SX1262};
 use esp_soc::board::{BoardEdge, SpiPins};
 use esp_soc::devices::{cc1101::Cc1101, st25r3916::St25r3916, sx1262::Sx1262};
 use esp_soc::pins::PinRoutes;
@@ -25,7 +25,6 @@ const GPS_BAUD: u32 = 115_200;
 const GPS_BYTE_CYCLES: u64 = (CPU_HZ * 10).div_ceil(GPS_BAUD as u64);
 const US: u64 = CPU_HZ / 1_000_000;
 const MS: u64 = CPU_HZ / 1_000;
-const AIR_HEADER: usize = 11;
 
 enum Radio {
     LoRa(Box<Sx1262>),
@@ -36,8 +35,7 @@ pub(super) struct Cap {
     name: &'static str,
     radio: Radio,
     nfc: Option<St25r3916>,
-    peer: Option<UdpSocket>,
-    poll: u64,
+    peer: Option<RadioPeer>,
     gps: Option<(u64, std::vec::IntoIter<u8>)>,
     selected: u64,
     powered: bool,
@@ -58,13 +56,9 @@ impl Cap {
             "cc1101" => ("cc1101", Radio::SubGhz(Cc1101::default()), Some(St25r3916::default())),
             _ => return Err(format!("--cap {name}: expected lora1262, lora868 or cc1101")),
         };
-        let peer = ports.map(|(local, remote)| -> io::Result<_> {
-            let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, local))?;
-            socket.connect((Ipv4Addr::LOCALHOST, remote))?;
-            socket.set_nonblocking(true)?;
-            Ok(socket)
-        }).transpose().map_err(|err| format!("--cap-peer: {err}"))?;
-        Ok(Self { name, radio, nfc, peer, poll: 0, gps: None, selected: 0, powered: false,
+        let peer = ports.map(|ports| RadioPeer::connect(ports, US))
+            .transpose().map_err(|err| format!("--cap-peer: {err}"))?;
+        Ok(Self { name, radio, nfc, peer, gps: None, selected: 0, powered: false,
                   reset: false, driven: 0, spi_bytes: 0, tx: 0, linked_tx: 0, rx: 0, gps_bytes: 0 })
     }
     pub fn uses_uart(&self) -> bool { matches!(self.radio, Radio::LoRa(_)) }
@@ -129,49 +123,41 @@ impl Cap {
         }
         Some(rx)
     }
-    fn air_header(&self) -> [u8; AIR_HEADER] {
-        let (kind, channel) = match &self.radio {
-            Radio::LoRa(radio) => (1, radio.channel()),
-            Radio::SubGhz(radio) => (2, radio.channel()),
-        };
-        let mut header = [kind; AIR_HEADER];
-        header[1..].copy_from_slice(&channel);
-        header
+    fn air_channel(&self) -> (u8, [u8; 10]) {
+        match &self.radio {
+            Radio::LoRa(radio) => (SX1262, radio.channel()),
+            Radio::SubGhz(radio) => (CC1101, radio.channel()),
+        }
     }
     pub fn deadline(&self, now: u64) -> Option<u64> {
         let radio = match &self.radio {
             Radio::LoRa(radio) => radio.deadline(now), Radio::SubGhz(radio) => radio.deadline(),
         };
         radio.into_iter().chain(self.nfc.as_ref().and_then(St25r3916::deadline))
-            .chain(self.peer.as_ref().map(|_| self.poll)).chain(self.gps.as_ref().map(|(due, _)| *due)).min()
+            .chain(self.peer.as_ref().and_then(RadioPeer::deadline)).chain(self.gps.as_ref().map(|(due, _)| *due)).min()
     }
     pub fn advance(&mut self, now: u64) {
         if let Some(nfc) = &mut self.nfc { nfc.advance(now); }
         let tx = match &mut self.radio {
             Radio::LoRa(radio) => radio.advance(now), Radio::SubGhz(radio) => radio.advance(now),
         };
-        if let Some(payload) = tx {
-            self.tx += 1;
-            if let Some(peer) = &self.peer {
-                let mut datagram = self.air_header().to_vec();
-                datagram.extend(payload);
-                if peer.send(&datagram).is_ok() { self.linked_tx += 1; }
-            }
-        }
-        let Some(peer) = &self.peer else { return; };
-        if now < self.poll { return; }
-        self.poll = now.saturating_add(2 * MS);
-        let header = self.air_header();
+        self.tx += u64::from(tx.is_some());
+        if self.peer.is_none() { return; }
+        let (kind, channel) = self.air_channel();
         let active = self.active();
-        let mut datagram = [0; AIR_HEADER + 256];
-        for _ in 0..16 {
-            let Ok(len) = peer.recv(&mut datagram) else { break; };
-            if !active || !(AIR_HEADER..AIR_HEADER + 256).contains(&len) || datagram[..AIR_HEADER] != header { continue; }
-            let data = &datagram[AIR_HEADER..len];
+        let Some(peer) = &mut self.peer else { return; };
+        if let Some(payload) = tx {
+            self.linked_tx += u64::from(peer.transmit(now, kind, channel, &payload));
+        }
+        for frame in peer.advance(now) {
+            let Some(data) = frame.matching(kind, channel).filter(|_| active) else { continue; };
             if match &mut self.radio {
                 Radio::LoRa(radio) => radio.receive(data), Radio::SubGhz(radio) => radio.receive(data),
             } { self.rx += 1; }
         }
+    }
+    pub fn finish_radio_peer(&mut self) -> io::Result<()> {
+        self.peer.as_mut().map_or(Ok(()), RadioPeer::finish)
     }
     pub fn levels(&self, now: u64) -> [(u8, bool); 2] {
         match &self.radio {
@@ -225,7 +211,7 @@ impl Cap {
         }
     }
     pub fn report(&self) -> String {
-        format!("[emu] CAP {}: {} SPI bytes, {} TX ({} UDP), {} RX, {} GPS UART bytes, {} NFC selections",
+        format!("[emu] CAP {}: {} SPI bytes, {} TX ({} peer), {} RX, {} GPS UART bytes, {} NFC selections",
                 self.name, self.spi_bytes, self.tx, self.linked_tx, self.rx, self.gps_bytes,
                 self.nfc.as_ref().map_or(0, |nfc| nfc.uid_reads))
     }

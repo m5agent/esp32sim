@@ -305,6 +305,10 @@ impl BoardModel for CardputerAdv {
     }
     fn display_version(&self) -> u64 { self.display.version() }
     fn gram(&self) -> Option<(Vec<u16>, usize, usize)> { Some((self.display.lcd.gram.clone(), self.display.lcd.cols, self.display.lcd.rows)) }
+    fn finish_radio_peer(&mut self) -> std::io::Result<()> {
+        self.cap.as_mut().map_or(Ok(()), |cap| cap.finish_radio_peer())
+    }
+
     fn report(&self) -> String {
         let mut report = format!("[emu] cardputer-adv: {} GPIO LCD reads, {} SPI3 LCD bytes, {} RAMWR, {} pixels, MADCTL={:#04x}, backlight={}; {} GPIO I2C ACKs, {} keyboard events read",
             self.display.lcd_gpio_reads, self.display.lcd_spi_bytes, self.display.lcd.frames, self.display.lcd.pixels_written, self.display.lcd.madctl, self.display.lcd_bl, self.soft_acks, self.keyboard.borrow().read_count());

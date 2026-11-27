@@ -1,7 +1,7 @@
 //! PaperMono C153 and PaperColor C151. GPIO and buses follow the manufacturer
 //! schematics and M5GFX 28d47949 / M5Unified 96576a14.
 
-use std::{cell::{Cell, RefCell}, io, net::{Ipv4Addr, UdpSocket}, rc::Rc, sync::{Arc, Mutex}};
+use std::{cell::{Cell, RefCell}, io, rc::Rc, sync::{Arc, Mutex}};
 use esp_periph::{
     i2c::{I2cDevice, Reg8Device, m5::{M5ioe1, M5pm1, M5pm1State}},
     sdmmc::{SdCard, SpiSdCard},
@@ -12,7 +12,7 @@ use esp_soc::{
         bmi270::Bmi270, ed2208::Ed2208, es7210::Es7210, es8311::Es8311,
         ft5x06::{Ft5x06, Ft5x06Points}, imu_motion::ImuMotion, rx8130::Rx8130,
         sht40::Sht40, ssd1677::Ssd1677, st25r3916::St25r3916, sx1262::Sx1262,
-        ws2812::Ws2812Chain,
+        radio_peer::{RadioPeer, SX1262}, ws2812::Ws2812Chain,
     },
 };
 use super::{cardputer_adv_ir::NecReceiver, paper_i2c::PaperI2c};
@@ -90,8 +90,7 @@ impl I2cDevice for NfcI2c {
 
 struct RadioLink {
     chip: Sx1262,
-    peer: Option<UdpSocket>,
-    next_poll: u64,
+    peer: Option<RadioPeer>,
     selected: bool,
     active: bool,
     tx: u64,
@@ -100,34 +99,26 @@ struct RadioLink {
 
 impl RadioLink {
     fn new(ports: Option<(u16, u16)>) -> io::Result<Self> {
-        let peer = ports.map(|(local, remote)| -> io::Result<_> {
-            let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, local))?;
-            socket.connect((Ipv4Addr::LOCALHOST, remote))?;
-            socket.set_nonblocking(true)?;
-            Ok(socket)
-        }).transpose()?;
-        Ok(Self { chip: Default::default(), peer, next_poll: 0, selected: false, active: false, tx: 0, rx: 0 })
+        let peer = ports.map(|ports| RadioPeer::connect(ports, US)).transpose()?;
+        Ok(Self { chip: Default::default(), peer, selected: false, active: false, tx: 0, rx: 0 })
     }
 
     fn advance(&mut self, now: u64, antenna_tx: bool) {
         let channel = self.chip.channel();
-        if let Some(data) = self.chip.advance(now) {
-            self.tx += 1;
-            if let Some(socket) = self.peer.as_ref().filter(|_| antenna_tx) {
-                let mut datagram = vec![1];
-                datagram.extend(channel);
-                datagram.extend(data);
-                let _ = socket.send(&datagram);
+        if self.active {
+            if let Some(data) = self.chip.advance(now) {
+                self.tx += 1;
+                if let Some(peer) = self.peer.as_mut().filter(|_| antenna_tx) {
+                    peer.transmit(now, SX1262, channel, &data);
+                }
             }
         }
-        if now < self.next_poll { return; }
-        let Some(socket) = &self.peer else { return; };
-        self.next_poll = now.saturating_add(2 * MS);
-        let mut datagram = [0; 267];
-        for _ in 0..16 {
-            let Ok(n) = socket.recv(&mut datagram) else { break; };
-            if !antenna_tx && n > 11 && datagram[0] == 1 && datagram[1..11] == channel
-                && self.chip.receive(&datagram[11..n]) { self.rx += 1; }
+        let Some(peer) = &mut self.peer else { return; };
+        for frame in peer.advance(now) {
+            if self.active && !antenna_tx && frame.matching(SX1262, channel)
+                .is_some_and(|data| !data.is_empty() && self.chip.receive(data)) {
+                self.rx += 1;
+            }
         }
     }
 }
@@ -336,7 +327,7 @@ impl BoardModel for PaperSpi {
             .chain(self.rtc.borrow().next_irq_check())
             .chain(self.nfc.borrow().deadline())
             .chain(self.radio.as_ref().and_then(|r| r.chip.deadline(self.now.get())))
-            .chain(self.radio.as_ref().filter(|r| r.active && r.peer.is_some()).map(|r| r.next_poll))
+            .chain(self.radio.as_ref().and_then(|r| r.peer.as_ref()).and_then(RadioPeer::deadline))
             .min()
     }
     fn set_imu_motion(&mut self, mode: u32) -> bool {
@@ -402,7 +393,7 @@ impl BoardModel for PaperSpi {
                 radio.active = active;
                 radio.chip.reset(cycle);
             }
-            if active { radio.advance(cycle, outputs & LORA_ANTENNA_TX != 0); }
+            radio.advance(cycle, outputs & LORA_ANTENNA_TX != 0);
         }
         self.update_edges();
     }
@@ -492,6 +483,9 @@ impl BoardModel for PaperSpi {
             }
             _ => false,
         }
+    }
+    fn finish_radio_peer(&mut self) -> io::Result<()> {
+        self.radio.as_mut().and_then(|r| r.peer.as_mut()).map_or(Ok(()), RadioPeer::finish)
     }
     fn report(&self) -> String {
         match &self.display {

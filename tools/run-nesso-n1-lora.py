@@ -13,7 +13,7 @@ sha = run_path(str(Path(__file__).with_name("run-c6-docs.py")))["sha"]
 
 def run(args):
     args.output.mkdir(parents=True)
-    with socket.socket(type=socket.SOCK_DGRAM) as a, socket.socket(type=socket.SOCK_DGRAM) as b:
+    with socket.socket(type=socket.SOCK_STREAM) as a, socket.socket(type=socket.SOCK_STREAM) as b:
         a.bind(("127.0.0.1", 0))
         b.bind(("127.0.0.1", 0))
         ports = a.getsockname()[1], b.getsockname()[1]
@@ -27,7 +27,7 @@ def run(args):
             image = args.firmware_dir / label / "sketch.merged.bin"
             command = [str(args.binary), "--chip", "c6", "--board", "arduino-nesso-n1",
                        "--boot", "rom", "--rom", str(args.rom), "--flash-image", str(image),
-                       "--realtime", "--max-seconds", "16", "--console", "usb", "--no-dump"]
+                       "--max-seconds", "16", "--console", "usb", "--no-dump"]
             if not args.isolated:
                 command += ["--cap-peer", f"{local}:{remote}"]
             logfile = stack.enter_context((args.output / f"{label}.log").open("wb"))

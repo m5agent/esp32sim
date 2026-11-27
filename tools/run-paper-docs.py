@@ -12,7 +12,7 @@ import signal
 import socket
 import subprocess
 import sys
-from time import monotonic, sleep
+from time import monotonic
 
 BOARDS = {
     "paperdiy": "button display-1 display-2 m5pm1 microsd quickstart-longtextscroll",
@@ -269,18 +269,12 @@ def run(board, binary, firmware, out, cases, args):
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         results = list(pool.map(lambda job: one(*job), jobs))
     if paired_lora:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as tx, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as rx:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tx, socket.socket(socket.AF_INET, socket.SOCK_STREAM) as rx:
             tx.bind(("127.0.0.1", 0))
             rx.bind(("127.0.0.1", 0))
             tx_port, rx_port = tx.getsockname()[1], rx.getsockname()[1]
         with ThreadPoolExecutor(max_workers=2) as pool:
             receiver = pool.submit(one, "lora-2", "input", f"{rx_port}:{tx_port}")
-            log = out / "lora-2.log"
-            deadline = monotonic() + min(180, args.timeout)
-            while not receiver.done() and monotonic() < deadline:
-                if log.is_file() and "[LoRa RX] Listening" in log.read_text(errors="replace"):
-                    break
-                sleep(0.5)
             sender = pool.submit(one, "lora-1", "input", f"{tx_port}:{rx_port}")
             results.extend((sender.result(), receiver.result()))
         results.append(one("lora-2", "control"))
