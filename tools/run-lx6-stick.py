@@ -34,8 +34,10 @@ def tone_file(path, frequency):
 def scenarios(device, case):
     """Pick emulated-time inputs and observation windows for the published code."""
     base = [("", 1.1 if case.startswith(("display", "lcd_", "quickstart")) else 3.2, [], [])]
-    if case.startswith("button"):
-        if case in {"button-5", "button-7", "button-9"}:
+    if case == "button-7":
+        base = [("", 2.25, ["1.90 press a 500"], []), ("-idle", 2.25, [], [])]
+    elif case.startswith("button"):
+        if case in {"button-5", "button-9"}:
             pulse_ms = 3200 if case == "button-9" else 2200
             end = 3.9 if case == "button-9" else 3.2
             base = [("", end, [f"0.5 press a {pulse_ms}"], []), ("-idle", end, [], [])]
@@ -60,8 +62,13 @@ def scenarios(device, case):
         base = [("", 4.0, [], []), ("-first", 1.8, [], []), ("-restart", 6.0, ["4.1 pmic-key short"], [])]
     elif case in {"axp192_m5stickc-5", "power-5"}:
         base = [("", 1.8, [], []), ("-first", 0.9, [], [])]
-    elif case in {"mic", "spm1423_m5stickc"}:
-        inputs = ["2.8 press a 150"]
+    elif case == "mic":
+        base = [("", 2.7, [], ["--mic-wav", "@mic733.wav"]),
+                ("-idle", 2.7, [], []),
+                ("-second", 2.7, [], ["--mic-wav", "@mic1234.wav"]),
+                ("-playback", 4.2, ["2.8 press a 150"], ["--mic-wav", "@mic733.wav", "--wav", "@mic-playback.wav"])]
+    elif case == "spm1423_m5stickc":
+        inputs = []
         base = [("", 3.8, inputs, ["--mic-wav", "@mic733.wav"]),
                 ("-idle", 3.8, inputs, []),
                 ("-second", 3.8, inputs, ["--mic-wav", "@mic1234.wav"])]
@@ -73,10 +80,16 @@ def scenarios(device, case):
     elif case == "rtc" and device == "stickc-plus2":
         wifi = "ssid=YOUR WIFI SSID NAME,psk=YOUR WIFI PASSWORD,epoch=1764000000"
         base = [("", 10.0, [], ["--wifi", wifi, "--net", "none"]), ("-idle", 4.8, [], [])]
+    elif case == "quickstart-display" and device == "stickc-plus":
+        base += [("-text", 3.4, [], [])]
+    elif case == "quickstart-scrollgraph":
+        base += [("-first", 0.7, [], [])]
+    elif case in {"display", "quickstart-display"}:
+        base += [("-first", 0.55, [], [])]
     elif case.startswith(("rtc", "system_")):
         base = [("", 4.8, [], []), ("-first", 1.1, [], [])]
     elif case.endswith("-2") and case.startswith(("axp192", "power")):
-        base = [("", 1.1, [], [])]
+        base = [("", 1.1, [], ["--debug", "i2c"])]
     return base
 
 

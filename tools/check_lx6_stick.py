@@ -56,8 +56,33 @@ def frame_summary(path, width):
     if coords:
         xs, ys = zip(*coords)
         bounds = [min(xs), min(ys), max(xs), max(ys)]
+    top = palette.most_common(5)
+    regions = {}
+    for color, _ in top:
+        indexes = [i for i, pixel in enumerate(native) if pixel.hex() == color]
+        xs, ys = zip(*((i % width, i // width) for i in indexes))
+        regions[color] = [min(xs), min(ys), max(xs), max(ys)]
     return {"w": width, "h": h // scale, "lit": len(coords), "bounds": bounds,
-            "colors": len(palette), "palette": palette.most_common(5), "crc32": f"{zlib.crc32(image):08x}"}
+            "colors": len(palette), "palette": top, "regions": regions,
+            "crc32": f"{zlib.crc32(image):08x}"}
+
+
+def tones(path):
+    if not path.is_file():
+        return []
+    with wave.open(str(path), "rb") as stream:
+        rate = stream.getframerate()
+        raw = stream.readframes(stream.getnframes())
+    samples = [value for value, in struct.iter_unpack("<h", raw)]
+    rising = [i for i in range(2, len(samples)) if samples[i - 2] < 0 and samples[i - 1] <= 0 < samples[i]]
+    groups = []
+    for edge in rising:
+        if not groups or edge - groups[-1][-1] > rate // 25:
+            groups.append([])
+        groups[-1].append(edge)
+    return [(round(rate * (len(edges) - 1) / (edges[-1] - edges[0]), 1),
+             round(1000 * (edges[-1] - edges[0]) / rate, 1))
+            for edges in groups if len(edges) > 10]
 
 
 def check(device, out):
@@ -133,6 +158,29 @@ def check(device, out):
                     reason = "Panel produced pixels; text and placement need a reference assertion"
             if hit:
                 reason = "Visible pixel count or fill color matches the sketch operation"
+        elif case == "display" or (case == "quickstart-display" and device == "stickc-plus2"):
+            first = frame(case + "-first")
+            if screen and field("pixels") > 135 * 240:
+                sizes = [count for _, count in screen["palette"]]
+                hit = (screen["colors"] >= 3 and 400 in sizes and
+                       (device != "stickc-plus2" or screen["colors"] > 20) and difference(first, screen))
+                reason = "Native frame shows the expected 20×20 rectangles and circles at distinct checkpoints"
+        elif case == "quickstart-scrollgraph":
+            first = frame(case + "-first")
+            if screen and screen["bounds"]:
+                x0, y0, x1, y1 = screen["bounds"]
+                hit = (screen["colors"] == 9 and y1 - y0 == 239 and x1 - x0 > 115
+                       and 1400 <= screen["lit"] <= 2600 and difference(first, screen))
+                reason = "Six plotted colors and grid span the native display and advance across checkpoints"
+        elif case == "quickstart-display" and device == "stickc-plus":
+            stage = frame(case + "-text")
+            hit = bool(screen and stage and screen["colors"] == 1 and stage["lit"]
+                       and 100 <= stage["lit"] <= 250 and difference(stage, screen))
+            reason = "The color-fill sequence advances to the documented Display Test lettering"
+        elif case in {"axp192_m5stickc-2", "power-2"}:
+            hit = ("panel_power=true" in diag and 0 < field("backlight") and
+                   field("backlight_updates") > 0 and "[i2c] start addr 0x34" in diag)
+            reason = "M5.begin addressed AXP192 and enabled the panel rails and backlight"
         elif case.startswith("button"):
             idle, held = frame(case + "-idle"), frame(case + "-held")
             hit = bool(screen and (difference(screen, idle) or difference(held, idle)))
@@ -163,18 +211,18 @@ def check(device, out):
             hit = bool(screen and screen["lit"] and difference(screen, idle) and difference(second, idle) and difference(screen, second))
             if hit:
                 reason = "Both PCM tones changed the guest waveform relative to silence"
+            else:
+                reason = "Tone and silence waveform checkpoints did not separate"
         elif case in {"buzzer", "speaker"}:
             if case == "buzzer" and device == "stickc-plus":
                 hit = field("buzzer_updates") >= 2
                 reason = "Legacy M5.Beep routed a PWM burst and then released it" if hit else "No routed PWM burst"
             else:
-                audio = out / f"{case}.wav"
-                if audio.is_file():
-                    with wave.open(str(audio), "rb") as stream:
-                        raw = stream.readframes(stream.getnframes())
-                    samples = [x[0] for x in struct.iter_unpack("<h", raw)]
-                    hit = len(samples) > 200 and max(samples) - min(samples) > 512 and len(set(samples)) > 4
-                reason = "Routed I2S piezo data produced a varying baseband signal" if hit else "No varying routed I2S output"
+                measured = tones(out / f"{case}.wav")
+                expected = [(10000, 100), (4000, 20)] if case == "buzzer" else [(7000, 100), (4000, 200)]
+                hit = all(any(abs(hz - target) < 40 and abs(ms - duration) < 8
+                              for hz, ms in measured) for target, duration in expected)
+                reason = f"Routed I2S piezo bursts (Hz, ms) {measured[:6]}"
         elif case == "imu" and device == "stickc-plus2":
             samples = re.findall(r"ax:([-\d.]+)\s+ay:([-\d.]+)\s+az:([-\d.]+)", text)
             expected = ((0.5, -0.25, 1.0), (-0.75, 0.375, 0.25))
@@ -219,6 +267,12 @@ def check(device, out):
                 else:
                     hit = not current[1].startswith("24-01-01T") and first[1] != current[1]
             reason = "Guest RTC write changed the BCD calendar and virtual time advanced" if hit else "Expected BCD write/progression absent"
+        elif case == "system_m5stickc-2":
+            first = frame(case + "-first")
+            rtc = re.search(r"\brtc=(\S+)", diag)
+            hit = bool(rtc and rtc[1].startswith("24-01-01T00:00:04") and screen
+                       and screen["lit"] and difference(first, screen))
+            reason = "System function displayed the BM8563 clock and its time advanced"
         elif case == "wakeup":
             hit = text.count("boot:") > 1 and read(case + "-idle", "log").count("boot:") == 1
             if hit:
