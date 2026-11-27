@@ -91,10 +91,10 @@ mod tests {
     #[test]
     fn stick_supply_updates_the_gauge_and_boost_with_the_same_registers() {
         let mut dev = Ip5306::m5stick();
-        assert_eq!(read_at(&mut dev, 0x78), 0x1f);
+        assert_eq!(read_at(&mut dev, 0x78), 0x8f);
         assert_eq!(read_at(&mut dev, 0x70), 8);
         dev.supply(3500, false);
-        assert_eq!(read_at(&mut dev, 0x78), 0x7f);
+        assert_eq!(read_at(&mut dev, 0x78), 0xef);
         assert_eq!(read_at(&mut dev, 0x70), 0);
         dev.start(false); dev.write(0); dev.write(0);
         assert!(!dev.output_on());

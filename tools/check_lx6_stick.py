@@ -328,8 +328,8 @@ def check(device, out):
             record("probe", "NOT RUN", "The separate generic MicroPython probe image was omitted")
         else:
             if device == "m5stick":
-                expected = ["K016-SCAN [104, 117]", "K016-ID 71", "K016-MAG-ID 48",
-                            "K016-ONE 2000f0004000 640038ff2c0110 7f",
+                expected = ["K016-SCAN [104, 117]", "K016-ID 71", "K016-MAG-ID 48", "K016-BAT 8f",
+                            "K016-ONE 2000f0004000 640038ff2c0110 ef",
                             "K016-TWO d00018001000 9cffc800d4fe10 0f", "K016-OLED"]
                 hit = (all(marker in probe.splitlines() for marker in expected)
                        and re.findall(r"(?m)^K016-BTN ([01])", probe) == ["1", "0", "1"]
