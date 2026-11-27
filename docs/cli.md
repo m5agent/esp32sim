@@ -518,7 +518,8 @@ Cardputer and Cardputer-ADV have distinct keyboard and microphone wiring. The
 original profile uses the K132 GPIO matrix, `key LABEL [ms]` for timed key
 presses, `key-edge LABEL 0|1` for explicit state, `press g0 MS`, and `--sd`
 or `--sd-rw` for the SPI microSD. The Cardputer microphone takes `--mic-wav`
-on I2S0 with PDM clock GPIO43 and data GPIO46.
+on I2S0 with PDM clock GPIO43 and data GPIO46. Use `power-switch 0|1`
+for the battery switch and `vbus 0|1` for USB power.
 
 Dial supports `knob cw|ccw STEPS`, `press button MS`, and `touch X Y 0|1`.
 `rfid 04010203` presents a synthetic four-byte UID and `rfid none` removes

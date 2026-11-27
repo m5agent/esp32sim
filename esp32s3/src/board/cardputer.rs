@@ -53,13 +53,16 @@ pub struct Cardputer {
     cycle: VirtualCycle,
     edges: Vec<BoardEdge>,
     released: u64,
+    battery_switch: bool,
+    usb_power: bool,
 }
 
 impl Cardputer {
     pub fn new() -> Self {
         Self { display: cardputer_lcd(), keyboard: Keyboard::default(),
             rgb: Ws2812Chain::new(1), sd: None, sd_selected: false, ir: Default::default(),
-            ir_pwm: false, ir_drive: Some(false), cycle: 0, edges: Vec::new(), released: 0 }
+            ir_pwm: false, ir_drive: Some(false), cycle: 0, edges: Vec::new(), released: 0,
+            battery_switch: true, usb_power: false }
     }
 
     fn scan(&mut self) {
@@ -152,8 +155,23 @@ impl BoardModel for Cardputer {
         }
         if changed { self.scan(); }
     }
-    fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "key" | "key-edge") }
+    fn soc_powered(&self) -> Option<bool> { Some(self.battery_switch || self.usb_power) }
+    fn accepts_command(&self, verb: &str) -> bool {
+        matches!(verb, "key" | "key-edge" | "power-switch" | "vbus")
+    }
     fn board_command(&mut self, cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
+        if matches!(verb, "power-switch" | "vbus") {
+            let [value @ ("0" | "1")] = args else { return false };
+            let powered = self.soc_powered();
+            if verb == "power-switch" { self.battery_switch = *value == "1"; }
+            else { self.usb_power = *value == "1"; }
+            if powered == Some(true) && self.soc_powered() == Some(false) {
+                self.display.power_loss();
+                self.display.set_backlight(false);
+                if let Some(sd) = &mut self.sd { sd.deselect(); }
+            }
+            return true;
+        }
         let (name, down, release) = match (verb, args) {
             ("key-edge", [name, "0"]) => (*name, false, None),
             ("key-edge", [name, "1"]) => (*name, true, None),
