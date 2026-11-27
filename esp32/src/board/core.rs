@@ -305,7 +305,10 @@ impl BoardModel for Core {
         levels
     }
 
-    fn uses_gpio_waveform(&self) -> bool { true }
+    // Software LCD SPI and I2C consume ordered pad transitions synchronously.
+    // The SD card also consumes elapsed time, including its busy interval.
+    fn uses_gpio_waveform(&self) -> bool { self.sd.is_some() }
+    fn observes_gpio_pads(&self) -> bool { true }
     fn gpio_waveform_at(&mut self, cycle: VirtualCycle, routes: PinRoutes<'_>) {
         self.cycle = cycle;
         self.soft_spi(&routes);
