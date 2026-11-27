@@ -74,6 +74,7 @@ pub struct StopWatch {
     cycle: VirtualCycle,
     gpio_events: u64,
     vibration: BTreeSet<u16>,
+    lcd_selected: bool,
 }
 
 impl StopWatch {
@@ -111,7 +112,7 @@ impl StopWatch {
             (Es8311::ADDRESS, Rc::new(RefCell::new(codec.i2c_port()))),
         ]);
         Self { wiring, bus, codec, motion, imu, rtc, pm1_irq_high: true,
-            cycle: 0, gpio_events: 0, vibration: BTreeSet::new() }
+            cycle: 0, gpio_events: 0, vibration: BTreeSet::new(), lcd_selected: false }
     }
 }
 
@@ -138,13 +139,24 @@ impl BoardModel for StopWatch {
     fn observes_gpio_pads(&self) -> bool { true }
     fn gpio_waveform_at(&mut self, cycle: VirtualCycle, routes: PinRoutes<'_>) {
         self.bus.sync(cycle, &routes);
+        let selected = routes.software_pad_output(39) == Some(false);
+        if selected && !self.lcd_selected { self.wiring.panel.lock().unwrap().panel.select(); }
+        self.lcd_selected = selected;
     }
     fn uses_spi_pins(&self) -> bool { true }
     fn spi_transfer_pins(&mut self, host: u8, pins: SpiPins, tx: &[u8], rx_len: usize) -> Vec<u8> {
         if pins.sclk & (1 << 40) == 0 || pins.mosi & (1 << 41) == 0 || pins.cs & (1 << 39) == 0 {
             return vec![0xff; rx_len];
         }
-        self.spi_transfer(host, tx, rx_len)
+        if !self.lcd_selected { return self.spi_transfer(host, tx, rx_len); }
+        self.wiring.sync();
+        let mut state = self.wiring.panel.lock().unwrap();
+        if host == 2 && state.active {
+            let pixels = state.panel.pixels_written;
+            state.panel.selected_bytes(tx);
+            if state.panel.pixels_written != pixels { state.version += 1; }
+        }
+        vec![0xff; rx_len]
     }
     fn i2c_devices(&mut self) -> Vec<(u8, u8, Box<dyn I2cDevice>)> { self.bus.ports() }
     fn i2s_codecs(&self) -> Option<I2sCodecs> {
