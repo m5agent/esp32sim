@@ -161,7 +161,8 @@ if [[ -n ${S3B_STOCK_IMAGE:-} && ( -z ${S3B_CASES:-} || " $S3B_CASES " == *" sto
     case "$board" in
         cardputer) printf '%s\n' '5.0 press g0 150' >"$out/stock.txt" ;;
         sticks3) printf '%s\n' '5.0 press a 150' >"$out/stock.txt" ;;
-        dial|stopwatch) printf '%s\n' '5.0 touch 100 130 1' '5.4 touch 100 130 0' >"$out/stock.txt" ;;
+        dial) printf '%s\n' '5.0 press button 150' '6.0 touch 120 227 1' '6.4 touch 120 227 0' >"$out/stock.txt" ;;
+        stopwatch) printf '%s\n' '5.0 touch 234 440 1' '5.4 touch 234 440 0' '6.0 press a 150' >"$out/stock.txt" ;;
     esac
     printf 'attach\ncdc 3000\ncdc 3000 \003\ncdc 3000 print(10+7293)\n' >"$out/stock-usb.txt"
     shasum -a 256 "$out/stock.txt" "$out/stock-usb.txt" >>"$out/inputs.sha256"

@@ -2,14 +2,18 @@
 """Check small-display S3 boards against the captured Arduino and UIFlow2 evidence."""
 
 import argparse
+from array import array
 from collections import Counter
+import io
 from pathlib import Path
 import re
+import shlex
 import struct
+import sys
 import wave
 import zlib
 
-from check_cores3 import audio, changed, color_counts, fat32_files, require
+from check_cores3 import audio, changed, color_counts, fat32_files, frequency, require, rms
 
 CASES = {
     "cardputer": """battery button display ir_nec keyboard mic quickstart-display
@@ -61,7 +65,10 @@ def capture(out, board, label, screen=True):
     err = (out / f"{label}.err").read_text(errors="replace")
     serial = (out / f"{label}.log").read_text(errors="replace")
     require(status == "0", f"emulator exit {status}")
-    require("[emu] stop: Halted" in err and "emulated " in err, "virtual time budget did not complete")
+    command = shlex.split((out / f"{label}.command").read_text())
+    seconds = float(command[command.index("--max-seconds") + 1])
+    stop = re.search(r"\[emu\] stop: Halted .*?emulated (\d+\.\d+)s", err)
+    require(stop and float(stop[1]) == seconds, "virtual time budget did not complete")
     require(not FAULT.search(serial), "guest crashed")
     frame = frame_pixels(out / f"{label}.png", SIZE[board])
     if screen:
@@ -80,6 +87,16 @@ def sensors(out, board, case, frame):
     require(changed(first, idle) >= 5 and changed(frame, first) >= 5
             and changed(frame, idle) >= 5, "sensor inputs did not produce three distinct rendered states")
     return "idle and both sensor inputs produced distinct states"
+
+
+def wav_pcm(source):
+    with wave.open(source, "rb") as wav:
+        require((wav.getnchannels(), wav.getsampwidth()) == (1, 2), "expected mono PCM16")
+        rate = wav.getframerate()
+        pcm = array("h", wav.readframes(wav.getnframes()))
+    if sys.byteorder != "little":
+        pcm.byteswap()
+    return rate, pcm
 
 
 def power_case(board, case, serial, report):
@@ -195,9 +212,20 @@ def verify(out, board, case):
     if case == "speaker-sd-wav":
         require(re.search(r"\[sd-spi\] \d+ commands, [1-9]\d* blocks read, 0 blocks written", report),
                 "missing SPI SD reads")
-        samples, runs = audio(out / "speaker-sd-wav-output.wav")
-        require(samples / 48000 >= 11.9 and runs, "WAV playback is incomplete or silent")
-        return "12-second media played via SPI SD and I2S"
+        source = fat32_files(out / "sdcard.img", ("sample-12s.wav",))["sample-12s.wav"]
+        source_hz, source_pcm = wav_pcm(io.BytesIO(source))
+        rate, pcm = wav_pcm(str(out / "speaker-sd-wav-output.wav"))
+        require(rate == 48000 and len(pcm) >= 12 * rate and len(source_pcm) == 12 * source_hz,
+                "WAV playback is incomplete")
+        for second in range(12):
+            start, end = second + 0.25, second + 0.75
+            original = source_pcm[int(start * source_hz):int(end * source_hz)]
+            reproduced = pcm[int(start * rate):int(end * rate)]
+            expected = 440 if second % 2 == 0 else 660
+            require(abs(frequency(original, source_hz) - expected) < 5
+                    and abs(frequency(reproduced, rate) - expected) < 5 and rms(reproduced) > 100,
+                    f"wrong SD WAV playback during second {second}")
+        return "all 12 one-second 440/660 Hz intervals agree across SPI SD and I2S"
     if case in {"rtc", "rtc-1", "rtc-2"}:
         early, *_ = capture(out, board, case + "-early")
         require(changed(frame, early) >= 5, "calendar display did not advance")
