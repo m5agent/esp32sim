@@ -121,13 +121,14 @@ fn valid_id(id: [u32; 2]) -> bool { (id[0] >> 8) & 0xff == 0x5d }
 #[test]
 fn psram_spi_pinned_probe_eight_bytes_and_absence() {
     for profile in ["A2 2.0.17", "A30 3.0.7"] {
-        for size in [0, 0x400000] {
+        for (size, expected) in [(0, [u32::MAX; 2]), (2 << 20, [0x00025d0d, 0]),
+            (4 << 20, [0x00225d0d, 0]), (8 << 20, [0x00425d0d, 0])] {
             let mut r = Rig::new(size);
             r.w(0x34, 5);
             r.exit();
             let id = r.id();
             assert_eq!(valid_id(id), size != 0, "{profile}: KGD acceptance");
-            assert_eq!(id, if size == 0 { [u32::MAX; 2] } else { [0x00225d0d, 0] }, "{profile}: all eight ID bytes");
+            assert_eq!(id, expected, "{profile}: all eight ID bytes");
             assert_eq!(r.id(), id, "retry is deterministic");
         }
     }

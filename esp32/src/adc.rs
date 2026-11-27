@@ -54,6 +54,7 @@ pub struct ClassicAdc {
     pub analog: AnalogInputs,
     pub now_cycles: u64,
     touched: [bool; 10],
+    idle_touch_counts: [u32; 10],
     pub(crate) touch_timer: bool,
 }
 
@@ -80,7 +81,14 @@ impl ClassicAdc {
             analog: AnalogInputs::new(crate::periph::CPU_HZ),
             now_cycles: 0,
             touched: [false; 10],
+            idle_touch_counts: [1000; 10],
             touch_timer: false,
+        }
+    }
+
+    pub(crate) fn set_touch_idle(&mut self, pin: u8, count: u32) {
+        if let Some(channel) = TOUCH_PINS.iter().position(|&p| p == pin) {
+            self.idle_touch_counts[channel] = count;
         }
     }
 
@@ -213,7 +221,7 @@ impl ClassicAdc {
             } else if self.touched[channel] {
                 300
             } else {
-                1000
+                self.idle_touch_counts[channel]
             };
             let off = 0x70 + (register_channel as u32 / 2) * 4;
             let shift = if register_channel & 1 == 0 { 16 } else { 0 };

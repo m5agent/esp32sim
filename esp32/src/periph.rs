@@ -217,6 +217,7 @@ pub struct ClassicGpio {
     /// (GPIO matrix) stored as function 1 and classic function 1 as 2, as on S3/C3/C6.
     route_mux: RegRam,
     external: u64,
+    pub(crate) atom_sense_link: bool,
     signal_out: [bool; 256],
     signal_oe: [bool; 256],
     rtc_pads: u64,
@@ -239,6 +240,7 @@ impl ClassicGpio {
             io_mux: RegRam::new(),
             route_mux,
             external: 0,
+            atom_sense_link: false,
             signal_out: [false; 256],
             signal_oe: [false; 256],
             rtc_pads: 0,
@@ -327,9 +329,16 @@ impl ClassicGpio {
         };
         level ^= cfg & (1 << 9) != 0;
         oe ^= cfg & (1 << 11) != 0;
-        oe.then_some(level)
+        // IDF v5.5.4 esp32 gpio_reg.h GPIO_PINn_PAD_DRIVER bit 2.
+        // A high latch on an open-drain pad releases the wire, so the
+        // external level or weak IO_MUX pull decides what GPIO_IN reads.
+        let open_drain = self.gpio.pin[pin] & (1 << 2) != 0;
+        (oe && !(open_drain && level)).then_some(level)
     }
     fn pad_level(&self, pin: usize) -> bool {
+        // Atom Lite/Matrix sense GPIO34 is wired to GPIO23. An explicit
+        // host GPIO34 drive takes precedence for a disconnected-wire test.
+        let pin = if pin == 34 && self.atom_sense_link && self.external & (1 << 34) == 0 { 23 } else { pin };
         self.driven(pin)
             .unwrap_or(self.gpio.input & (1 << pin) != 0)
     }
@@ -1073,9 +1082,9 @@ impl Peripherals {
             // IDF v5.5.4 register/soc/dport_reg.h:947,965 (I2S clocks),
             // 982,1000 (resets). Cache on writes, not in the per-tick DMA loop.
             for (port, bit) in [4, 21].into_iter().enumerate() {
-                // Camera DMA must not survive a peripheral reset. Keep the
-                // established PCM reset behavior unchanged in this slice.
-                if self.dport.ram.read(0xc4) & (1 << bit) != 0 && self.i2s[port].camera_rx().is_some() {
+                // Clear transient camera and raw waveform capture state.
+                if self.dport.ram.read(0xc4) & (1 << bit) != 0
+                    && (self.i2s[port].camera_rx().is_some() || self.i2s[port].raw_pdm_mode()) {
                     self.i2s[port] = crate::i2s::ClassicI2s::for_port(port);
                 }
                 self.i2s[port].clock_enabled = self.dport.ram.read(0xc0) & (1 << bit) != 0
@@ -1103,6 +1112,7 @@ impl Peripherals {
                 && self.dport.ram.read(0xd0) & (1 << 2) == 0;
         }
         if matches!(addr >> 12, 0x3ff00 | 0x3ff56) { self.sync_rmt_outputs(); }
+        if matches!(addr >> 12, 0x3ff00 | 0x3ff44 | 0x3ff49 | 0x3ff56) { self.sync_rmt_inputs(); }
     }
     /// GPIO input edges reach the pulse counter; its interrupt is cached like any optional device's.
     #[cold]
@@ -1150,6 +1160,7 @@ impl Peripherals {
         irq_changed |= rmt_before != self.rmt.irq_sources();
         self.sync_ledc_outputs();
         self.sync_rmt_outputs();
+        self.sync_rmt_inputs();
         if !self.gpio.gpio.input_changes.is_empty() { irq_changed |= self.pcnt_edges(); }
         // Routed PWM/RMT outputs can also change GPIO edge/level interrupts.
         irq_changed | (gpio_before != self.gpio.raw_status())
@@ -1233,6 +1244,16 @@ impl Peripherals {
     fn sync_rmt_outputs(&mut self) {
         for (channel, level) in std::mem::take(&mut self.rmt.outputs) {
             self.gpio.set_output_signal(crate::rmt::SIGNAL0 + channel, level, true);
+        }
+    }
+    #[inline]
+    pub(crate) fn sync_rmt_inputs(&mut self) {
+        let mut mask = self.rmt.receiving();
+        while mask != 0 {
+            let channel = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+            let input = self.gpio.signal_input(crate::rmt::RX_SIGNAL0 + channel);
+            self.rmt.receive_level(channel, input);
         }
     }
     pub fn pwm_output(&self, pin: u32) -> Option<(f64, u32)> {

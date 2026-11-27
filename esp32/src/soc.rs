@@ -207,7 +207,12 @@ impl esp_soc::SocBus for SocBus {
             self.irq_dirty = true;
         }
     }
-    fn gpio_release_input(&mut self, pin: u8) { self.periph.gpio.release_input(pin); self.ext0_wake(); self.irq_dirty = true; }
+    fn gpio_release_input(&mut self, pin: u8) {
+        self.periph.gpio.release_input(pin);
+        self.periph.sync_rmt_inputs();
+        self.ext0_wake();
+        self.irq_dirty = true;
+    }
     fn gpio_state(&self, pin: u8) -> Option<esp_soc::GpioState> {
         // IDF v5.5.4 soc_caps.h:182 excludes 24 and 28–31. GPIO20 is only
         // bonded on PICO-V3-02, not the D0WD model; GPIO23 (VSPI MOSI) is valid.
@@ -224,6 +229,7 @@ impl esp_soc::SocBus for SocBus {
     }
     fn gpio_set_input(&mut self, pin: u8, level: bool) {
         self.periph.gpio.set_input(pin, level);
+        self.periph.sync_rmt_inputs();
         self.ext0_wake();
         self.irq_dirty = true;
         if let Some(ev) = &mut self.gpio_events {
@@ -265,7 +271,19 @@ impl esp_soc::SocBus for SocBus {
         self.periph.i2s.get_mut(port).map(|i| i.inner.rx_input())
     }
     fn audio(&self) -> (&[i16], u32) {
-        (&[], 44_100)
+        let port = self.board.i2s_codecs().map_or_else(
+            || usize::from(self.periph.i2s[1].inner.frames_out > self.periph.i2s[0].inner.frames_out),
+            |codec| codec.port);
+        let output = &self.periph.i2s[port].inner;
+        (&output.pcm, output.sample_rate)
+    }
+    fn attach_sd_card(&mut self, image: Box<dyn esp_periph::sdmmc::SdStore>, config: esp_periph::sdmmc::SdCardConfig) -> Result<String, String> {
+        if !self.board.has_spi_sd_slot() { return Err("this classic ESP32 board has no SPI SD socket".into()); }
+        if config.timed_bus { return Err("classic SPI SD does not decode the clock for timed transfers".into()); }
+        let card = esp_periph::sdmmc::SdCard::with_config(image, config)?;
+        let description = format!("{}, {} blocks in the board's SPI socket", card.describe(), card.blocks());
+        self.board.insert_spi_sd(card);
+        Ok(description)
     }
     fn irq_sources_of(&self, core: usize, line: u32) -> Vec<usize> {
         (0..periph::NUM_SOURCES)

@@ -1258,7 +1258,11 @@ impl<S: Soc> Machine<S> {
                                let text = std::fs::read_to_string(f).map_err(|e| format!("line {}: {}: {}", ln + 1, f, e))?;
                                let samples: Vec<f32> = text.split(|ch: char| ch == ',' || ch.is_whitespace()).filter(|s| !s.is_empty()).map(|s| s.parse::<f32>()).collect::<Result<_, _>>().map_err(|e| format!("line {}: {}: {}", ln + 1, f, e))?;
                                ev.push((c, ScriptAction::Analog(pn, esp_periph::AnalogSource::Wave { samples: std::sync::Arc::new(samples), rate_hz: rate, start_cycles: c }))); }
-                "uart0" | "uart1" => ev.push((c, ScriptAction::Uart(if cmd == "uart0" { 0 } else { 1 }, format!("{}\n", rest)))),
+                "uart0" | "uart1" | "uart0-cr" => {
+                    let port = usize::from(cmd == "uart1");
+                    let end = if cmd == "uart0-cr" { '\r' } else { '\n' };
+                    ev.push((c, ScriptAction::Uart(port, format!("{rest}{end}"))));
+                }
                 "knob" => {
                     let mut p = rest.split_whitespace(); let dir = p.next().unwrap_or("cw"); let n: usize = p.next().map(|x| x.parse().unwrap_or(1)).unwrap_or(1);
                     let (clk, dt) = board.encoder().ok_or_else(|| format!("line {}: this board has no encoder", ln + 1))?;

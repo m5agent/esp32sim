@@ -23,6 +23,7 @@ pub mod ina226;
 pub mod lm75b;
 pub mod mfrc522;
 pub mod ltr553;
+pub mod mpu6886;
 pub mod pi4ioe5v6408;
 pub mod rx8130;
 pub mod scscl;
@@ -47,4 +48,3 @@ pub use spi_bitbang::SpiBitBang;
 pub use ws2812::Ws2812Chain;
 
 pub mod lp5562;
-pub mod mpu6886;

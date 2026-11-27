@@ -164,7 +164,7 @@ fn sram_configuration_reset_loader_and_flash_separation() {
     assert_eq!(b.read32(0x3f400000), Ok(0x06070809));
     assert_eq!(b.read32(LOW), Ok(0x04030201));
     let ptr = b.psram.as_ptr();
-    for size in [1, 2 << 20, 8 << 20] {
+    for size in [1, 3 << 20, 16 << 20] {
         assert!(b.set_psram_size(size).is_err());
         assert_eq!(b.psram.as_ptr(), ptr);
         assert_eq!(b.read32(LOW), Ok(0x04030201));
@@ -182,4 +182,41 @@ fn sram_configuration_reset_loader_and_flash_separation() {
     assert!(b.psram.is_empty());
     let fresh = configured();
     assert!(fresh.psram.iter().all(|&v| v == 0));
+}
+
+#[test]
+fn sram_two_mib_ends_after_physical_page_63() {
+    let mut b = configured();
+    b.set_psram_size(2 << 20).unwrap();
+    map(&mut b, 0, 63);
+    map(&mut b, 1, 64);
+    b.write32(LOW + 32764, 0x12345678).unwrap();
+    assert_eq!(b.read32(LOW + 32764), Ok(0x12345678));
+    assert_eq!(b.read32(LOW + 32768), Err(Fault::Unmapped));
+    assert_eq!(b.write32(LOW + 32766, 0), Err(Fault::Unmapped));
+    assert_eq!(b.read32(LOW + 32764), Ok(0x12345678));
+}
+
+#[test]
+fn sram_eight_mib_remaps_himem_pages_without_aliasing_low_memory() {
+    let mut b = configured();
+    b.set_psram_size(8 << 20).unwrap();
+    let window = HIGH - 32768;
+    for (page, pattern) in [(127, 0xa5a5_007f), (128, 0xa5a5_0080), (255, 0xa5a5_00ff)] {
+        map(&mut b, 127, page);
+        b.write32(window + 32764, pattern).unwrap();
+    }
+    for (page, pattern) in [(255, 0xa5a5_00ff), (128, 0xa5a5_0080), (127, 0xa5a5_007f)] {
+        map(&mut b, 127, page);
+        assert_eq!(b.read32(window + 32764), Ok(pattern));
+        assert!(b.psram_readable(window + 32764, 4));
+    }
+    map(&mut b, 127, 256);
+    assert_eq!(b.read32(window), Err(Fault::Unmapped));
+    assert!(!b.psram_readable(window, 4));
+    b.reboot([0; 6]);
+    assert_eq!(b.psram.len(), 8 << 20);
+    enable_cache(&mut b);
+    map(&mut b, 127, 255);
+    assert_eq!(b.read32(window + 32764), Ok(0));
 }

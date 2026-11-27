@@ -423,6 +423,14 @@ impl SocBus {
     }
     pub fn attach_board_devices(&mut self) {
         self.irq_dirty = true;
+        if let Some(atom) = crate::board::atom::AtomKind::from_name(self.board.name()) {
+            // IDF v5.5.4 efuse_defs.h: PICO-D4 package 5; table bit 105
+            // is bit 9 of the third 32-bit block-0 data word.
+            let pkg = self.periph.efuse.ram.read(0x0c);
+            self.periph.efuse.ram.write(0x0c, (pkg & !(7 << 9)) | (5 << 9));
+            self.periph.gpio.atom_sense_link = atom.sense_link();
+            self.periph.adc.set_touch_idle(27, atom.touch_idle());
+        }
         if self.board.uses_gpio_waveform() {
             self.board.gpio_waveform_at(self.cycles, self.periph.gpio.routes());
         }
@@ -1077,6 +1085,57 @@ mod tests {
         b.write32(0x3ff4_8494, (1 << 19) | (4 << 23)).unwrap();
         b.write32(0x3ff4_8884, (1 << 11) | (1 << 12) | (1 << 13)).unwrap();
         assert_eq!(b.read32(0x3ff4_8870).unwrap() >> 16, 300);
+    }
+
+    #[test]
+    fn classic_spi_sd_socket_routes_cmd0_and_releases_miso_when_other_select_is_low() {
+        use esp_periph::sdmmc::{MemStore, SdCard, SpiSdCard};
+        use esp_soc::board::{BoardModel, SpiPins};
+        use esp_soc::SocBus as _;
+
+        struct Socket(Option<SpiSdCard>);
+        impl BoardModel for Socket {
+            fn name(&self) -> &'static str { "sd-test" }
+            fn uses_spi_pins(&self) -> bool { true }
+            fn has_spi_sd_slot(&self) -> bool { true }
+            fn insert_spi_sd(&mut self, card: SdCard) { self.0 = Some(SpiSdCard::new(card)); }
+            fn spi_transfer_pins(&mut self, _host: u8, pins: SpiPins, tx: &[u8], len: usize) -> Vec<u8> {
+                let route = SpiPins { sclk: 1 << 14, mosi: 1 << 13, miso: Some(12), cs: 1 << 15 };
+                // A second peripheral on GPIO5 owns MISO while it is selected.
+                let pins = SpiPins { miso: pins.miso.filter(|_| pins.cs & (1 << 5) == 0), ..pins };
+                self.0.as_mut().and_then(|card| pins.transfer_sd(route, card, tx, len, 0))
+                    .unwrap_or_else(|| vec![0xff; len])
+            }
+        }
+
+        let card = || Box::new(MemStore(vec![0; 512 << 10]));
+        let mut b = SocBus::new(0, [0; 6]);
+        assert!(b.attach_sd_card(card(), Default::default()).is_err());
+        b.board = Box::new(Socket(None));
+        b.attach_board_devices();
+        b.attach_sd_card(card(), Default::default()).unwrap();
+        for off in [0x34, 0x38, 0x30] { b.write32(0x3ff4_9000 + off, (1 << 12) | (1 << 9)).unwrap(); }
+        // HSPI direct SCLK/MOSI/MISO routes. GPIO15 is the software CS.
+        b.write32(0x3ff4_903c, 2 << 12).unwrap();
+        b.write32(0x3ff4_906c, 2 << 12).unwrap();
+        b.write32(0x3ff4_4024, (1 << 15) | (1 << 5)).unwrap();
+        b.write32(0x3ff4_4008, 1 << 5).unwrap();
+        b.write32(SPI2 + 0x34, 7).unwrap(); // no hardware CS
+        b.write32(SPI2 + 0x1c, (1 << 28) | (1 << 27) | 1).unwrap();
+        b.write32(SPI2 + 0x28, 63).unwrap();
+        b.write32(SPI2 + 0x2c, 63).unwrap();
+
+        let cmd0 = |b: &mut SocBus| -> u32 {
+            b.write32(SPI2 + 0x80, 0x0000_0040).unwrap();
+            b.write32(SPI2 + 0x84, 0xffff_9500).unwrap();
+            b.write32(SPI2, 1 << 18).unwrap();
+            b.read32(SPI2 + 0x84).unwrap()
+        };
+        assert_ne!(cmd0(&mut b), u32::MAX, "selected card returns idle response");
+        b.write32(0x3ff4_400c, 1 << 5).unwrap();
+        assert_eq!(cmd0(&mut b), u32::MAX, "other CS masks the SD return data");
+        b.write32(0x3ff4_4008, (1 << 5) | (1 << 15)).unwrap();
+        assert_eq!(cmd0(&mut b), u32::MAX, "unselected card leaves MISO high");
     }
 
     #[test]

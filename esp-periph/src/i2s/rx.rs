@@ -110,6 +110,16 @@ impl I2s {
         };
         Self::clock_rate(self.ram.read(0x30), self.ram.read(0x38), conf1, frame_bits)
     }
+
+    /// Rate of pairs of 16-bit raw PDM words. BCK samples alternating slots.
+    pub fn raw_pdm_word_rate(&self) -> Option<u32> {
+        let conf1 = self.ram.read(0x28);
+        if self.v2 || !self.rx_running() || self.rx_slave()
+            || self.rx_conf & (3 << 20) != 1 << 20 || (conf1 >> 13) & 31 != 15 {
+            return None;
+        }
+        Self::clock_rate(self.ram.read(0x30), self.ram.read(0x38), conf1, 32)
+    }
     /// C6's RX clock lives in PCR instead of the I2S block.
     pub fn rx_pcr_clock(&mut self, conf: u32, div: u32) {
         self.ram.write(

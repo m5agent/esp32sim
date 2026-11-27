@@ -28,10 +28,10 @@ fn classic_psram_cli_reaches_guest_allocator() {
 
 #[test]
 fn classic_psram_cli_rejects_unsupported_sizes_without_panicking() {
-    for size in ["1", "2", "8", "18446744073709551615"] {
+    for size in ["1", "3", "16", "18446744073709551615"] {
         let output = Command::new(env!("CARGO_BIN_EXE_esp32sim"))
             .args(["--chip", "esp32", "--psram-mb", size]).output().unwrap();
         assert_eq!(output.status.code(), Some(2));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("classic ESP32 supports only 0 or 4 MiB"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("classic ESP32 PSRAM supports only 0, 2, 4 or 8 MiB"));
     }
 }

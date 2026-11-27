@@ -6,6 +6,7 @@
 //! - `esp32dev-loopback` — the SPI loopback fixture in `crate::spi`
 pub mod tdisplay;
 pub mod aithinker;
+pub(crate) mod atom;
 pub mod ulanzi;
 pub mod cyd;
 
@@ -18,7 +19,8 @@ pub fn make_board(name: &str) -> Option<esp_soc::Board> {
         "ai-thinker-cam" | "esp32cam" => Some(Box::new(aithinker::AiThinkerCam::default())),
         "cyd" | "esp32-2432s028" => Some(Box::new(cyd::Cyd::new())),
         "ulanzi-tc001" | "tc001" => Some(Box::new(ulanzi::UlanziTc001::new())),
-        _ => crate::spi::make_board(name),
+        _ => atom::AtomKind::from_name(name).map(|kind| Box::new(atom::Atom::new(kind)) as esp_soc::Board)
+            .or_else(|| crate::spi::make_board(name)),
     }
 }
 

@@ -1,6 +1,9 @@
 //! Classic external data RAM translation and synchronous write-through cache contract.
 //! ESP-IDF v4.4.7 and v5.1.4 components/esp_hw_support/port/esp32/cache_sram_mmu.c:
 //! PID 0/1 use table index 1152, 32 KiB pages (shift 15), at 0x3f800000.
+//! Eight physical page bits address up to 8 MiB behind the 4 MiB window.
+//! ESP-IDF v5.4.2 components/esp_psram/esp32/esp_himem.c set_bank() remaps
+//! reserved slots in both tables to access the ESP-PSRAM64 above that window.
 //! Matched live PRO/APP tables in normal mode are an emulator qualification
 //! restriction, not silicon behavior. Low/high mode shares PRO-low/APP-high
 //! mappings between CPUs (ESP32 TRM v5.8 §4.3.2.2, tables 4.3-16/18).
@@ -77,7 +80,7 @@ impl SocBus {
         else { return false };
         if !(LOW..HIGH).contains(&address) || !(LOW..HIGH).contains(&last) { return false; }
         // What psram_offsets checks is the same for every byte of a 32 KiB page, and the
-        // installed PSRAM is whole pages (0 or 4 MiB), so one byte of each page stands for it.
+        // installed PSRAM is whole pages, so one byte of each page stands for it.
         let mut page = address;
         loop {
             if self.psram_offsets::<1>(page).is_err() { return false; }
@@ -117,7 +120,9 @@ impl SocBus {
         for table in &mut self.mmu { table[SRAM_SLOT..SRAM_SLOT + 128].fill(0x100); }
     }
     pub(crate) fn configure_psram(&mut self, bytes: usize) -> Result<(), String> {
-        if bytes != 0 && bytes != (4 << 20) { return Err("classic PSRAM supports 0 or 4194304 bytes".into()); }
+        if !matches!(bytes, 0 | 0x20_0000 | 0x40_0000 | 0x80_0000) {
+            return Err("classic ESP32 PSRAM supports only 0, 2, 4 or 8 MiB".into());
+        }
         // Stopped-machine boundary only. Classic has no fast_mem or published backing pointer.
         self.reset_psram();
         self.psram = vec![0; bytes];

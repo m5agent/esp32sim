@@ -44,7 +44,7 @@ pub extern "C" fn esp32sim_test_classic_psram() -> u32 {
             map(b, 0, 0);
             assert_eq!(b.read32(LOW), Err(Fault::Unmapped), "unsupported size leaves PSRAM absent");
             assert_eq!(b.write32(LOW, 0x12345678), Err(Fault::Unmapped));
-            assert!(b.set_psram_size((size as usize) << 20).is_err(), "native setter stays strict");
+            assert!(b.set_psram_size(1 << 20).is_err(), "unsupported backing sizes still fail");
         }
         // SAFETY: p is live, uniquely owned, and not subsequently used.
         unsafe { esp32sim_delete(p) };

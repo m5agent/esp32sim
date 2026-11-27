@@ -727,7 +727,7 @@ fn setup_esp32(o: &Opts) -> esp32::Machine {
     m.bus.set_flash_size(o.flash_mb.unwrap_or(4) << 20);
     if !o.debug.is_empty() { let mut f = esp_soc::DebugFlags::from_env(); for d in &o.debug { f.parse(d); } m.set_debug(&f); }
     let board = if o.board == "atech14" { "none" } else { &o.board };
-    m.bus.board = esp32::board::make_board(board).unwrap_or_else(|| usage_error(&format!("unknown classic ESP32 board '{board}' (none, bare, esp32dev, ttgo-tdisplay, cyd, ai-thinker-cam, ulanzi-tc001)")));
+    m.bus.board = esp32::board::make_board(board).unwrap_or_else(|| usage_error(&format!("unknown classic ESP32 board '{board}' (none, bare, esp32dev, ttgo-tdisplay, cyd, ai-thinker-cam, ulanzi-tc001, m5stack-atom-lite, m5stack-atom-matrix, m5stack-atom-matrix-v11, m5stack-atomu, m5stack-atom-echo)")));
     m.bus.attach_board_devices();
     set_camera_image(&mut m.bus.board, o.cam_image.as_deref());
     if !o.wifi.is_empty() {
@@ -737,8 +737,8 @@ fn setup_esp32(o: &Opts) -> esp32::Machine {
     attach_wifi_station(&mut m.bus, o);
     attach_nearby_networks(&mut m.bus.periph.wifi.link, o);
     if let Some(mb) = o.psram_mb {
-        if !matches!(mb, 0 | 4) { usage_error("--psram-mb: classic ESP32 supports only 0 or 4 MiB"); }
-        m.bus.set_psram_size(mb << 20).unwrap_or_else(|e| usage_error(&e));
+        let bytes = mb.saturating_mul(1 << 20);
+        m.bus.set_psram_size(bytes).unwrap_or_else(|e| usage_error(&format!("--psram-mb: {e}")));
     }
     for (flag, on) in [("--flash-octal", o.flash_octal), ("--efuse-regs", o.efuse_regs.is_some()), ("--regs-init", o.regs_init.is_some()), ("--regstat", o.regstat.is_some())] {
         if on { eprintln!("{} is not available on the classic ESP32", flag); std::process::exit(2); }
