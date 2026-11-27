@@ -12,8 +12,10 @@ import subprocess
 import sys
 import wave
 
+# M5Burner supplies the same CAM image for CAM and M12. It reports CAM
+# in M5.getBoard() for both sensors. The Arduino stream checks sensor geometry.
 BOARD_ID = {"atoms3-lite": 137, "atoms3": 11, "atoms3r": 18, "atoms3u": 138,
-            "atom-echos3r": 145, "atoms3r-cam": 144, "atoms3r-m12": 143}
+            "atom-echos3r": 145, "atoms3r-cam": 144, "atoms3r-m12": 144}
 
 
 def rgb(path, size):
