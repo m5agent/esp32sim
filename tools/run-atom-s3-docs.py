@@ -40,7 +40,7 @@ def camera_input(dst, color, jpeg):
 def stream_camera(proc, port, path):
     # Read bounded multipart HTTP bytes over the guest's normal Wi-Fi route.
     # The forwarded SYN can race guest DHCP/network setup, so retry until ready.
-    until = time.monotonic() + 36
+    until = time.monotonic() + 115
     while proc.poll() is None and time.monotonic() < until:
         data = bytearray()
         try:
@@ -69,7 +69,7 @@ def run(args, label, firmware, seconds, options=(), script="", stream_port=None)
         options = [*options, "--script", str(action)]
     cmd = [str(out / "esp32sim"), "--board", "m5stack-" + args.variant, "--boot", "rom",
            "--rom", str(args.rom), "--flash-image", str(firmware), "--console", "both",
-           "--no-dump", "--timeout", "110", "--max-seconds", str(seconds),
+           "--no-dump", "--timeout", "180", "--max-seconds", str(seconds),
            "--tft-png", str(out / (label + ".png")), "--wav", str(out / (label + ".wav")),
            *options]
     with (out / (label + ".log")).open("wb") as log, (out / (label + ".err")).open("wb") as err:
@@ -77,7 +77,7 @@ def run(args, label, firmware, seconds, options=(), script="", stream_port=None)
             if stream_port is not None:
                 stream_camera(proc, stream_port, out / (label + ".http"))
             try:
-                status = proc.wait(timeout=120)
+                status = proc.wait(timeout=190)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
@@ -115,7 +115,7 @@ def main():
         'cdc 1000 import M5; print("ATOM_BOARD", M5.getBoard())\n'
         f"cdc 6000 exec({json.dumps(poll_button)})\n"
     )
-    button = "3 press btn 200\n4 press btn 200\n"
+    button = "1.9 press btn 200\n2.7 press btn 200\n"
     tasks = []
     for case in CASES[args.board]:
         fw = args.firmware / args.board / case / "sketch.merged.bin"
@@ -139,18 +139,19 @@ def main():
                 opts = ("--i2s-tone", f"{port}:{tone[0]}:{tone[1]}") if case == "mic" and tone else ()
                 tasks.append((f"{case}-{suffix}", fw, 10, opts, script))
         else:
-            tasks.append((case, fw, 7, (), button if case in ("button", "rgb_led", "speaker") else ""))
+            seconds = 3.5 if case == "button" else 7
+            tasks.append((case, fw, seconds, (), button if case in ("button", "rgb_led", "speaker") else ""))
             if case == "button":
-                tasks.append(("button-still", fw, 7, (), ""))
+                tasks.append(("button-still", fw, seconds, (), ""))
     tasks.append(("stock", args.stock, 16, ("--usb-host", str(stock)),
                   "7.8 press btn 1000\n9.4 press btn 1000\n"))
     with ThreadPoolExecutor(3) as workers:
         runs = [workers.submit(run, args, *task) for task in tasks]
         for result in runs:
             result.result()
-    subprocess.run(["python3", str(Path(__file__).with_name("check-atom-s3-docs.py")),
-                    str(args.out)], check=True)
+    return subprocess.run(["python3", str(Path(__file__).with_name("check-atom-s3-docs.py")),
+                           str(args.out)]).returncode
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
