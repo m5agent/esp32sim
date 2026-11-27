@@ -212,7 +212,12 @@ impl esp_soc::SocBus for SocBus {
             self.irq_dirty = true;
         }
     }
-    fn gpio_release_input(&mut self, pin: u8) { self.periph.gpio.release_input(pin); self.ext0_wake(); self.irq_dirty = true; }
+    fn gpio_release_input(&mut self, pin: u8) {
+        self.periph.gpio.release_input(pin);
+        self.periph.sync_rmt_inputs();
+        self.ext0_wake();
+        self.irq_dirty = true;
+    }
     fn gpio_state(&self, pin: u8) -> Option<esp_soc::GpioState> {
         // IDF v5.5.4 soc_caps.h:182 excludes 24 and 28–31. GPIO20 is only
         // bonded on PICO-V3-02, not the D0WD model; GPIO23 (VSPI MOSI) is valid.
@@ -229,6 +234,7 @@ impl esp_soc::SocBus for SocBus {
     }
     fn gpio_set_input(&mut self, pin: u8, level: bool) {
         self.periph.gpio.set_input(pin, level);
+        self.periph.sync_rmt_inputs();
         self.ext0_wake();
         self.irq_dirty = true;
         if let Some(ev) = &mut self.gpio_events {

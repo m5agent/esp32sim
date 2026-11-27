@@ -1085,9 +1085,9 @@ impl Peripherals {
             // IDF v5.5.4 register/soc/dport_reg.h:947,965 (I2S clocks),
             // 982,1000 (resets). Cache on writes, not in the per-tick DMA loop.
             for (port, bit) in [4, 21].into_iter().enumerate() {
-                // Camera DMA must not survive a peripheral reset. Keep the
-                // established PCM reset behavior unchanged in this slice.
-                if self.dport.ram.read(0xc4) & (1 << bit) != 0 && self.i2s[port].camera_rx().is_some() {
+                // Clear transient camera and raw waveform capture state.
+                if self.dport.ram.read(0xc4) & (1 << bit) != 0
+                    && (self.i2s[port].camera_rx().is_some() || self.i2s[port].raw_pdm_mode()) {
                     self.i2s[port] = crate::i2s::ClassicI2s::for_port(port);
                 }
                 self.i2s[port].clock_enabled = self.dport.ram.read(0xc0) & (1 << bit) != 0
@@ -1115,6 +1115,7 @@ impl Peripherals {
                 && self.dport.ram.read(0xd0) & (1 << 2) == 0;
         }
         if matches!(addr >> 12, 0x3ff00 | 0x3ff56) { self.sync_rmt_outputs(); }
+        if matches!(addr >> 12, 0x3ff00 | 0x3ff44 | 0x3ff49 | 0x3ff56) { self.sync_rmt_inputs(); }
     }
     /// GPIO input edges reach the pulse counter; its interrupt is cached like any optional device's.
     #[cold]
@@ -1170,6 +1171,7 @@ impl Peripherals {
         irq_changed |= rmt_before != self.rmt.irq_sources();
         self.sync_ledc_outputs();
         self.sync_rmt_outputs();
+        self.sync_rmt_inputs();
         if !self.gpio.gpio.input_changes.is_empty() { irq_changed |= self.pcnt_edges(); }
         // Routed PWM/RMT outputs can also change GPIO edge/level interrupts.
         irq_changed | (gpio_before != self.gpio.raw_status())
@@ -1253,6 +1255,16 @@ impl Peripherals {
     fn sync_rmt_outputs(&mut self) {
         for (channel, level) in std::mem::take(&mut self.rmt.outputs) {
             self.gpio.set_output_signal(crate::rmt::SIGNAL0 + channel, level, true);
+        }
+    }
+    #[inline]
+    pub(crate) fn sync_rmt_inputs(&mut self) {
+        let mut mask = self.rmt.receiving();
+        while mask != 0 {
+            let channel = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+            let input = self.gpio.signal_input(crate::rmt::RX_SIGNAL0 + channel);
+            self.rmt.receive_level(channel, input);
         }
     }
     pub fn pwm_output(&self, pin: u32) -> Option<(f64, u32)> {
