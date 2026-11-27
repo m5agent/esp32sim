@@ -167,9 +167,10 @@ def stack(root, case, serial, log, frame):
         _, _, alternative = capture(root, case + "-alternate", (320, 240))
         _, _, control = capture(root, case + "-control", (320, 240))
         text(frame, (0, 16, 230, 33), "Was clicked", "24c65d9346bc3e1707aa4271")
-        require(changed(alternative, control) > 100 and changed(alternative, frame) > 100
-                and not any(region(control, 0, 16, 230, 45)), "head-pad gesture and idle controls differ insufficiently")
-        return None
+        text(alternative, (0, 16, 260, 33), "Was swiped forward", "6bc4d95772b8f8e820c0f383")
+        text(alternative, (0, 32, 230, 47), "Was clicked after swipe", "44735f8e248080e5f199a403")
+        require(not any(region(control, 0, 16, 230, 47)), "idle head pads generated a gesture")
+        return "SI12T click and forward swipe rendered, with idle control"
     if case == "rtc":
         require("state Associated" in log and re.search(r"[1-9]\d* NTP answers", log),
                 "virtual AP association or NTP exchange missing")
@@ -277,7 +278,14 @@ def check_matrix(board, root, cases, selected=None):
                     reason = "stock UIFlow2 home visible after input and USB CDC REPL round-tripped"
                 else:
                     reason = (plc if board == "stamplc" else stack)(root, case, serial, log, frame)
-                result = ("PASS", reason) if reason else ("NOT RUN", "guest executed, behavioral assertion pending")
+                nfc_gaps = {
+                    "nfc-2": "sketch awaits BtnA, outside the modeled FT6336 touch range",
+                    "nfc-3": "guest booted, virtual reader and passive-target exchange unavailable",
+                    "nfc-4": "guest booted, authenticated MIFARE Classic read/write unavailable",
+                    "nfc-5": "guest booted, writable NDEF tag unavailable",
+                    "nfc-6": "guest booted, authenticated MIFARE Classic value blocks unavailable",
+                }
+                result = ("PASS", reason) if reason else ("NOT RUN", nfc_gaps.get(case, "behavioral assertion pending"))
             except (OSError, KeyError, ValueError, struct.error, zlib.error) as error:
                 result = ("FAIL", str(error))
         verdicts[case] = {"status": result[0], "reason": result[1], "expected": row.get("expected")}
