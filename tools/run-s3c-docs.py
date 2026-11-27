@@ -53,11 +53,12 @@ ALTERNATE = {
     "imu": "3 imu -0.75 0.30 0.25 -100 80 -30\n",
     "ltr553": "3 als 4100 270 1456\n",
     "touch": "3 touch 240 40 1\n3.4 touch 240 40 0\n",
-    "touchsensor": "3 head-touch 1 3\n4 head-touch 1 0\n",
+    "touchsensor": ("3 head-touch 0 1\n3.10 head-touch 1 2\n3.22 head-touch 2 3\n"
+                    "3.4 head-touch 0 0\n3.4 head-touch 1 0\n3.4 head-touch 2 0\n"),
 }
 DURATIONS = {"display": 1.5, "servo-1": 6, "servo-2": 7, "imu": 5, "battery": 5,
              "camera": 5, "ltr553": 5, "touch": 5, "touchsensor": 5, "can": 5,
-             "sensor": 6, "rtc": 8, "pic": 6, "sdcard": 6, "modbus-1": 10,
+             "sensor": 6, "rtc": 11, "pic": 6, "sdcard": 6, "modbus-1": 10,
              "modbus-2": 12, "wakeup": 13, "wav": 16}
 CONTROL_CASES = {
     "stamplc": {"button", "input_output-2", "modbus-1", "sd_card", "sensor"},

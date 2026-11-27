@@ -11,7 +11,7 @@ import re
 import struct
 import zlib
 
-from check_cores3 import audio, bmp_mirrored_rgb565, changed, fat32_files, require, text
+from check_cores3 import audio, bmp_mirrored_rgb565, changed, fat32_files, region, require, text
 
 
 def png(path, width, height):
@@ -155,6 +155,21 @@ def stack(root, case, serial, log, frame):
         text(frame, (85, 75, 235, 108), "Btn PWR in red", "41f349b8c87d6799dcadc65e")
         require(changed(frame, control) > 100, "no change after pressing PMIC button")
         return "AXP2101 PMIC key produces rendered Btn PWR"
+    if case == "touch":
+        _, _, alternative = capture(root, case + "-alternate", (320, 240))
+        _, _, control = capture(root, case + "-control", (320, 240))
+        text(frame, (65, 180, 260, 215), "X:100 / Y:120", "f539d8e80d4187463654a36c")
+        text(alternative, (65, 180, 260, 215), "X:240 / Y:40", "05121e4afe69ccf4d50de01e")
+        text(frame, (0, 70, 320, 105), "none after release", "5fcf5edfb604f4b013c4106c")
+        require(not any(region(control, 65, 180, 260, 215)), "coordinate text present in no-touch control")
+        return "two touchscreen positions delivered through FT6336 and released"
+    if case == "touchsensor":
+        _, _, alternative = capture(root, case + "-alternate", (320, 240))
+        _, _, control = capture(root, case + "-control", (320, 240))
+        text(frame, (0, 16, 230, 33), "Was clicked", "24c65d9346bc3e1707aa4271")
+        require(changed(alternative, control) > 100 and changed(alternative, frame) > 100
+                and not any(region(control, 0, 16, 230, 45)), "head-pad gesture and idle controls differ insufficiently")
+        return None
     if case == "rtc":
         require("state Associated" in log and re.search(r"[1-9]\d* NTP answers", log),
                 "virtual AP association or NTP exchange missing")
@@ -247,9 +262,15 @@ def check_matrix(board, root, cases, selected=None):
             try:
                 serial, log, frame = capture(root, case, size)
                 if case == "stock":
-                    require(len(modes(frame)) > 1, "stock framebuffer remained blank")
-                    require(re.search(r"(?m)^S3C_REPL_OK\r?$", serial), "stock REPL marker missing")
-                    reason = "stock displayed a frame and executed the REPL probe"
+                    if board == "stamplc":
+                        logo = b"".join(frame[720*y:720*y+234] for y in range(16))
+                        require(sha256(logo).hexdigest().startswith("caa452d567e6e90bdbc13e2e"),
+                                "stock UIFlow2 StamPLC home header missing")
+                    else:
+                        text(frame, (0, 0, 99, 22), "UIFlow2 home header", "7ad4bb4fc1c4581ac66271c8")
+                    require(re.search(r"(?m)^S3C_REPL_OK\r?$", serial) and "script done" in log,
+                            "stock USB-OTG CDC-ACM REPL marker missing")
+                    reason = "stock UIFlow2 home visible after input and USB CDC REPL round-tripped"
                 else:
                     reason = (plc if board == "stamplc" else stack)(root, case, serial, log, frame)
                 result = ("PASS", reason) if reason else ("NOT RUN", "guest executed, behavioral assertion pending")
