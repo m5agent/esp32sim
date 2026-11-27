@@ -49,3 +49,7 @@ read/write and card emulation, complete stock input and REPL, SD power
 gating and partial-waveform cases outside the supported display drivers.
 Provisional Arduino board selections remain visible in the individual
 build receipts.
+
+The ESP Online Tester board and I80 implementations at `81bc93c0` served
+as comparative references. The pin routes, refresh commands and waveform
+sequences here follow the pinned M5GFX board descriptions and drivers.

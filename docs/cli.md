@@ -205,6 +205,11 @@ One action per line, `<seconds> <cmd> [args]`; buttons/encoder are active low.
 real-time keep-up (push gaps, lag, audio delivered); `hw/wsaudio.py [port] [seconds]` listens to the
 UI's audio stream and reports sample counts/peak (how to check sound without listening).
 
+### M5Stack e-paper boards
+
+See [M5Stack S3 e-paper boards](m5-paper.md) for board names, memory
+profiles, timed frame publication and the PaperMono loopback option.
+
 ### CoreS3 power inputs
 
 On `m5stack-cores3`, `pwrkey <ms>` holds the AXP2101 power key for the specified
