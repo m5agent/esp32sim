@@ -423,6 +423,14 @@ impl SocBus {
     }
     pub fn attach_board_devices(&mut self) {
         self.irq_dirty = true;
+        if let Some(atom) = crate::board::atom::AtomKind::from_name(self.board.name()) {
+            // IDF v5.5.4 efuse_defs.h: PICO-D4 package 5; table bit 105
+            // is bit 9 of the third 32-bit block-0 data word.
+            let pkg = self.periph.efuse.ram.read(0x0c);
+            self.periph.efuse.ram.write(0x0c, (pkg & !(7 << 9)) | (5 << 9));
+            self.periph.gpio.atom_sense_link = atom.sense_link();
+            self.periph.adc.set_touch_idle(27, atom.touch_idle());
+        }
         if self.board.uses_gpio_waveform() {
             self.board.gpio_waveform_at(self.cycles, self.periph.gpio.routes());
         }

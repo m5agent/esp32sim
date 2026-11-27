@@ -1,4 +1,4 @@
-//! Classic I2S RX register adapter and native descriptor DMA.
+//! Classic I2S register adapter and native descriptor DMA.
 //! ESP-IDF v5.5.4 components/soc/esp32/register/soc/i2s_reg.h: CONF bits 21-128,
 //! interrupt _S defines 142-184, RXEOF_NUM 676-682, CONF_CHAN 692-695, INLINK_ADDR 763-768,
 //! LC_CONF 856-868, clocks 1340-1390. include/soc/gpio_sig_map.h:69-72,299,309-312,343
@@ -36,6 +36,7 @@ pub struct ClassicI2s {
     pub inner: I2s,
     ram: RegRam,
     dma: esp_periph::gdma::GdmaInCh,
+    out: esp_periph::gdma::GdmaOutCh,
     pub(crate) clock_enabled: bool,
     #[cfg(test)]
     pub(crate) step_calls: u64,
@@ -53,7 +54,9 @@ impl ClassicI2s {
         ram.write(8, CONF_RESET);
         ram.write(0x24, 64);
         ram.write(0x60, LC_CONF_RESET);
-        Self { inner: I2s::new(CPU_HZ), ram, dma: esp_periph::gdma::GdmaInCh { conf1: LC_CONF_RESET & CHECK_OWNER, ..Default::default() }, clock_enabled: false,
+        ram.write(0xb4, 1 << 24);
+        Self { inner: I2s::new(CPU_HZ), ram, dma: esp_periph::gdma::GdmaInCh { conf1: LC_CONF_RESET & CHECK_OWNER, ..Default::default() },
+            out: Default::default(), clock_enabled: false,
             #[cfg(test)] step_calls: 0, camera_capable: port == 0, camera: None, camera_mode: false }
     }
     /// RXEOF_NUM (0x24) in words: IDF v5.5.4 hal/esp32/include/hal/i2s_ll.h:639-643.
@@ -91,6 +94,7 @@ impl ClassicI2s {
             // Camera start/reset state is decoded above, not mirrored as audio RX_START.
             Device::write(&mut self.inner, 0x30, 0);
             Device::write(&mut self.inner, 0x20, if camera.reset { 3 } else { 1 });
+            Device::write(&mut self.inner, 0x24, 0);
             return;
         }
         let clock = self.ram.read(0xac);
@@ -110,18 +114,43 @@ impl ClassicI2s {
         let msb_right = conf & (1 << 17) != 0;
         let mask = match channel { 1 | 2 => if (channel == 1) == msb_right { 2 } else { 1 }, _ => 3 };
         Device::write(&mut self.inner, 0x50, (1 << 16) | mask);
+        // IDF v5.5.4 esp32 i2s_reg.h I2S_PDM_CONF: RX_PDM_EN[1],
+        // PDM2PCM_CONV_EN[3], RX_PDM_SINC_DSR_16_EN[24]. The converted
+        // PCM source is sampled at BCK / 64 or BCK / 128.
+        let pdm = self.ram.read(0xb4);
+        let pdm_flags = ((pdm & 2) << 19) | ((pdm & 8) << 18) | ((pdm & (1 << 24)) >> 2);
         // Shared RX_CONF bit 0 RX_RESET <- CONF bit 1; bit 1 RX_FIFO_RESET <- CONF bit 3 (CONF
         // bit 2 is TX_FIFO_RESET); bit 2 RX_START <- bit 5; bit 3 RX_SLAVE_MOD <- bit 7.
         // Classic keeps a 24-bit sample in a 32-bit word (i2s_ll.h:676-680 sets RX_FIFO_MOD 2;
         // esp_driver_i2s/i2s_common.c:447-448 allocates 4 bytes), so 24-bit RX sets RX_24_FILL_EN.
         let fill24 = if bits == 24 { 1 << 16 } else { 0 };
-        Device::write(&mut self.inner, 0x20, ((conf >> 1) & 1) | ((conf >> 2) & 2) | ((conf >> 3) & 4) | ((conf & (1 << 7)) >> 4) | fill24);
+        Device::write(&mut self.inner, 0x20, ((conf >> 1) & 1) | ((conf >> 2) & 2) | ((conf >> 3) & 4) | ((conf & (1 << 7)) >> 4) | fill24 | pdm_flags);
+        self.sync_tx(conf, clock, sample, div);
+    }
+    fn sync_tx(&mut self, conf: u32, clock: u32, sample: u32, div: u32) {
+        let bits = (sample >> 12) & 63;
+        let bck = sample & 63;
+        let clock_on = clock & (1 << 21) == 0 && bck != 0 && [16, 24, 32].contains(&bits);
+        let supported = clock_on && conf & ((1 << 6) | 5) == 0 && self.ram.read(0xb4) & 1 == 0;
+        // Classic FIFO packs 24-bit samples into 32 bits. BCK still shifts
+        // bits_mod bits per slot, so keep the wire width independent.
+        let packed_bits = if bits == 24 { 32 } else { bits };
+        let width = bits.saturating_sub(1) << 18;
+        let cfg = (bck.saturating_sub(1) << 7) | (packed_bits.saturating_sub(1) << 13) | width;
+        let channels = self.ram.read(0x2c) & 7;
+        Device::write(&mut self.inner, 0x34, (clock & 255) | (2 << 27) | if supported { 1 << 26 } else { 0 });
+        Device::write(&mut self.inner, 0x3c, div);
+        Device::write(&mut self.inner, 0x2c, cfg);
+        Device::write(&mut self.inner, 0x54, (1 << 16) | if channels == 0 { 3 } else { 1 });
+        let active = supported && conf & (1 << 4) != 0 && self.inner.derive_rate().is_some();
+        Device::write(&mut self.inner, 0x24, if active { 4 } else { 0 });
+        if !active { self.inner.frames_due(0); }
     }
     #[inline]
     pub(crate) fn data(&mut self, cycles: u64, now: u64, port: usize, gpio: &ClassicGpio, sources: Option<&mut PcmSources>) -> Vec<u8> {
         let (data, clock) = [(155, [27, 28]), (181, [164, 165])][port];
         let signals = esp_periph::i2s::RxSignals { data, clock, input_select_bit: 7, output_mask: 0x3ff };
-        self.inner.receive(cycles, now, false, &gpio.gpio, signals, sources)
+        self.inner.receive(cycles, now, port == 0, &gpio.gpio, signals, sources)
     }
     pub(crate) fn abort_camera_dma(&mut self) {
         self.camera = None;
@@ -144,7 +173,8 @@ impl Device for ClassicI2s {
             0xc | 0x10 | 0x14 => self.inner.read(off),
             // IDF v5.5.4 i2s_reg.h:105-128: all four reset bits are plain R/W.
             8 => self.ram.read(off),
-            0xbc => 1,
+            0x30 => self.ram.read(0x30) | if self.out.running { 0 } else { 1 << 31 },
+            0xbc => u32::from(!self.inner.tx_running()),
             _ => self.ram.read(off),
         }
     }
@@ -172,6 +202,17 @@ impl Device for ClassicI2s {
         }
         match off {
             0x14 | 0x18 => { Device::write(&mut self.inner, off, value); }
+            0x30 => {
+                // IDF v5.5.4 esp32 i2s_reg.h OUTLINK: STOP[28], START[29],
+                // RESTART[30], PARK[31], descriptor address[19:0].
+                self.ram.write(off, value & 0xfffff);
+                if value & (1 << 28) != 0 { self.out.running = false; }
+                if value & (3 << 29) != 0 {
+                    self.out.desc = 0x3ff0_0000 | (value & 0xfffff);
+                    self.out.buf_pos = 0;
+                    self.out.running = true;
+                }
+            }
             0x34 => {
                 // ESP32 TRM v5.8, section 2.6 (I2S DMA): INLINK_START is
                 // self-cleared by hardware. Consume it synchronously, so a later
@@ -182,8 +223,11 @@ impl Device for ClassicI2s {
                 if value & (1 << 28) != 0 { self.dma.running = false; }
                 if value & (3 << 29) != 0 { self.dma.desc = 0x3ff0_0000 | (value & 0xfffff); self.dma.buf_pos = 0; self.dma.rx_eof_pos = 0; self.dma.running = true; }
             }
-            0x60 => self.dma.conf1 = value & CHECK_OWNER,
-            8 | 0x2c | 0xa8 | 0xac | 0xb0 => self.sync(),
+            0x60 => {
+                self.dma.conf1 = value & CHECK_OWNER;
+                if value & 0xe != 0 { self.out = Default::default(); }
+            }
+            8 | 0x2c | 0xa8 | 0xac | 0xb0 | 0xb4 => self.sync(),
             _ => {}
         }
         WriteEffect::NONE
@@ -227,10 +271,76 @@ impl SocBus {
             i2s.camera = Some(Box::new(crate::camera_dma::Capture::armed(self.cycles)));
         }
     }
+    fn i2s_transmit(&mut self, cycles: u64, port: usize) {
+        let i2s = &mut self.periph.i2s[port];
+        if i2s.ram.read(0x20) & (1 << 12) == 0 { return; }
+        let mut frames = i2s.inner.frames_due(cycles) as usize;
+        if frames == 0 { return; }
+        let frame_bytes = i2s.inner.bytes_per_frame as usize;
+        let sample_bytes = i2s.inner.sample_bytes();
+        let cfg = i2s.ram.read(0x60);
+        let mut out = i2s.out;
+        let audible = self.board.i2s_codecs().is_none_or(|codec| {
+            // IDF v5.5.4 ESP32 gpio_sig_map.h I2S{0,1}O_{BCK,WS,DATA_OUT23}.
+            let [bck, ws, data] = [[23, 25, 163], [24, 26, 189]][port];
+            let routes = self.periph.gpio.routes();
+            codec.port == port && codec.speaker_gain > 0.0
+                && routes.matrix_output(usize::from(codec.bck), bck)
+                && routes.matrix_output(usize::from(codec.ws), ws)
+                && routes.matrix_output(usize::from(codec.dout), data)
+        });
+        let mut irq = 0;
+        let mut walk = esp_periph::gdma::DescriptorWalk::new(4096);
+        while out.running && frames != 0 {
+            let Ok((control, desc)) = walk.read_with(out.desc, |a| self.dma_read_word(a).ok_or(Fault::Prohibited)) else {
+                irq |= 1 << 14;
+                break;
+            };
+            let remaining = desc.length as usize - (out.buf_pos as usize).min(desc.length as usize);
+            if desc.length > desc.size || cfg & CHECK_OWNER != 0 && !desc.owner_dma
+                || remaining == 0 || !remaining.is_multiple_of(frame_bytes) {
+                irq |= 1 << 14;
+                break;
+            }
+            let count = frames.min(remaining / frame_bytes);
+            let Some(range) = desc.buf.checked_add(out.buf_pos).and_then(|a| dma_range(a, count * frame_bytes)) else {
+                irq |= 1 << 14;
+                break;
+            };
+            let inner = &mut self.periph.i2s[port].inner;
+            inner.pcm.extend(self.dram[range].chunks_exact(frame_bytes).map(|frame| {
+                if !audible { return 0; }
+                i16::from_le_bytes([frame[sample_bytes - 2], frame[sample_bytes - 1]])
+            }));
+            inner.frames_out += count as u64;
+            frames -= count;
+            out.buf_pos += (count * frame_bytes) as u32;
+            if out.buf_pos == desc.length {
+                if cfg & (1 << 6) != 0 { self.dma_write_word(desc.addr, control & !(1 << 31)); }
+                irq |= 1 << 11;
+                if desc.eof {
+                    irq |= 1 << 12;
+                    out.eof_desc = desc.addr;
+                }
+                out.desc = desc.next;
+                out.buf_pos = 0;
+                if desc.next == 0 { irq |= 1 << 16; out.running = false; }
+            }
+        }
+        if irq & (1 << 14) != 0 { out.running = false; }
+        let i2s = &mut self.periph.i2s[port];
+        i2s.out = out;
+        i2s.ram.write(0x40, out.eof_desc);
+        i2s.inner.int_raw |= irq;
+        self.irq_dirty |= irq != 0;
+    }
+
     #[inline]
     pub(crate) fn i2s_step(&mut self, cycles: u64) {
         for port in 0..2 {
-            if !self.periph.i2s[port].clock_enabled || !self.periph.i2s[port].dma.running { continue; }
+            if !self.periph.i2s[port].clock_enabled { continue; }
+            if self.periph.i2s[port].out.running { self.i2s_transmit(cycles, port); }
+            if !self.periph.i2s[port].dma.running { continue; }
             #[cfg(test)] { self.periph.i2s[port].step_calls += 1; }
             // Pin-routed sources live on controller 0, as on the other chips.
             let mut bank = self.periph.i2s[0].inner.take_pcm_bank();

@@ -217,6 +217,7 @@ pub struct ClassicGpio {
     /// (GPIO matrix) stored as function 1 and classic function 1 as 2, as on S3/C3/C6.
     route_mux: RegRam,
     external: u64,
+    pub(crate) atom_sense_link: bool,
     signal_out: [bool; 256],
     signal_oe: [bool; 256],
     rtc_pads: u64,
@@ -239,6 +240,7 @@ impl ClassicGpio {
             io_mux: RegRam::new(),
             route_mux,
             external: 0,
+            atom_sense_link: false,
             signal_out: [false; 256],
             signal_oe: [false; 256],
             rtc_pads: 0,
@@ -330,6 +332,9 @@ impl ClassicGpio {
         oe.then_some(level)
     }
     fn pad_level(&self, pin: usize) -> bool {
+        // Atom Lite/Matrix sense GPIO34 is wired to GPIO23. An explicit
+        // host GPIO34 drive takes precedence for a disconnected-wire test.
+        let pin = if pin == 34 && self.atom_sense_link && self.external & (1 << 34) == 0 { 23 } else { pin };
         self.driven(pin)
             .unwrap_or(self.gpio.input & (1 << pin) != 0)
     }

@@ -17,6 +17,7 @@ pub mod ft5x06;
 pub mod gt911;
 pub mod imu_motion;
 pub mod ltr553;
+pub mod mpu6886;
 pub mod soft_i2c;
 pub mod spi_bitbang;
 pub mod st25r3916;
