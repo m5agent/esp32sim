@@ -265,14 +265,17 @@ entry the driver enabled; no destination only for a coordinator on its PAN or a 
 promiscuous` takes everything — raises `RX_SFD_DONE` after 5 bytes and `RX_DONE` after
 `6 + len + 2` bytes, counted from the frame's first preamble byte, exactly as the transmitter
 counts them; the buffer is written by the bus as the driver reads it; an AR frame is acknowledged from
-there: the ACK (`02 <version> seq`, pending bit 0) starts 192 µs (12 symbols) after the frame's
-end and takes 11 bytes of air, 352 µs, then `ACK_TX_DONE`. The ACK leaves through the same host
-path as a data frame — the round is cut at its first cycle — so a lock-stepped medium sees it
-in time for the sender's ACK wait. The two radio timers count microseconds to their thresholds.
-ED keeps the synthetic scene from before. **Not modelled**: enhanced ACKs (frame version 2),
-security, the frame-pending table, CCA against energy that is not a frame. `--debug ieee802154`
-narrates commands, events and DMA; `--log-periph` reports the first touch of an offset the
-model does not interpret.
+there. A legacy ACK starts 192 µs (12 symbols) after the frame, with the pending bit written
+by the guest's RX interrupt. The ESP-IDF driver owns the source-match table. A version-2 ACK
+uses the frame the guest supplies through TX DMA and the enhanced-ACK notify register.
+An ACK takes the air time of its full frame and the MAC raises `ACK_TX_DONE`. The host
+receives the transmit event at the first air cycle, so the sender can receive it within its
+ACK deadline. A secure TX frame uses the guest-programmed AES-128 key, nonce address and
+payload offset for CCM*. The two radio timers count microseconds to their thresholds.
+
+ED samples a synthetic scene. CCA accounts for a frame in flight. `--debug ieee802154`
+narrates commands, events and DMA, and `--log-periph` reports the first touch of an offset
+the MAC model does not interpret.
 
 Why the filter and the ACK matter to the driver: without them, a frame with the AR bit that was
 *not* addressed to the C6 (another node's unicast) still raised `RX_DONE`, the driver went to
@@ -434,8 +437,8 @@ no display.
   registers the bootloader would have set up are not preset; ROM boot is the tested path.
 - **Watchdogs.** The LP_WDT and the TIMG watchdogs are register RAM: they never fire.
 - **WiFi** beyond one station: legacy rates only, no power save, no TSF.
-- **BLE, the LP core** — nothing of that radio or the second core is modelled. The
-  802.15.4 MAC sends, receives, acknowledges and filters (above); enhanced ACKs and security are not there.
+- **BLE and the LP core** have separate coverage limits. The IEEE 802.15.4 behavior above
+  covers the modeled MAC and the packet-level medium.
 - **Peripherals on demand**: GDMA, I2C, SPI2, RMT, ADC, TWAI, PARL_IO. Each shows up as an
   unknown register with `--log-periph` the moment a firmware wants it. The registers hello_world
   still touches without a model are PMU, IO_MUX, HP_SYSTEM, APB_SARADC and a few LP blocks —
