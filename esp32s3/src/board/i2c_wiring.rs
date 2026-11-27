@@ -5,7 +5,6 @@ use esp_periph::i2c::I2cDevice;
 use esp_soc::board::{BoardEdge, VirtualCycle};
 use esp_soc::pins::PinRoutes;
 use super::soft_i2c::{SoftI2c, SoftOp};
-use super::spi_lcd::SpiLcd;
 
 type Device = Rc<RefCell<dyn I2cDevice>>;
 
@@ -24,13 +23,12 @@ pub(super) struct I2cWiring {
     soft: SoftI2c,
     drives: [Option<bool>; 2],
     edges: Vec<BoardEdge>,
-    released: u64,
 }
 
 impl I2cWiring {
     pub fn new(pins: (u8, u8), devices: Vec<(u8, Device)>) -> Self {
         Self { pins, devices, soft: SoftI2c::idle(), drives: [Some(true); 2],
-            edges: Vec::new(), released: 0 }
+            edges: Vec::new() }
     }
     pub fn sync(&mut self, cycle: VirtualCycle, routes: &PinRoutes<'_>) {
         let levels = [self.pins.0, self.pins.1].map(|pin| routes.software_pad_output(pin));
@@ -54,10 +52,13 @@ impl I2cWiring {
         };
         if scl != self.soft.scl { self.soft.levels(scl, self.soft.sda, &mut bus); }
         if sda != self.soft.sda { self.soft.levels(scl, sda, &mut bus); }
-        let mut drives = levels.map(|level| level.is_none().then_some(true));
-        if self.soft.pull_low { drives[0] = Some(false); }
+        let drives = [sda && !self.soft.pull_low, scl];
         for (i, pin) in [self.pins.0, self.pins.1].into_iter().enumerate() {
-            SpiLcd::drive(cycle, &mut self.edges, &mut self.released, pin, &mut self.drives[i], drives[i]);
+            let level = drives[i];
+            if self.drives[i] != Some(level) {
+                self.drives[i] = Some(level);
+                self.edges.push(BoardEdge { cycle, pin, level });
+            }
         }
     }
     pub fn ports(&self) -> Vec<(u8, u8, Box<dyn I2cDevice>)> {
@@ -68,9 +69,7 @@ impl I2cWiring {
     pub fn levels(&self) -> impl Iterator<Item = (u8, bool)> {
         [self.pins.0, self.pins.1].into_iter().zip(self.drives).filter_map(|(pin, value)| value.map(|level| (pin, level)))
     }
+    pub fn transactions(&self) -> u64 { self.soft.transactions }
     pub fn edges(&mut self) -> Vec<BoardEdge> { std::mem::take(&mut self.edges) }
-    pub fn released(&mut self) -> impl Iterator<Item = u8> {
-        let released = std::mem::take(&mut self.released);
-        [self.pins.0, self.pins.1].into_iter().filter(move |&pin| released & (1 << pin) != 0)
-    }
+
 }

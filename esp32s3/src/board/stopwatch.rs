@@ -212,7 +212,6 @@ impl BoardModel for StopWatch {
         edges.extend(self.bus.edges());
         edges
     }
-    fn released_inputs(&mut self) -> Vec<u8> { self.bus.released().collect() }
     fn accepts_command(&self, verb: &str) -> bool { verb == "imu" || Pm1Wiring::accepts(verb) }
     fn board_command(&mut self, _: VirtualCycle, verb: &str, args: &[&str]) -> bool {
         if verb == "imu" { imu_sample(&mut self.imu.borrow_mut(), args) }
@@ -227,8 +226,8 @@ impl BoardModel for StopWatch {
     }
     fn report(&self) -> String {
         let off = !self.wiring.power.powered();
-        format!("[stopwatch] power_off_requested={off} timer_wakes={} oled_transitions={} vibration_duties={:?}",
+        format!("[stopwatch] power_off_requested={off} timer_wakes={} oled_transitions={} vibration_duties={:?} gpio_i2c={}",
             self.wiring.power.pmic.borrow().timer_wakes(),
-            self.wiring.panel.lock().unwrap().power_transitions, self.vibration)
+            self.wiring.panel.lock().unwrap().power_transitions, self.vibration, self.bus.transactions())
     }
 }

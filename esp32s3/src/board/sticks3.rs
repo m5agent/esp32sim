@@ -132,7 +132,7 @@ impl BoardModel for StickS3 {
         self.edges.extend(self.bus.edges());
         std::mem::take(&mut self.edges)
     }
-    fn released_inputs(&mut self) -> Vec<u8> { self.bus.released().chain(self.lcd.released()).collect() }
+    fn released_inputs(&mut self) -> Vec<u8> { self.lcd.released().into_iter().collect() }
     fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "imu" | "ir-nec") || Pm1Wiring::accepts(verb) }
     fn board_command(&mut self, cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
         match (verb, args) {
@@ -154,9 +154,9 @@ impl BoardModel for StickS3 {
     fn display_version(&self) -> u64 { self.lcd.version() }
     fn display_frames(&self) -> u64 { self.lcd.lcd.frames }
     fn report(&self) -> String {
-        format!("[sticks3] RAMWR={} pixels={} lcd_rail={} powered={} timer_wakes={} RMT46_frames={} last_nec={:?}",
+        format!("[sticks3] RAMWR={} pixels={} lcd_rail={} powered={} timer_wakes={} RMT46_frames={} last_nec={:?} gpio_i2c={}",
             self.display_frames(), self.lcd.lcd.pixels_written, self.lcd_powered, self.power.powered(),
-            self.power.pmic.borrow().timer_wakes(), self.ir_frames, self.last_nec)
+            self.power.pmic.borrow().timer_wakes(), self.ir_frames, self.last_nec, self.bus.transactions())
     }
 }
 

@@ -81,7 +81,7 @@ impl BoardModel for Dial {
         edges.extend(self.bus.edges());
         edges
     }
-    fn released_inputs(&mut self) -> Vec<u8> { self.bus.released().chain(self.lcd.released()).collect() }
+    fn released_inputs(&mut self) -> Vec<u8> { self.lcd.released().into_iter().collect() }
     fn soc_powered(&self) -> Option<bool> { Some(self.powered) }
     fn next_deadline(&self) -> Option<VirtualCycle> { self.rtc.borrow().next_deadline() }
     fn advance_to(&mut self, cycle: VirtualCycle) {
@@ -109,8 +109,8 @@ impl BoardModel for Dial {
     fn display_version(&self) -> u64 { self.lcd.version() }
     fn display_frames(&self) -> u64 { self.lcd.lcd.frames }
     fn report(&self) -> String {
-        format!("[dial] RAMWR={} pixels={} rfid_exchanges={} wakeups={} powered={} buzzer_pwm={:?}",
+        format!("[dial] RAMWR={} pixels={} rfid_exchanges={} wakeups={} powered={} buzzer_pwm={:?} gpio_i2c={}",
             self.display_frames(), self.lcd.lcd.pixels_written, self.rfid.borrow().exchanges,
-            self.wakeups, self.powered, self.buzzer)
+            self.wakeups, self.powered, self.buzzer, self.bus.transactions())
     }
 }
