@@ -44,8 +44,9 @@
 //! out through the same host path as a data frame — `tx_started` at its first cycle — so a
 //! lock-stepped medium sees it in time for the sender's ACK wait.
 //!
-//! Not modelled: enhanced ACKs (frame version 2), security, the frame-pending table (the ACK's
-//! pending bit is 0), CCA against energy that is not a frame.
+//! The guest driver manages the source-match table and sets ACK_FRAME_PENDING_EN during
+//! RX_DONE. Transmit security uses the programmed key, address and payload offset.
+//! Enhanced ACKs (frame version 2) and CCA against energy without a frame are unmodelled.
 //!
 //! The DMA side is the bus's: the device cannot see SRAM, so it leaves a `tx_request` (fetch
 //! the frame at this address) and an `rx_write` (store this buffer there) for `SocBus` to
@@ -58,6 +59,8 @@ use crate::periph::CPU_HZ;
 use emu_core::ClockDomain;
 use esp_periph::{Device, RegRam, WriteEffect};
 use std::collections::HashSet;
+
+mod security;
 
 pub const CMD_TX_START: u32 = 0x41;
 pub const CMD_RX_START: u32 = 0x42;
@@ -86,6 +89,7 @@ pub const RX_ABORT_BY_FILTER_FAIL: u32 = 5;
 pub const RX_ABORT_BY_UNEXPECTED_ACK: u32 = 8;
 pub const TX_ABORT_BY_RX_ACK_TIMEOUT: u32 = 16;
 pub const TX_ABORT_BY_TX_STOP: u32 = 17;
+const TX_ABORT_BY_TX_SECURITY_ERROR: u32 = 19;
 pub const TX_ABORT_BY_CCA_BUSY: u32 = 25;
 
 /// `CONF` (0x04) bits the model reads.
@@ -93,6 +97,11 @@ pub const CONF_AUTO_ACK_TX: u32 = 1 << 0;
 pub const CONF_AUTO_ACK_RX: u32 = 1 << 3;
 pub const CONF_COORDINATOR: u32 = 1 << 6;
 pub const CONF_PROMISCUOUS: u32 = 1 << 7;
+const CONF_AUTOPEND_ENHANCE: u32 = 1 << 12;
+const ACK_FRAME_PENDING_EN: u32 = 0x6c;
+const SEC_CTRL: u32 = 0x128;
+const SEC_EXTEND_ADDRESS: u32 = 0x12c;
+const SEC_KEY: u32 = 0x134;
 
 /// `ACK_TIMEOUT` out of reset, in units of 16 µs: 1728 µs, the default that IDF v5.5.4 documents
 /// for `esp_ieee802154_set_ack_timeout` (`components/ieee802154/include/esp_ieee802154.h:204`).
@@ -192,6 +201,7 @@ pub struct MacHeader {
     pub frame_type: u8, pub ack_request: bool, pub version: u8, pub seq: u8,
     pub dst_pan: Option<u16>, pub dst_short: Option<u16>, pub dst_ext: Option<[u8; 8]>,
     pub src_pan: Option<u16>,
+    pub address_end: usize,
 }
 
 /// Parse the frame control field and the addresses (on-air byte order, least significant
@@ -210,7 +220,10 @@ pub fn parse_header(f: &[u8]) -> Option<MacHeader> {
     }
     if src_mode != 0 {
         if !pan_comp { let p = take(&mut i, 2)?; h.src_pan = Some(u16::from_le_bytes([p[0], p[1]])); } else { h.src_pan = h.dst_pan; }
+        i += match src_mode { 2 => 2, 3 => 8, _ => return None };
+        if i > f.len() { return None; }
     }
+    h.address_end = i;
     Some(h)
 }
 
@@ -240,6 +253,7 @@ pub struct Ieee802154 {
     // ---- the ACK we send
     ack_turnaround: Countdown, ack_done: Countdown,
     ack_frame: [u8; 3],
+    ack_is_data_request: bool,
     pub ack_tx_count: u64,
     // ---- RX
     rx_in_flight: Option<RxFrame>,
@@ -282,7 +296,7 @@ impl Ieee802154 {
             dma_tx_addr: 0, dma_rx_addr: 0, rx_length: 0, rx_abort_reason: 0, tx_abort_reason: 0,
             tx_request: None, tx_frame: Vec::new(), tx_sfd: Countdown::default(), tx_done: Countdown::default(), tx_started: false, tx_count: 0,
             ack_wait_seq: 0, ack_timeout: Countdown::default(), ack_rx_count: 0,
-            ack_turnaround: Countdown::default(), ack_done: Countdown::default(), ack_frame: [0; 3], ack_tx_count: 0,
+            ack_turnaround: Countdown::default(), ack_done: Countdown::default(), ack_frame: [0; 3], ack_is_data_request: false, ack_tx_count: 0,
             rx_in_flight: None, rx_sfd: Countdown::default(), rx_done: Countdown::default(), rx_write: None, rx_count: 0, rx_dropped: 0, rx_filtered: 0,
             timer: [RadioTimer::default(); 2],
             ed_rss: -92, ed_left: None, scans: 0, level_dbm, target_dbm: level_dbm, noise: 0x9e37_79b9, scene_acc: 0, scene_ticks: 0, live: false,
@@ -451,6 +465,8 @@ impl Ieee802154 {
         if h.ack_request && h.version <= 1 && self.conf(CONF_AUTO_ACK_TX) {
             self.state = RadioState::TxAck;
             self.ack_frame = [0x02, (h.version << 4), h.seq];
+            self.ack_is_data_request = h.frame_type == 3 && rx.frame[0] & 8 == 0
+                && rx.frame.get(h.address_end) == Some(&4);
             match overshoot { Some(o) => self.ack_turnaround.chain(ns_cycles(ACK_TURNAROUND_NS), o), None => self.ack_turnaround.arm(ns_cycles(ACK_TURNAROUND_NS), false) }
             if self.dbg { eprintln!("[802.15.4] acknowledging seq {} in {} cycles", h.seq, self.ack_turnaround.remaining()); }
         } else {
@@ -461,14 +477,36 @@ impl Ieee802154 {
     /// The bus fetched the frame `TX_START` pointed at: `psdu` is the MAC frame without its
     /// length byte and without the FCS (the hardware appends the CRC). Starts the air-time
     /// clock and flags the start for the host.
-    pub fn tx_loaded(&mut self, psdu: Vec<u8>) {
+    pub fn tx_loaded(&mut self, mut psdu: Vec<u8>) {
         self.live = true;
+        let ctrl = self.ram.read(SEC_CTRL);
+        if ctrl & 1 != 0 && !self.protect_frame(&mut psdu, ((ctrl >> 8) & 0x7f) as usize) {
+            self.tx_abort(TX_ABORT_BY_TX_SECURITY_ERROR);
+            self.state = RadioState::Idle;
+            return;
+        }
         self.tx_sfd.arm(air_cycles(SFD_BYTES), true);
         self.tx_done.arm(air_cycles(PHY_OVERHEAD_BYTES + psdu.len() as u64 + 2), true);
         if self.dbg { eprintln!("[802.15.4] tx {} bytes on channel {}: TX_DONE in {} cycles", psdu.len(), self.channel(), self.tx_done.remaining()); }
         self.tx_frame = psdu;
         self.tx_started = true;
         self.tx_count += 1;
+    }
+
+    fn protect_frame(&self, psdu: &mut [u8], payload: usize) -> bool {
+        let Some(header) = parse_header(psdu) else { return false };
+        if psdu[0] & 8 == 0 { return false; }
+        let addr = self.register_bytes(SEC_EXTEND_ADDRESS);
+        let key = self.register_bytes(SEC_KEY);
+        security::protect(psdu, header.address_end, payload, addr, key).is_some()
+    }
+
+    fn register_bytes<const N: usize>(&self, base: u32) -> [u8; N] {
+        let mut bytes = [0; N];
+        for (i, word) in bytes.chunks_exact_mut(4).enumerate() {
+            word.copy_from_slice(&self.ram.read(base + 4 * i as u32).to_le_bytes());
+        }
+        bytes
     }
 
     /// The host's yield flag: a transmission began at the instruction (or the device tick)
@@ -625,6 +663,12 @@ impl Device for Ieee802154 {
         if let Some(over) = self.rx_done.tick(cycles) { self.finish_rx(Some(over)); }
         if let Some(over) = self.ack_turnaround.tick(cycles).filter(|_| self.state == RadioState::TxAck) {
             // the acknowledgement goes on the air now: the host sees it as a transmission
+            // Firmware selects the pending bit in the RX_DONE interrupt, before turnaround.
+            if self.ram.read(ACK_FRAME_PENDING_EN) & 1 != 0
+                && (self.conf(CONF_AUTOPEND_ENHANCE) || self.ack_is_data_request)
+            {
+                self.ack_frame[0] |= 1 << 4;
+            }
             self.tx_frame = self.ack_frame.to_vec();
             self.tx_started = true;
             self.ack_tx_count += 1;
@@ -684,6 +728,46 @@ mod tests {
         let h = parse_header(&BROADCAST).unwrap();
         assert_eq!((h.ack_request, h.dst_short), (false, Some(0xffff)));
         assert!(parse_header(&[0x41, 0xd8, 0x01, 0xcd]).is_none(), "shorter than its header");
+    }
+
+    #[test]
+    fn data_request_ack_uses_pending_written_after_rx_done() {
+        let mut r = armed_rx();
+        let mut request = UNICAST_AR;
+        request[0] = request[0] & !7 | 3; // MAC command
+        request[15] = 4; // Data Request
+        assert!(r.receive(&request[..16], -60, 200, None));
+        assert_ne!(r.events & EVENT_RX_DONE, 0);
+        r.write(ACK_FRAME_PENDING_EN, 1);
+        r.tick(ns_cycles(ACK_TURNAROUND_NS));
+        assert_eq!(r.tx_frame, [0x12, 0x10, 0x2d]);
+
+        let mut r = armed_rx();
+        assert!(r.receive(&UNICAST_AR, -60, 200, None));
+        r.write(ACK_FRAME_PENDING_EN, 1);
+        r.tick(ns_cycles(ACK_TURNAROUND_NS));
+        assert_eq!(r.tx_frame, [0x02, 0x10, 0x2d]);
+    }
+
+    #[test]
+    fn tx_security_registers_encrypt_and_authenticate_psdu() {
+        let mut r = configured();
+        let header = [0x49, 0x98, 0xf2, 0xaa, 0xbb, 0xcc, 0xdd, 0x11, 0x22,
+                      0x0d, 2, 0, 0, 0, 1];
+        let psdu = [&header[..], b"wire-frame", &[0; 4]].concat();
+        for (i, bytes) in [0x03020100, 0x07060504].into_iter().enumerate() {
+            r.write(SEC_EXTEND_ADDRESS + 4 * i as u32, bytes);
+        }
+        for (i, bytes) in [0x03020100, 0x07060504, 0x0b0a0908, 0x0f0e0d0c].into_iter().enumerate() {
+            r.write(SEC_KEY + 4 * i as u32, bytes);
+        }
+        r.write(SEC_CTRL, (15 << 8) | 1);
+        r.write(0x00, CMD_TX_START);
+        r.tx_loaded(psdu);
+        assert_eq!(&r.tx_frame[..15], &header);
+        // AES-128-CCM cross-checked with OpenSSL for this key, nonce and header.
+        assert_eq!(&r.tx_frame[15..], &[0xce, 0x5b, 0x3c, 0x72, 0xf0, 0x6d, 0xc6,
+                                          0x87, 0x94, 0x3b, 0x1f, 0x69, 0xdc, 0xe7]);
     }
 
     /// The same frame must occupy the air for the same time whether this radio sends it or
