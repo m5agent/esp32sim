@@ -56,6 +56,10 @@ def nano_cases(out, peers):
     zigbee_switch = read(peers / "zigbee-peer", "node0.log")
     zigbee_led = read(peers / "zigbee-peer", "node1.log")
     stock = read(peers / "nano-stock-repl", "node0.log")
+    temp_coordinator = read(peers / "zigbee-temp", "node0.log")
+    temp_device = read(peers / "zigbee-temp", "node1.log")
+    measured = {float(value) for value in re.findall(r"Temperature received: (-?[\d.]+)", temp_coordinator)
+                if -40.0 <= float(value) <= 125.0}
     return {
         "button": (log("button").count("Button A was pressed") == 2
                    and log("button").count("Button A was released") == 2
@@ -74,8 +78,9 @@ def nano_cases(out, peers):
         "thread-4": bool(re.search(r"\|\s*[0-9a-f]{4}\s*\|\s*[0-9a-f]{16}\s*\|\s*(?:1[1-9]|2[0-6])\s*\|", read(peers / "thread-scan", "node1.log"), re.I)),
         "thread-5": "openthread-esp32/" in log("thread-5") and "disabled" in log("thread-5"),
         "thread-6": re.search(r"OpenThread CLI RESP===> leader", log("thread-6"), re.I) is not None,
-        "zigbee-1": "Temperature received:" in read(peers / "zigbee-temp", "node0.log"),
-        "zigbee-2": "Temperature reported to Coordinator" in read(peers / "zigbee-temp", "node1.log"),
+        "zigbee-1": "Temperature sensor bound successfully!" in temp_coordinator and len(measured) >= 2,
+        "zigbee-2": ("SHT30 detected at address 0x44" in temp_device and len(measured) >= 2
+                     and temp_device.count("Temperature reported to Coordinator") >= 2),
         "zigbee-3": re.search(r"\b[1-9]\d* networks found:", read(peers / "zigbee-scan", "node1.log")) is not None,
         "zigbee-4": ("LED device bound successfully!" in zigbee_switch
                      and "Sending ON command" in zigbee_switch and "Sending OFF command" in zigbee_switch),

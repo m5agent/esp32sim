@@ -33,6 +33,8 @@ def run(args):
         "firmware_sha256": [sha(image) for image in args.images],
         "seconds": args.seconds, "isolated": args.isolated, "board": args.board,
         "resets": args.reset, "observe_leds": args.observe_leds,
+        "traces": [{"node": int(node), "elf_sha256": sha(Path(elf)), "prefix": prefix}
+                   for node, elf, prefix in args.trace],
         "scripts": {node: sha(Path(path)) for node, path in args.script},
     }, indent=2) + "\n")
     scripts = {int(node): path for node, path in args.script}
@@ -47,6 +49,16 @@ def run(args):
                        "--console", args.console, "--no-dump", "--cooja"]
             if index in scripts:
                 command += ["--script", scripts[index]]
+            elf = None
+            for node, trace_elf, prefix in args.trace:
+                if int(node) != index:
+                    continue
+                if elf is None:
+                    elf = trace_elf
+                    command += ["--elf", elf]
+                elif elf != trace_elf:
+                    raise ValueError("trace prefixes for a node must share one ELF")
+                command += ["--trace-fn", prefix]
             proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=stderr)
             stack.callback(proc.wait)
@@ -106,6 +118,7 @@ if __name__ == "__main__":
     parser.add_argument("--seconds", type=float, default=45)
     parser.add_argument("--isolated", action="store_true", help="negative control without forwarding")
     parser.add_argument("--observe-leds", action="store_true")
+    parser.add_argument("--trace", action="append", nargs=3, metavar=("NODE", "ELF", "PREFIX"), default=[])
     parser.add_argument("--reset", action="append", nargs=2, metavar=("SECONDS", "NODE"), default=[])
     parser.add_argument("--script", action="append", nargs=2, metavar=("NODE", "FILE"), default=[])
     parser.add_argument("--serial", action="append", nargs=3, metavar=("SECONDS", "NODE", "TEXT"), default=[])
