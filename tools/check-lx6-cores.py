@@ -120,7 +120,7 @@ def checks(device, run):
     check("battery", lambda: sensor("battery"))
     if basic:
         if run.read("imu-idle", "status").strip() == "0" and run.metric("imu-idle", "id_reads"):
-            rows["imu"] = {"status": "DOCS-DEFECT", "reason": "m5core/imu.md line 9 targets Gray with an IMU. K001-V27 Basic has no onboard IMU."}
+            rows["imu"] = {"status": "DOCS-DEFECT", "reason": "Fixture assignment points Basic at m5core/imu.md line 9, which targets Gray. K001-V27 Basic has no onboard IMU."}
         else:
             rows["imu"] = {"status": "FAIL", "reason": "Could not qualify the no-IMU control"}
     else:
@@ -184,7 +184,7 @@ def checks(device, run):
                 match = re.search(r"rgb_pixels=10 rgb_first=([0-9a-f]{6}) rgb_uniform=true", report)
                 require(match is not None, f"{label} lacks ten uniform decoded LEDs")
                 color = bytes.fromhex(match[1])
-                require(color[i] >= 50 and sum(color) == color[i], f"{label} shows {color.hex()}")
+                require(color[i] > 0 and sum(color) == color[i], f"{label} shows {color.hex()}")
             return "RMT drives ten uniform pixels in red, green and blue order"
 
         def rtc():

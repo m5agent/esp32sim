@@ -19,6 +19,8 @@ Use `--chip esp32 --board m5stack-basic-v27` for Basic v2.7. The
 `m5stack-core2` preset has the Core2 v1.1 AXP2101 and INA3221. Select
 `m5stack-core2-axp192` for the original AXP192 revision. Guest firmware
 discovers the PMIC at I2C address 0x34 using register 0x03.
+For the catalog image named `M5STACK BASIC(4MB)`, add `--flash-mb 4` so
+UIFlow2 finds the resources in that image's partition layout.
 
 UART0 carries the console. In an input script, Basic accepts `press a`,
 `press b` and `press c`. Core2 uses `touch X Y 1` and `touch X Y 0`,

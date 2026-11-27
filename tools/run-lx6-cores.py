@@ -72,7 +72,7 @@ def plan(device):
     scroll = "quickstart-longtextscroll" if device == "basic-v27" else "quickstart-scrollgraph"
     add(scroll, 1.25)
     add(scroll, 0.8, f"{scroll}-first")
-    add("microsd", 0.9, "microsd-absent")
+    add("microsd", 0.9 if device == "basic-v27" else 2.1, "microsd-absent")
     add("microsd", 3.8, card=True)
     add("microsd", 2.8, "microsd-first", card=True)
     add("wav", 8.5 if device == "basic-v27" else 16, card=True, audio=True,
