@@ -19,7 +19,7 @@ def require(condition, reason):
         raise ValueError(reason)
 
 
-def png_rgb(blob, scale=1):
+def png_rgb(blob, scale=1, *, dimensions=None):
     # The simulator and these media fixtures write filter-0 RGB8 images.
     require(blob.startswith(b"\x89PNG\r\n\x1a\n"), "invalid PNG signature")
     at = 8
@@ -39,7 +39,7 @@ def png_rgb(blob, scale=1):
         elif kind == b"IEND":
             ended = True
             break
-    w, h = 320 * scale, 240 * scale
+    w, h = dimensions or (320 * scale, 240 * scale)
     require(ended and header == (w, h, 8, 2, 0, 0, 0), "unexpected PNG dimensions or format")
     stride = 1 + w * 3
     raw = zlib.decompress(compressed)
