@@ -477,7 +477,58 @@ impl BoardModel for Core {
                 self.name(), self.id_probe, p.frames, p.pixels_written, p.madctl, p.on, p.sleeping,
                 if self.kind.basic() { self.light } else { self.rails.light }, self.sd_transactions, touch_reads,
                 self.motor_changes, self.motor_min, self.motor_max, self.rgb.updates);
+        if !self.kind.basic() {
+            let [red, green, blue] = self.rgb.leds[0];
+            let uniform = self.rgb.leds.iter().all(|pixel| *pixel == [red, green, blue]);
+            report.push_str(&format!(" rgb_pixels={} rgb_first={red:02x}{green:02x}{blue:02x} rgb_uniform={uniform}", self.rgb.leds.len()));
+        }
         if let Some(sd) = &self.sd { report.push('\n'); report.push_str(&sd.report()); }
         report
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read(device: &mut dyn I2cDevice, reg: u8, n: usize) -> Vec<u8> {
+        assert!(device.start(false));
+        assert!(device.write(reg));
+        assert!(device.start(true));
+        (0..n).map(|_| device.read()).collect()
+    }
+
+    #[test]
+    fn core2_revisions_expose_distinct_power_ics_and_the_same_ft6336u() {
+        for (kind, id) in [(CoreKind::Core2, 0x4a), (CoreKind::Core2Axp192, 0x03)] {
+            let mut board = Core::new(kind);
+            let (_, mut pmic) = board.power.port();
+            assert_eq!(read(&mut pmic, 3, 1), [id]);
+            let mut touch = Port(board.touch.as_ref().unwrap().clone());
+            assert_eq!(read(&mut touch, 0xa0, 1), [0x02]);
+            assert_eq!(read(&mut touch, 0xa3, 1), [0x64]);
+            assert_eq!(read(&mut touch, 2, 1), [0]);
+            for x in [63, 160, 258] {
+                board.touch(x, 260, true);
+                assert_eq!(read(&mut touch, 2, 5), [1, 0x80 | (x >> 8) as u8, x as u8, 1, 4]);
+                assert_eq!(board.touch_irq(), Some((39, false)));
+            }
+            board.touch(0, 0, false);
+            assert_eq!(board.touch_irq(), Some((39, true)));
+            assert_eq!(read(&mut touch, 2, 1), [0]);
+        }
+    }
+
+    #[test]
+    fn rddid_keeps_a_single_bit_dummy_across_controller_transfers() {
+        let mut board = Core::new(CoreKind::Basic);
+        let pins = SpiPins { sclk: 1 << CLK, mosi: 1 << DATA, miso: Some(DATA), cs: 1 << 14 };
+        board.spi_transfer_pins_bits(3, pins, &[0x04], 0);
+        board.panel.dc = true;
+        assert_eq!(board.spi_transfer_pins_bits(3, pins, &[], 1), [0]);
+        assert_eq!(board.spi_transfer_pins_bits(3, pins, &[], 8), [0xe3]);
+        assert_eq!(board.spi_transfer_pins_bits(3, pins, &[], 16), [0, 0]);
+        let unselected = SpiPins { cs: 0, ..pins };
+        assert_eq!(board.spi_transfer_pins_bits(3, unselected, &[], 8), [0xff]);
     }
 }
