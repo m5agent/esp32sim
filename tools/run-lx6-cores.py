@@ -102,6 +102,10 @@ def plan(device):
         t = 4.65 + i * 0.58
         actions += key(device, t, i, 390)
         actions += f"{t + 0.16:.3f} uart0-cr print('LX6-INPUT',p())\n"
+        if device == "core2":
+            # The touch state machine needs an M5.update after lift before
+            # the next physical contact can replace the previous button.
+            actions += f"{t + 0.47:.3f} uart0-cr print('LX6-INPUT',p())\n"
     actions += "6.4 uart0-cr print('LX6-INPUT',p())\n"
     if device == "core2":
         actions += "6.55 touch 88 110 1\n"
