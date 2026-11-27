@@ -217,15 +217,15 @@ pub trait BoardModel {
     /// Physical PDM microphone pins (clock, data). PCM enters after the
     /// controller's PDM decimator only while the guest selects this route.
     fn pdm_mic(&self) -> Option<(u8, u8)> { None }
+    /// SPI physical receive length before byte rounding, for slaves with
+    /// a sub-byte dummy phase. The receive buffer still contains whole bytes.
+    fn spi_transfer_pins_bits(&mut self, host: u8, pins: SpiPins, tx: &[u8], rx_bits: usize) -> Vec<u8> {
+        self.spi_transfer_pins(host, pins, tx, rx_bits.div_ceil(8))
+    }
     /// GPIO that receives the camera master clock, if required for parallel capture.
     fn camera_xclk_pin(&self) -> Option<u8> { None }
     /// Piezo element wired straight to a serialized single-bit I2S stream.
     fn i2s_bitstream_pin(&self) -> Option<u8> { None }
-    /// Transfers shorter than a byte still clock a wire. Boards with
-    /// single-bit dummy phases can consume the exact read length.
-    fn spi_transfer_pins_bits(&mut self, host: u8, pins: SpiPins, tx: &[u8], rx_bits: usize) -> Vec<u8> {
-        self.spi_transfer_pins(host, pins, tx, rx_bits.div_ceil(8))
-    }
 }
 
 pub type Board = Box<dyn BoardModel>;

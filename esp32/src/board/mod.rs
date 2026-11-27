@@ -7,6 +7,7 @@
 pub mod tdisplay;
 pub mod aithinker;
 pub(crate) mod atom;
+mod core;
 pub(crate) mod stickc;
 mod stickc_panel;
 mod m5stick;
@@ -17,6 +18,9 @@ pub use tdisplay::*;
 
 pub fn make_board(name: &str) -> Option<esp_soc::Board> {
     match name {
+        "m5stack-basic-v27" => Some(Box::new(core::Core::new(core::CoreKind::Basic))),
+        "m5stack-core2" => Some(Box::new(core::Core::new(core::CoreKind::Core2))),
+        "m5stack-core2-axp192" => Some(Box::new(core::Core::new(core::CoreKind::Core2Axp192))),
         "none" | "bare" | "esp32dev" => Some(Box::new(esp_soc::NoBoard)),
         "ttgo-tdisplay" | "tdisplay" => Some(Box::new(TtgoTDisplay::new())),
         "ai-thinker-cam" | "esp32cam" => Some(Box::new(aithinker::AiThinkerCam::default())),

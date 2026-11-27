@@ -25,8 +25,8 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!("  --board NAME          board model (S3: atech14, waveshare-lcd4b, waveshare-amoled18-v2, waveshare-cam, stopwatch, m5stack-cores3, m5stack-cardputer-adv, none;");
     eprintln!("                        m5stack-atoms3[-lite|-gc9107], m5stack-atoms3u, m5stack-atoms3r[-gc9107|-cam|-m12], m5stack-atom-echos3r;");
     eprintln!("                        C6: waveshare-c6-lcd147, xiao-esp32c6, none; P4: waveshare-p4-lcd35, m5stack-tab5, m5stack-tab5-st7123, none; S31: mosaico, none;");
-    eprintln!("                        classic: ttgo-tdisplay, cyd, ulanzi-tc001, ai-thinker-cam, esp32dev, none, m5stack-stickc[-plus|-plus-se|-plus2], m5stack-m5stick, m5stack-stickt2)");
-    eprintln!("  --flash-mb N, --psram-mb N   memory sizes (S3 default 8 / 2, Cardputer-ADV 8 / 0, C3, C6 and classic 4 / 0, StickC Plus2 8 / 2, P4 16 / 0, S31 2, mosaico 16 / 16)");
+    eprintln!("                        classic: m5stack-basic-v27, m5stack-core2[-axp192], ttgo-tdisplay, cyd, ulanzi-tc001, ai-thinker-cam, esp32dev, none, m5stack-stickc[-plus|-plus-se|-plus2], m5stack-m5stick, m5stack-stickt2)");
+    eprintln!("  --flash-mb N, --psram-mb N   memory sizes (S3 default 8 / 2, Cardputer-ADV 8 / 0, C3, C6 and classic 4 / 0, Basic v2.7 16 / 0, Core2 16 / 8, StickC Plus2 8 / 2, P4 16 / 0, S31 2, mosaico 16 / 16)");
     eprintln!("  --max-seconds S       stop after S emulated seconds (always give one: the run returns)");
     eprintln!("  --console usb|uart0|both|none   which consoles to print (uart0 shows the ROM and bootloader)");
     eprintln!("  --cap NAME            Cardputer-ADV accessory: lora1262, lora868 or cc1101");
@@ -49,7 +49,7 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!("  --trace-fn PREFIX, --break PC, --watch ADDR, --peek ADDR,N, --profile, --vcd F, --debug AREAS, --no-jit");
     eprintln!("                        debugging; --no-jit is the oracle when a result looks wrong");
     eprintln!("  --adc PIN, --adc-raw PIN=N   last ADC sample at exit / a 12-bit count into that pad");
-    eprintln!("  --sd IMG, --sd-rw IMG (P4, S3) an SD card, copy-on-write / write-through;");
+    eprintln!("  --sd IMG, --sd-rw IMG an SD card, copy-on-write / write-through;");
     eprintln!("                        --sd-prg-us N, --sd-serial HEX for its programming time and serial");
     eprintln!("  --usb-host F          (P4, S3, S31) a USB host on the USB-OTG port running F; --sd-timing (P4) for timed SD");
     eprintln!("  --coproc c6:KEY=V,... (P4) an ESP32-C6 co-processor on SDIO, run in lock-step");
@@ -711,13 +711,14 @@ fn setup_c3(o: &Opts) -> esp32c3::Machine {
 }
 
 fn setup_esp32(o: &Opts) -> esp32::Machine {
+    let core2 = matches!(o.board.as_str(), "m5stack-core2" | "m5stack-core2-axp192");
     let plus2 = o.board == "m5stack-stickc-plus2";
-    let flash = o.flash_mb.unwrap_or(if plus2 { 8 } else { 4 }) << 20;
-    let mut m = esp32::machine(o.mac.unwrap_or([0x24, 0x6f, 0x28, 0x00, 0x11, 0x22]), flash);
-    m.bus.set_flash_size(flash);
+    let flash_mb = o.flash_mb.unwrap_or(if core2 || o.board == "m5stack-basic-v27" { 16 } else if plus2 { 8 } else { 4 });
+    let mut m = esp32::machine(o.mac.unwrap_or([0x24, 0x6f, 0x28, 0x00, 0x11, 0x22]), flash_mb << 20);
+    m.bus.set_flash_size(flash_mb << 20);
     if !o.debug.is_empty() { let mut f = esp_soc::DebugFlags::from_env(); for d in &o.debug { f.parse(d); } m.set_debug(&f); }
     let board = if o.board == "atech14" { "none" } else { &o.board };
-    m.bus.board = esp32::board::make_board(board).unwrap_or_else(|| usage_error(&format!("unknown classic ESP32 board '{board}' (none, bare, esp32dev, ttgo-tdisplay, cyd, ai-thinker-cam, ulanzi-tc001, m5stack-atom-lite, m5stack-atom-matrix, m5stack-atom-matrix-v11, m5stack-atomu, m5stack-atom-echo, m5stack-stickc, m5stack-stickc-plus, m5stack-stickc-plus-se, m5stack-stickc-plus2, m5stack-m5stick, m5stack-stickt2)")));
+    m.bus.board = esp32::board::make_board(board).unwrap_or_else(|| usage_error(&format!("unknown classic ESP32 board '{board}' (none, bare, esp32dev, ttgo-tdisplay, cyd, ai-thinker-cam, ulanzi-tc001, m5stack-atom-lite, m5stack-atom-matrix, m5stack-atom-matrix-v11, m5stack-atomu, m5stack-atom-echo, m5stack-basic-v27, m5stack-core2, m5stack-core2-axp192, m5stack-stickc, m5stack-stickc-plus, m5stack-stickc-plus-se, m5stack-stickc-plus2, m5stack-m5stick, m5stack-stickt2)")));
     m.bus.attach_board_devices();
     set_camera_image(&mut m.bus.board, o.cam_image.as_deref());
     if !o.wifi.is_empty() {
@@ -726,7 +727,8 @@ fn setup_esp32(o: &Opts) -> esp32::Machine {
     }
     attach_wifi_station(&mut m.bus, o);
     attach_nearby_networks(&mut m.bus.periph.wifi.link, o);
-    if let Some(mb) = o.psram_mb.or_else(|| plus2.then_some(2)) {
+    let default_psram = if core2 { Some(8) } else { plus2.then_some(2) };
+    if let Some(mb) = o.psram_mb.or(default_psram) {
         let bytes = mb.saturating_mul(1 << 20);
         m.bus.set_psram_size(bytes).unwrap_or_else(|e| usage_error(&format!("--psram-mb: {e}")));
     }

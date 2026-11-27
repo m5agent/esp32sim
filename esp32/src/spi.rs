@@ -130,15 +130,19 @@ impl ClassicGpSpi {
         let dma_tx_len = if self.out_active { mosi_len } else { 0 };
         if dma_tx_len == 0 {
             let base = if user & (1 << 25) != 0 { 8 } else { 0 };
-            // Classic SPI wraps the W-register bank for a data phase longer
-            // than the CPU buffer. M5GFX Bus_SPI::writeDataRepeat uses up to
-            // 2048 bits from this 512-bit ring on ESP32 to draw solid fills.
+            // IDF v5.5.4 spi_reg.h SPI_USR_MOSI_DBITLEN can exceed the
+            // register buffer. The classic master wraps around it (M5GFX
+            // Bus_SPI::writeDataRepeat uses a 2048-bit CPU transfer).
             let words = 16 - base;
             for i in 0..mosi_len {
                 tx.push((self.w[base + (i / 4) % words] >> (8 * (i % 4))) as u8);
             }
         }
-        let rx_bits = if user & USER_MISO != 0 { (self.regs.read(0x2c) & 0x00ff_ffff) as usize + 1 } else { 0 };
+        let rx_bits = if user & USER_MISO != 0 {
+            ((self.regs.read(0x2c) & 0x00ff_ffff) + 1) as usize
+        } else {
+            0
+        };
         let rx_len = rx_bits.div_ceil(8);
         let pin = self.regs.read(0x34);
         let cs = (0..3)
@@ -329,6 +333,20 @@ mod tests {
     }
 
     #[test]
+    fn cpu_repeat_transfer_wraps_fifo_without_entering_dma() {
+        let mut spi = ClassicGpSpi::new();
+        spi.write(0x1c, USER_MOSI);
+        spi.write(0x28, 2047);
+        spi.write(0x80, 0x0403_0201);
+        spi.write(0xbc, 0x8070_6050);
+        spi.write(0, USR);
+        let transfer = spi.take_transfer().unwrap();
+        assert_eq!(transfer.tx.len(), 256);
+        assert_eq!(&transfer.tx[60..68], &[0x50, 0x60, 0x70, 0x80, 1, 2, 3, 4]);
+        assert_eq!(transfer.dma_tx_len, 0);
+    }
+
+    #[test]
     fn transaction_and_dma_interrupts_are_independent() {
         let mut spi = ClassicGpSpi::new();
         spi.write(0x38, 1 << 9);
@@ -345,20 +363,5 @@ mod tests {
         assert_eq!(spi.irq_sources(), 2);
         spi.write(0x11c, 1 << 8);
         assert_eq!(spi.irq_sources(), 0);
-    }
-
-    #[test]
-    fn cpu_buffer_repeats_when_the_data_phase_wraps_the_fifo() {
-        let mut spi = ClassicGpSpi::new();
-        spi.write(0x1c, USER_MOSI);
-        spi.write(0x28, 2047);
-        spi.write(0x80, 0xfedcba98);
-        spi.write(0xbc, 0x76543210);
-        spi.write(0, USR);
-        let tx = spi.take_transfer().unwrap().tx;
-        assert_eq!(tx.len(), 256);
-        assert!(tx.as_chunks::<64>().0.iter().all(|chunk| {
-            chunk[..4] == [0x98, 0xba, 0xdc, 0xfe] && chunk[60..] == [0x10, 0x32, 0x54, 0x76]
-        }));
     }
 }

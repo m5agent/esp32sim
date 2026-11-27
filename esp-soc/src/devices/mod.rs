@@ -17,6 +17,7 @@ pub mod es8311;
 pub mod ft5x06;
 pub mod gt911;
 pub mod imu_motion;
+pub mod ina3221;
 pub mod ip5306;
 pub mod lepton;
 pub mod ltr553;

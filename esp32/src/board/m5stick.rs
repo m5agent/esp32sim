@@ -4,7 +4,7 @@ use super::stickc::InternalBus;
 use esp_periph::i2c::I2cDevice;
 use esp_soc::{
     board::{BoardModel, SpiPins, VirtualCycle},
-    devices::{ip5306::Ip5306, mpu9250::{Ak8963, Mpu9250}, sh1107::Sh1107, SpiBitBang},
+    devices::{ip5306::{ADDRESS as IP5306_ADDRESS, Ip5306}, mpu9250::{Ak8963, Mpu9250}, sh1107::Sh1107, SpiBitBang},
     pins::PinRoutes,
 };
 use std::{cell::RefCell, rc::Rc};
@@ -34,7 +34,7 @@ impl M5Stick {
     pub(super) fn new() -> Self {
         let imu = Rc::new(RefCell::new(Mpu9250::default()));
         Self { panel: Sh1107::default(), mag: Rc::new(RefCell::new(Ak8963::new(imu.clone()))),
-            imu, pmic: Rc::new(RefCell::new(Ip5306::default())), dc: false, reset: false,
+            imu, pmic: Rc::new(RefCell::new(Ip5306::m5stick())), dc: false, reset: false,
             spi: SpiBitBang::new(CLOCK, DATA, CS), battery: 3900, usb: true,
             buzzer: None, buzzer_updates: 0, ir_frames: 0 }
     }
@@ -65,7 +65,7 @@ impl BoardModel for M5Stick {
         let devices = [
             (Mpu9250::ADDRESS, InternalBus(self.imu.clone())),
             (Ak8963::ADDRESS, InternalBus(self.mag.clone())),
-            (Ip5306::ADDRESS, InternalBus(self.pmic.clone())),
+            (IP5306_ADDRESS, InternalBus(self.pmic.clone())),
         ];
         (0..2).flat_map(|bus| devices.clone().into_iter().map(move |(a, dev)|
             (bus, a, Box::new(dev) as Box<dyn I2cDevice>))).collect()

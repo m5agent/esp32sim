@@ -118,14 +118,24 @@ impl ClassicAdc {
         })
     }
 
+    fn dac_powered(&self, channel: u32) -> bool {
+        let pad = self.rtc_io.read(0x84 + channel * 4);
+        pad & ((1 << 18) | (1 << 10)) == (1 << 18) | (1 << 10)
+            && self.sens.read(0x9c) & (1 << (24 + channel)) == 0
+    }
+
+    // ESP-IDF v5.5.4 dac_ll_digi_enable_dma sets SENS.DAC_DIG_FORCE.
+    pub(crate) fn i2s_dac_channels(&self) -> u8 {
+        if self.sens.read(0x98) & (1 << 22) == 0 { return 0; }
+        u8::from(self.dac_powered(0)) | (u8::from(self.dac_powered(1)) << 1)
+    }
+
     pub fn dac_outputs(&self) -> Vec<(u8, u32)> {
         (0..2)
             .filter_map(|channel| {
                 let pin = 25 + channel as u8;
                 let value = self.rtc_io.read(0x84 + channel * 4);
-                let powered = value & ((1 << 18) | (1 << 10)) == (1 << 18) | (1 << 10);
-                let cw = self.sens.read(0x9c) & (1 << (24 + channel)) != 0;
-                (powered && !cw).then_some((pin, (((value >> 19) & 255) * 3300 + 127) / 255))
+                (self.dac_powered(channel) && self.i2s_dac_channels() & (1 << channel) == 0).then_some((pin, (((value >> 19) & 255) * 3300 + 127) / 255))
             })
             .collect()
     }

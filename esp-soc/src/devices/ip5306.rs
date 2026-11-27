@@ -1,73 +1,82 @@
-//! Injoinic IP5306 I2C variant, register specification v1.4.
+//! Injoinic IP5306 I2C variant, register document v1.21.
+//! Charger flags and gauge LEDs are supplied independently of the boost controls.
 use esp_periph::i2c::I2cDevice;
 
+pub const ADDRESS: u8 = 0x75;
+
 pub struct Ip5306 {
-    control: [u8; 3],
-    charger: [u8; 5],
-    mv: u16,
-    usb: bool,
-    pointer: u8,
-    select: bool,
+    regs: [u8; 0x25],
+    pointer: Option<u8>,
+    selecting: bool,
+    gauge: u8,
+    charging: bool,
+    full: bool,
+    supply: Option<(u16, bool)>,
 }
 
 impl Default for Ip5306 {
     fn default() -> Self {
-        Self { control: [0x37, 0x1d, 0x0c], charger: [0; 5],
-            mv: 3900, usb: true, pointer: 0, select: true }
+        let mut regs = [0; 0x25];
+        regs[0] = 0xbe;
+        Self { regs, pointer: None, selecting: true, gauge: 0x0f, charging: false, full: false, supply: None }
     }
 }
 
 impl Ip5306 {
-    pub const ADDRESS: u8 = 0x75;
-
-    pub fn supply(&mut self, battery_mv: u16, usb: bool) {
-        self.mv = battery_mv;
-        self.usb = usb;
+    pub fn m5stick() -> Self {
+        let mut pmic = Self::default();
+        pmic.supply(3900, true);
+        pmic
     }
 
-    pub fn output_on(&self) -> bool { self.usb || self.mv >= 3000 && self.control[0] & 0x20 != 0 }
+    pub fn supply(&mut self, millivolts: u16, usb: bool) {
+        let full = millivolts >= 4200 + u16::from((self.regs[0x22] >> 2) & 3) * 100;
+        let bars = match millivolts { 4000.. => 4, 3800.. => 3, 3650.. => 2, 3450.. => 1, _ => 0 };
+        self.set_battery(bars, usb && millivolts != 0 && !full, full);
+        self.supply = Some((millivolts, usb));
+    }
+
+    pub fn output_on(&self) -> bool {
+        self.supply.is_none_or(|(mv, usb)| usb || mv >= 3000 && self.regs[0] & 0x20 != 0)
+    }
+
+    /// The gauge exposes four cumulative LED bits, with a set bit meaning off.
+    pub fn set_battery(&mut self, bars: u8, charging: bool, full: bool) {
+        self.gauge = (0x0f << bars.min(4)) & 0x0f;
+        self.charging = charging;
+        self.full = full;
+    }
 }
 
 impl I2cDevice for Ip5306 {
     fn start(&mut self, read: bool) -> bool {
-        self.select = !read;
+        self.selecting = !read;
         true
     }
 
-    fn write(&mut self, value: u8) -> bool {
-        if self.select {
-            self.pointer = value;
-            self.select = false;
-            return true;
+    fn write(&mut self, byte: u8) -> bool {
+        if self.selecting {
+            self.pointer = Some(byte);
+            self.selecting = false;
+        } else if let Some(reg @ (0..=2 | 6 | 0x20..=0x24)) = self.pointer {
+            self.regs[usize::from(reg)] = byte;
+            if let Some((mv, usb)) = self.supply.filter(|_| reg == 0x22) {
+                self.supply(mv, usb);
+            }
         }
-        match self.pointer {
-            0..=2 => self.control[usize::from(self.pointer)] = value,
-            0x20..=0x24 => self.charger[usize::from(self.pointer - 0x20)] = value,
-            _ => {}
-        }
-        self.pointer = self.pointer.wrapping_add(1);
         true
     }
 
     fn read(&mut self) -> u8 {
-        let full = self.mv >= 4200 + u16::from((self.charger[2] >> 2) & 3) * 100;
-        let data = match self.pointer {
-            0..=2 => self.control[usize::from(self.pointer)],
-            0x20..=0x24 => self.charger[usize::from(self.pointer - 0x20)],
-            0x70 => u8::from(self.usb && self.mv != 0 && self.control[0] & 0x10 != 0 && !full) << 3,
-            0x71 => u8::from(full) << 3,
-            0x72 => u8::from(!self.output_on()) << 2,
-            0x78 => match self.mv {
-                4000.. => 0x0f,
-                3800.. => 0x1f,
-                3650.. => 0x3f,
-                3450.. => 0x7f,
-                _ => 0xff,
-            },
-            _ => 0,
-        };
-        self.pointer = self.pointer.wrapping_add(1);
-        data
+        match self.pointer {
+            Some(0x70) => u8::from(self.charging && self.regs[0] & 0x10 != 0) << 3,
+            Some(0x71) => u8::from(self.full) << 3,
+            Some(0x78) => (self.gauge << 4) | 0x0f,
+            Some(0x72) => u8::from(!self.output_on()) << 2,
+            Some(0x77) => 0,
+            Some(reg) => self.regs.get(usize::from(reg)).copied().unwrap_or(0xff),
+            None => 0xff,
+        }
     }
 }
 
@@ -75,26 +84,36 @@ impl I2cDevice for Ip5306 {
 mod tests {
     use super::*;
 
-    fn read_reg(chip: &mut Ip5306, reg: u8) -> u8 {
-        chip.start(false);
-        chip.write(reg);
-        chip.start(true);
-        chip.read()
+    fn read_at(dev: &mut Ip5306, reg: u8) -> u8 {
+        dev.start(false); dev.write(reg); dev.start(true); dev.read()
     }
 
     #[test]
-    fn load_and_charging_use_the_applied_supply() {
-        let mut chip = Ip5306::default();
-        assert_eq!(read_reg(&mut chip, 0x70), 8);
-        chip.supply(4200, true);
-        assert_eq!(read_reg(&mut chip, 0x71), 8);
-        assert_eq!(read_reg(&mut chip, 0x78), 15);
-        chip.supply(3500, false);
-        assert_eq!(read_reg(&mut chip, 0x70), 0);
-        assert_eq!(read_reg(&mut chip, 0x78), 0x7f);
-        chip.start(false);
-        chip.write(0);
-        chip.write(0);
-        assert!(!chip.output_on());
+    fn stick_supply_updates_the_gauge_and_boost_with_the_same_registers() {
+        let mut dev = Ip5306::m5stick();
+        assert_eq!(read_at(&mut dev, 0x78), 0x1f);
+        assert_eq!(read_at(&mut dev, 0x70), 8);
+        dev.supply(3500, false);
+        assert_eq!(read_at(&mut dev, 0x78), 0x7f);
+        assert_eq!(read_at(&mut dev, 0x70), 0);
+        dev.start(false); dev.write(0); dev.write(0);
+        assert!(!dev.output_on());
+        assert_eq!(read_at(&mut dev, 0x72), 4);
+    }
+
+    #[test]
+    fn gauge_and_charge_flags_follow_inputs_and_charge_enable() {
+        let mut dev = Ip5306::default();
+        assert_eq!(read_at(&mut dev, 0x78), 0xff);
+        assert_eq!(read_at(&mut dev, 0x70), 0);
+        dev.set_battery(2, true, false);
+        assert_eq!(read_at(&mut dev, 0x78) >> 4, 0x0c);
+        assert_eq!(read_at(&mut dev, 0x70), 8);
+        dev.start(false); dev.write(0); dev.write(0xae);
+        assert_eq!(read_at(&mut dev, 0x00), 0xae);
+        assert_eq!(read_at(&mut dev, 0x70), 0);
+        dev.set_battery(4, true, true);
+        assert_eq!(read_at(&mut dev, 0x78) >> 4, 0);
+        assert_eq!(read_at(&mut dev, 0x71), 8);
     }
 }

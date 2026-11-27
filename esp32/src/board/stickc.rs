@@ -94,7 +94,7 @@ pub(crate) struct Stick {
 
 impl Stick {
     pub(crate) fn new(kind: StickKind) -> Self {
-        let axp = (kind != StickKind::Plus2).then(|| Rc::new(RefCell::new(Axp192::default())));
+        let axp = (kind != StickKind::Plus2).then(|| Rc::new(RefCell::new(Axp192::stick())));
         let imu = (kind != StickKind::Se).then(|| Rc::new(RefCell::new(Mpu6886::default())));
         let rtc = Rc::new(RefCell::new(Bm8563::new(crate::periph::CPU_HZ)));
         let mut devices: Vec<(u8, Shared<dyn I2cDevice>)> = vec![(BM8563_ADDRESS, rtc.clone())];
