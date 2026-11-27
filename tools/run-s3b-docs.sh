@@ -25,6 +25,8 @@ case "$board" in
 esac
 printf '%s\n' '3.0 knob cw 4' '5.5 knob ccw 2' >"$out/encoder.txt"
 printf '%s\n' '2.0 touch 50 90 1' '3.5 touch 50 90 0' '4.0 touch 150 160 1' '6.5 touch 150 160 0' >"$out/touch.txt"
+printf '%s\n' '2.0 touch 160 160 1' '3.5 touch 160 160 0' '4.0 touch 300 280 1' '6.5 touch 300 280 0' >"$out/touch-button.txt"
+printf '%s\n' '2.0 touch 50 90 1' >"$out/touch-outside.txt"
 printf '%s\n' '2.0 key a' '2.4 key space' '3.0 key b' '3.4 key fn 400' '3.5 key del 100' '4.1 key c' '4.6 key enter' >"$out/keyboard.txt"
 printf '%s\n' '3.0 adc 10 1.73' '5.0 adc 10 2.00' >"$out/adc.txt"
 printf '%s\n' '2.0 ir-nec 10 34' '5.0 ir-nec 2a 57' >"$out/ir-nec.txt"
@@ -114,7 +116,8 @@ for image in "$firmware"/*/sketch.merged.bin; do
         rtc-2) seconds=11; flags=(--wifi 'ssid=ssid,psk=password,epoch=1764000000' --net none --pcap "$out/rtc-2.pcap") ;;
         keyboard|encoder|imu) flags=(--script "$out/$label.txt") ;;
         rfid-*) seconds=6; flags=(--script "$out/rfid.txt") ;;
-        touch|touch-*) seconds=6; flags=(--script "$out/touch.txt") ;;
+        touch|touch-1) seconds=6; flags=(--script "$out/touch.txt") ;;
+        touch-2) seconds=6; flags=(--script "$out/touch-button.txt") ;;
         speaker|buzzer) seconds=5; flags=(--wav "$out/$label-output.wav") ;;
         mic)
             seconds=11
@@ -144,7 +147,11 @@ for image in "$firmware"/*/sketch.merged.bin; do
             # capture shows a short touch before the hold state takes over.
             run "$label-first" "$image" 2.15 "${flags[@]}"
             run "$label-idle" "$image" "$seconds" ;;
-        imu|touch|touch-2)
+        touch-2)
+            run "$label-first" "$image" 3.3 "${flags[@]}"
+            run "$label-idle" "$image" 3.3
+            run "$label-outside" "$image" 3.3 --script "$out/touch-outside.txt" ;;
+        imu|touch)
             run "$label-first" "$image" 3.3 "${flags[@]}"
             run "$label-idle" "$image" "$seconds" ;;
         button)

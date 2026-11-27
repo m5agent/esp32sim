@@ -157,7 +157,14 @@ def verify(out, board, case):
         minimum_colors = 4 if case == "display" else 8
         require(len(color_counts(frame)) >= minimum_colors and changed(frame, early) >= 150, "missing animated display")
         return "display contains multicolor drawing and changes over time"
-    if case in {"battery", "imu", "touch", "touch-1", "touch-2"}:
+    if case == "touch-2":
+        idle, *_ = capture(out, board, case + "-idle")
+        first, *_ = capture(out, board, case + "-first")
+        outside, *_ = capture(out, board, case + "-outside")
+        require(first == frame and outside == idle and changed(frame, idle) >= 5,
+                "the image does not agree with the two button hits and the outside control")
+        return "both touch targets inside the button display Pressed, with idle and outside controls Released"
+    if case in {"battery", "imu", "touch", "touch-1"}:
         return sensors(out, board, case, frame)
     if case == "button":
         presses = {
