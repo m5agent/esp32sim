@@ -176,6 +176,7 @@ pub struct Opts {
     /// `--uart-tcp HOST:PORT`, `--uart1-tcp HOST:PORT`: UART0 / UART1 bytes over a TCP socket (esptool's `socket://`)
     pub uart_tcp: Option<String>, pub uart1_tcp: Option<String>,
     pub service_fd: Option<i32>,
+    pub service_flash_out: Option<std::path::PathBuf>,
     pub console: Option<String>, pub console_prefix: bool, pub realtime: bool, pub web_port: Option<u16>, pub web_dir: Option<String>, pub no_reboot: bool,
     pub i2s_tone: Vec<String>,
     pub mic_wav: Vec<String>,
@@ -266,6 +267,7 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
             "--console" => o.console = Some(next()),
             "--console-prefix" => o.console_prefix = true,
             "--realtime" => o.realtime = true,
+            "--service-flash-out" => o.service_flash_out = Some(next().into()),
             "--service-fd" => o.service_fd = Some(next().parse().expect("service socket descriptor")),
             "--web" => o.web_port = Some(next().parse().expect("port")),
             "--web-dir" => o.web_dir = Some(next()),
@@ -660,7 +662,11 @@ fn wifi_config(specs: &[String], net: &str, net_log: bool, hostfwd: &[String]) -
             _ => usage_error(&format!("--net: unknown option {kv:?} (epoch=UNIX_SECONDS)")),
         }
     }
-    let nat = mode == "nat" || mode == "user";
+    let nat = match mode {
+        "nat" | "user" => true,
+        "none" | "restricted" | "diagnostic" => false,
+        _ => usage_error("--net expects nat, user, none, restricted or diagnostic"),
+    };
     for cfg in &cfgs {
         eprintln!("[emu] virtual AP '{}' bssid {} channel {} ({})", cfg.ssid, esp_soc::wifi::mac_str(&cfg.bssid), cfg.channel, if cfg.psk.is_some() { "WPA2-PSK" } else { "open" });
     }
@@ -691,6 +697,9 @@ fn attach_wifi<B: SocBus>(bus: &mut B, o: &Opts, net_log: bool) {
     let mut cfgs = cfgs.into_iter();
     let first = cfgs.next().expect("at least one --wifi");
     bus.attach_wifi(first, nat).unwrap_or_else(|e| { eprintln!("--wifi: {e}"); std::process::exit(2) });
+    if o.net.split(',').next() == Some("diagnostic") {
+        if let Some(link) = bus.wifi_link_mut() { link.enable_diagnostics(); }
+    }
     for cfg in cfgs { bus.add_wifi_ap(cfg).unwrap_or_else(|e| { eprintln!("--wifi: {e}"); std::process::exit(2) }); }
 }
 
@@ -1115,6 +1124,9 @@ fn prepare<S: Soc>(m: &mut Machine<S>, o: &Opts) -> String {
         if uart == 0 { m.console.mask &= !2; }
     }
     if let Some(p) = &o.regtrace { m.add_observer(Box::new(RegTrace::new(std::fs::File::create(p).expect("regtrace file"), o.regtrace_max, o.regtrace_from_pc))); }
+    if o.service_flash_out.is_some() && o.service_fd.is_none() {
+        usage_error("--service-flash-out requires --service-fd");
+    }
     if let Some(fd) = o.service_fd {
         #[cfg(unix)]
         {
@@ -1126,6 +1138,7 @@ fn prepare<S: Soc>(m: &mut Machine<S>, o: &Opts) -> String {
             // from the calling service, which must be an open Unix stream socket.
             let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
             m.web = Some(esp_soc::web::WebServer::service(socket).expect("service socket"));
+            m.host.service_flash_out = o.service_flash_out.clone();
             m.rt.enabled = true;
         }
         #[cfg(not(unix))]

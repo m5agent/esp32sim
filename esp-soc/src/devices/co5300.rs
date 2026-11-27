@@ -327,7 +327,7 @@ mod tests {
             panel.transaction(&bytes[937..]);
             assert_eq!(panel.pixels_written as usize, ((strip + 1) * 466 * 16).min(466 * 466));
         }
-        let visible: Vec<_> = expected.chunks_exact(468).flat_map(|row| row[..466].iter().copied()).collect();
+        let visible: Vec<_> = expected.as_chunks::<468>().0.iter().flat_map(|row| row[..466].iter().copied()).collect();
         assert_eq!(panel.frame, visible);
         assert_eq!(panel.frames, 1);
         assert_eq!((panel.x, panel.y), (6, 0));

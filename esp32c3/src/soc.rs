@@ -58,6 +58,8 @@ impl esp_soc::SocBus for SocBus {
         self.periph.refresh_work();
         Ok(())
     }
+    fn wifi_link(&self) -> Option<&esp_soc::wifi::StationLink> { Some(&self.periph.wifi.link) }
+    fn wifi_link_mut(&mut self) -> Option<&mut esp_soc::wifi::StationLink> { Some(&mut self.periph.wifi.link) }
     fn attach_wifi(&mut self, cfg: esp_soc::wifi::ApConfig, nat: Option<esp_soc::nat::Nat>) -> Result<(), String> {
         self.periph.wifi.link.attach_new(cfg, nat, &self.debug);
         self.periph.refresh_work();
@@ -98,6 +100,7 @@ impl esp_soc::SocBus for SocBus {
     fn refresh_irq(&mut self) -> bool { self.periph.refresh_lines(); true }
     fn misc(&mut self) -> &mut Misc { &mut self.periph.misc }
     fn load_bytes(&mut self, addr: u32, data: &[u8]) -> Result<(), String> { SocBus::load_bytes(self, addr, data) }
+    fn flash_contents(&self) -> &[u8] { &self.flash }
     fn write_flash(&mut self, offset: usize, data: &[u8]) -> Result<(), String> { SocBus::write_flash(self, offset, data) }
     /// Copy the RAM segments, map the flash-resident ones through the MMU, as the 2nd-stage bootloader would.
     fn boot_app(&mut self, app_off: usize) -> Result<u32, String> {

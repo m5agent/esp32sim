@@ -77,6 +77,8 @@ impl esp_soc::SocBus for SocBus {
         self.flush_ticks();
         self.periph.wifi.link.add_ap(cfg, &self.debug)
     }
+    fn wifi_link(&self) -> Option<&esp_soc::wifi::StationLink> { Some(&self.periph.wifi.link) }
+    fn wifi_link_mut(&mut self) -> Option<&mut esp_soc::wifi::StationLink> { Some(&mut self.periph.wifi.link) }
     fn attach_wifi(&mut self, cfg: esp_soc::wifi::ApConfig, nat: Option<esp_soc::nat::Nat>) -> Result<(), String> {
         self.flush_ticks();
         self.periph.wifi.link.attach_new(cfg, nat, &self.debug);
@@ -134,6 +136,7 @@ impl esp_soc::SocBus for SocBus {
     }
     fn misc(&mut self) -> &mut Misc { &mut self.periph.misc }
     fn load_bytes(&mut self, addr: u32, data: &[u8]) -> Result<(), String> { SocBus::load_bytes(self, addr, data) }
+    fn flash_contents(&self) -> &[u8] { &self.flash }
     fn write_flash(&mut self, offset: usize, data: &[u8]) -> Result<(), String> {
         let target = self.flash.get_mut(offset..).and_then(|tail| tail.get_mut(..data.len()))
             .ok_or("flash image too large")?;
@@ -340,6 +343,15 @@ impl esp_soc::SocBus for SocBus {
     fn irq_sources_of(&self, core: usize, line: u32) -> Vec<usize> { (0..NUM_SOURCES).filter(|&s| self.periph.intmatrix.map[core][s] == line).collect() }
     /// The card answers on the slot whose clock the firmware routes to a pad (`Peripherals::sd_routes`).
     /// The SD bus takes no time: the S3's SDMMC clock tree is not decoded, so `--sd-timing` is refused.
+    fn sd_state(&self) -> Option<esp_periph::sdmmc::SdMediaState> {
+        self.periph.sdmmc.media_state().or_else(|| self.board.spi_sd_state())
+    }
+    fn set_sd_present(&mut self, present: bool) -> bool {
+        self.flush_ticks();
+        let spi = self.board.set_spi_sd_present(self.cycles, present);
+        let native = self.periph.sdmmc.set_media_present(present);
+        spi || native
+    }
     fn attach_sd_card(&mut self, image: Box<dyn esp_periph::sdmmc::SdStore>, config: esp_periph::sdmmc::SdCardConfig) -> Result<String, String> {
         if config.timed_bus { return Err("a timed SD bus needs the SDMMC clock tree, which the ESP32-S3 model does not decode".into()); }
         let mut card = esp_periph::sdmmc::SdCard::with_config(image, config)?;

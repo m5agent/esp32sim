@@ -126,6 +126,16 @@ impl BoardModel for PaperParallel {
 
     fn uses_spi_pins(&self) -> bool { true }
     fn has_spi_sd_slot(&self) -> bool { true }
+    fn spi_sd_state(&self) -> Option<esp_periph::sdmmc::SdMediaState> {
+        self.sd.as_deref().map(SpiSdCard::media_state)
+    }
+    fn set_spi_sd_present(&mut self, cycle: VirtualCycle, present: bool) -> bool {
+        let Some(card) = self.sd.as_deref_mut() else { return false };
+        if self.diy && card.present() != present {
+            self.edges.push(BoardEdge { cycle, pin: 48, level: !present });
+        }
+        card.set_present(present)
+    }
     fn insert_spi_sd(&mut self, card: SdCard) {
         self.sd = Some(Box::new(SpiSdCard::new(card)));
         if self.diy { self.edges.push(BoardEdge { cycle: self.cycle, pin: 48, level: false }); }
@@ -144,7 +154,7 @@ impl BoardModel for PaperParallel {
 
     fn input_levels(&self) -> Vec<(u8, bool)> {
         let mut levels = self.i2c.levels().to_vec();
-        if self.diy { levels.extend([(3, true), (4, true), (48, self.sd.is_none())]); }
+        if self.diy { levels.extend([(3, true), (4, true), (48, !self.sd.as_deref().is_some_and(SpiSdCard::present))]); }
         else { levels.extend([(4, true), (48, self.touch_high)]); }
         levels
     }

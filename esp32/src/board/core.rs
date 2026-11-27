@@ -353,6 +353,10 @@ impl BoardModel for Core {
     fn released_inputs(&mut self) -> Vec<u8> { std::mem::take(&mut self.release) }
     fn uses_spi_pins(&self) -> bool { true }
     fn has_spi_sd_slot(&self) -> bool { true }
+    fn spi_sd_state(&self) -> Option<esp_periph::sdmmc::SdMediaState> { self.sd.as_ref().map(esp_periph::sdmmc::SpiSdCard::media_state) }
+    fn set_spi_sd_present(&mut self, _cycle: VirtualCycle, present: bool) -> bool {
+        self.sd.as_mut().is_some_and(|card| card.set_present(present))
+    }
     fn insert_spi_sd(&mut self, sd: SdCard) { self.sd = Some(SpiSdCard::new(sd)); }
 
     fn spi_transfer_pins_bits(&mut self, _host: u8, pins: SpiPins, tx: &[u8], rx_bits: usize) -> Vec<u8> {

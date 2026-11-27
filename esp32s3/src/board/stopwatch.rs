@@ -271,6 +271,19 @@ impl BoardModel for StopWatch {
             _ => None,
         }
     }
+    fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
+        use esp_soc::json::Json;
+        let panel = self.wiring.panel.lock().unwrap();
+        let rtc = self.rtc.borrow();
+        vec![
+            ("panel/controller", Json::object([("pixels_written", Json::counter(panel.panel.pixels_written)),
+                                              ("active", Json::Bool(panel.active)),
+                                              ("tear_enabled", Json::Bool(panel.panel.tear_enabled()))])),
+            ("rtc", Json::object([("registers", Json::register_bytes(rtc.registers().iter().copied())), ("irq", Json::Bool(rtc.irq()))])),
+            ("pmic", self.wiring.power.service_state()),
+            ("imu", self.imu.borrow().service_state()),
+        ]
+    }
     fn report(&self) -> String {
         let off = !self.wiring.power.powered();
         format!("[stopwatch] power_off_requested={off} timer_wakes={} oled_transitions={} vibration_duties={:?} ext_uart={} ext_usb={} gpio_i2c={}",

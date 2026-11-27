@@ -320,6 +320,17 @@ impl BoardModel for Cores3 {
     }
     fn uses_spi_pins(&self) -> bool { self.hw.borrow().sd.is_some() }
     fn has_spi_sd_slot(&self) -> bool { true }
+    fn spi_sd_state(&self) -> Option<esp_periph::sdmmc::SdMediaState> {
+        self.hw.borrow().sd.as_deref().map(SpiSdCard::media_state)
+    }
+    fn set_spi_sd_present(&mut self, _cycle: VirtualCycle, present: bool) -> bool {
+        let mut hw = self.hw.borrow_mut();
+        let Some(card) = hw.sd.as_deref_mut() else { return false };
+        card.set_present(present);
+        if present { hw.aw9523.external &= !AW_TF_SW; }
+        else { hw.aw9523.external |= AW_TF_SW; }
+        true
+    }
     fn insert_spi_sd(&mut self, card: SdCard) {
         let mut hw = self.hw.borrow_mut();
         hw.sd = Some(Box::new(SpiSdCard::new(card)));
@@ -472,6 +483,18 @@ impl BoardModel for Cores3 {
     // The board supplies XCLK independently (pin_xclk = -1 in the sketch).
     fn camera_dvp_pins(&self) -> Option<[u8; 11]> { Some([39, 40, 41, 42, 15, 16, 48, 47, 45, 38, 46]) }
     fn named_pin(&self, _name: &str) -> Option<u8> { None }
+    fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
+        use esp_soc::json::Json;
+        let hw = self.hw.borrow();
+        vec![
+            ("pmic", Json::object([("registers", Json::register_bytes((0..=255).map(|register| hw.pmic.reg(register))))])),
+            ("rtc", Json::object([("registers", Json::register_bytes(hw.rtc.registers().iter().copied()))])),
+            ("imu", hw.bmi270.service_state()),
+            ("touch", Json::object([("report_reads", Json::counter(hw.touch.reads))])),
+            ("panel/controller", Json::object([("pixels_written", Json::counter(hw.panel.pixels_written)),
+                                              ("backlight", Json::Bool(hw.backlight)), ("reset", Json::Bool(hw.lcd_in_reset))])),
+        ]
+    }
     fn report(&self) -> String {
         let hw = self.hw.borrow_mut();
         let p = &hw.panel;

@@ -98,6 +98,8 @@ pub struct M5pm1 {
 }
 
 impl M5pm1 {
+    pub fn registers(&self) -> &[u8] { &self.registers.regs }
+
     pub const ADDRESS: u8 = 0x6e;
 
     pub fn new(state: Arc<Mutex<M5pm1State>>) -> Self {

@@ -158,8 +158,18 @@ impl Default for SdCardConfig {
     fn default() -> Self { SdCardConfig { prg_ns: 0, init_polls: 1, mid: 0, oid: *b"ES", name: *b"SIMSD", revision: 0x10, serial: None, date: (2024, 1), timed_bus: false } }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SdMediaState {
+    pub present: bool,
+    pub blocks: u64,
+    pub commands: u64,
+    pub blocks_read: u64,
+    pub blocks_written: u64,
+}
+
 pub struct SdCard {
     store: Box<dyn SdStore>,
+    present: bool,
     pub config: SdCardConfig,
     /// Addressable 512-byte blocks: the image rounded down to the 512 KiB unit of C_SIZE.
     blocks: u64,
@@ -198,8 +208,19 @@ impl SdCard {
         // as two cards.
         let serial = config.serial.unwrap_or((blocks as u32).wrapping_mul(0x9e37_79b9) ^ 0x5d1c_0b17);
         let init_left = config.init_polls;
-        Ok(SdCard { store, config, blocks, state: CardState::Idle, rca: 0, status: 0, app_cmd: false, if_cond: false, init_left, high_speed: false, wide: false,
+        Ok(SdCard { store, present: true, config, blocks, state: CardState::Idle, rca: 0, status: 0, app_cmd: false, if_cond: false, init_left, high_speed: false, wide: false,
                     block_count: None, erase: (None, None), data: Phase::None, written: 0, busy_until: 0, serial, log: false, commands: 0, blocks_read: 0, blocks_written: 0 })
+    }
+    pub fn present(&self) -> bool { self.present }
+    pub fn set_present(&mut self, present: bool) {
+        if self.present != present {
+            self.reset();
+            self.present = present;
+        }
+    }
+    pub fn media_state(&self) -> SdMediaState {
+        SdMediaState { present: self.present, blocks: self.blocks, commands: self.commands,
+                       blocks_read: self.blocks_read, blocks_written: self.blocks_written }
     }
     pub fn state(&self) -> CardState { self.state }
     pub fn blocks(&self) -> u64 { self.blocks }
@@ -450,6 +471,12 @@ impl SdCard {
 }
 
 impl SdDevice for SdCard {
+    fn present(&self) -> bool { self.present }
+    fn media_state(&self) -> Option<SdMediaState> { Some(self.media_state()) }
+    fn set_media_present(&mut self, present: bool) -> bool {
+        self.set_present(present);
+        true
+    }
     fn command(&mut self, now: u64, cmd: u8, arg: u32) -> Result<SdResponse, SdCmdError> {
         self.commands += 1;
         self.settle(now);

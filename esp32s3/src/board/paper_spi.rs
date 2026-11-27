@@ -45,6 +45,13 @@ impl I2cDevice for Clock {
     fn read(&mut self) -> u8 { self.0.borrow_mut().read() }
 }
 
+struct TouchPort(Rc<RefCell<Ft5x06>>);
+impl I2cDevice for TouchPort {
+    fn start(&mut self, read: bool) -> bool { self.0.borrow_mut().start(read) }
+    fn write(&mut self, byte: u8) -> bool { self.0.borrow_mut().write(byte) }
+    fn read(&mut self) -> u8 { self.0.borrow_mut().read() }
+}
+
 struct InertialSensor(Rc<RefCell<Bmi270>>);
 impl I2cDevice for InertialSensor {
     fn start(&mut self, read: bool) -> bool { self.0.borrow_mut().start(read) }
@@ -132,6 +139,7 @@ pub struct PaperSpi {
     rtc: Rc<RefCell<Rx8130>>,
     expander: Rc<Cell<u16>>,
     touch: Ft5x06Points,
+    touch_chip: Rc<RefCell<Ft5x06>>,
     imu: Arc<ImuMotion>,
     imu_chip: Rc<RefCell<Bmi270>>,
     env: Rc<Cell<[f32; 2]>>,
@@ -169,10 +177,12 @@ impl PaperSpi {
     fn new(display: Display, pins: (u8, u8), busy_level: bool) -> Self {
         let now = Rc::new(Cell::new(0));
         let imu = Arc::new(ImuMotion::default());
+        let touch = Ft5x06Points::default();
+        let touch_chip = Rc::new(RefCell::new(Ft5x06::new(touch.clone())));
         Self {
             display, i2c: PaperI2c::new(pins),
             pmic: Default::default(), expander: Default::default(),
-            touch: Default::default(), imu_chip: Rc::new(RefCell::new(Bmi270::new(imu.clone(), CPU_HZ).with_sampled_any_motion())), imu,
+            touch, touch_chip, imu_chip: Rc::new(RefCell::new(Bmi270::new(imu.clone(), CPU_HZ).with_sampled_any_motion())), imu,
             env: Rc::new(Cell::new([23.0, 45.0])), measurements: Default::default(),
             rtc: Rc::new(RefCell::new(Rx8130::new(CPU_HZ))), now,
             nfc: Rc::new(RefCell::new(St25r3916::with_type2_capability_container())),
@@ -228,7 +238,8 @@ impl BoardModel for PaperSpi {
             self.i2c.attach(M5ioe1::ADDRESS, M5ioe1::new(Default::default(), 0)
                 .with_revision(b'W').with_outputs(self.expander.clone()));
             self.i2c.attach(0x68, InertialSensor(self.imu_chip.clone()));
-            self.i2c.attach(0x38, Ft5x06::new(self.touch.clone()));
+            self.touch_chip = Rc::new(RefCell::new(Ft5x06::new(self.touch.clone())));
+            self.i2c.attach(0x38, TouchPort(self.touch_chip.clone()));
             self.i2c.attach(0x75, MonoCharger {
                 outputs: self.expander.clone(), power: self.pmic.clone(), registers: Reg8Device::new("IP2315", &[]),
             });
@@ -282,6 +293,10 @@ impl BoardModel for PaperSpi {
     }
 
     fn has_spi_sd_slot(&self) -> bool { !self.mono_board() }
+    fn spi_sd_state(&self) -> Option<esp_periph::sdmmc::SdMediaState> { self.sd.as_deref().map(esp_periph::sdmmc::SpiSdCard::media_state) }
+    fn set_spi_sd_present(&mut self, _cycle: VirtualCycle, present: bool) -> bool {
+        self.sd.as_deref_mut().is_some_and(|card| card.set_present(present))
+    }
     fn insert_spi_sd(&mut self, card: SdCard) { self.sd = Some(Box::new(SpiSdCard::new(card))); }
     fn spi_transfer_pins(&mut self, _host: u8, pins: SpiPins, tx: &[u8], rx_len: usize) -> Vec<u8> {
         let now = self.now.get();
@@ -354,7 +369,7 @@ impl BoardModel for PaperSpi {
             pmic.gpio_input(rtc_pin, rtc_high);
             if let Some(level) = motion_level { pmic.gpio_input(4, level); }
             if !mono {
-                let card_detect = self.sd.is_some() && pmic.driven_high & (1 << 4) != 0;
+                let card_detect = self.sd.as_deref().is_some_and(SpiSdCard::present) && pmic.driven_high & (1 << 4) != 0;
                 pmic.gpio_input(1, !card_detect);
             }
             !pmic.power_off_requested
@@ -486,6 +501,46 @@ impl BoardModel for PaperSpi {
     }
     fn finish_radio_peer(&mut self) -> io::Result<()> {
         self.radio.as_mut().and_then(|r| r.peer.as_mut()).map_or(Ok(()), RadioPeer::finish)
+    }
+    fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
+        use esp_soc::json::Json;
+        let rtc = self.rtc.borrow();
+        let pmic = self.pmic.lock().unwrap();
+        let (bytes, refreshes) = match &self.display {
+            Display::Mono(panel) => (panel.bytes_written, panel.refreshes),
+            Display::Color(panel) => (panel.bytes_written, panel.refreshes),
+        };
+        let mut panel = vec![
+            ("busy".into(), Json::Bool(self.display_deadline().is_some())),
+            ("busy_until_cycle".into(), self.display_deadline().map_or(Json::Null, Json::counter)),
+            ("bytes_written".into(), Json::counter(bytes)),
+            ("refreshes".into(), Json::counter(refreshes)),
+        ];
+        if let Display::Mono(mono) = &self.display {
+            panel.push(("update_control".into(), Json::Int(i64::from(mono.control()))));
+            panel.push(("waveform_timing".into(), mono.waveform_timing().map_or(Json::Null, |bytes| Json::register_bytes(bytes.iter().copied()))));
+        }
+        let mut nodes = vec![
+            ("panel/controller", Json::Obj(panel)),
+            ("rtc", Json::object([("registers", Json::register_bytes(rtc.registers().iter().copied())), ("irq", Json::Bool(rtc.irq()))])),
+            ("pmic", Json::object([
+                ("battery_mv", Json::Int(i64::from(pmic.battery_mv))),
+                ("vbus_mv", Json::Int(i64::from(pmic.vbus_mv))),
+                ("charging", Json::Bool(pmic.charging)),
+                ("driven_high", Json::Int(i64::from(pmic.driven_high))),
+            ])),
+        ];
+        if self.mono_board() {
+            let point = self.touch.lock().unwrap()[0];
+            nodes.push(("touch", Json::object([
+                ("report_reads", Json::counter(self.touch_chip.borrow().reads)),
+                ("irq_pin", Json::Int(4)), ("irq_level", Json::Bool(point.is_none())),
+                ("x", point.map_or(Json::Null, |(x, _)| Json::Int(i64::from(x)))),
+                ("y", point.map_or(Json::Null, |(_, y)| Json::Int(i64::from(y)))),
+            ])));
+            nodes.push(("imu", self.imu_chip.borrow().service_state()));
+        }
+        nodes
     }
     fn report(&self) -> String {
         match &self.display {

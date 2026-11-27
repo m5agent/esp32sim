@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 
 mod modeled;
 mod web;
+mod service;
 
 #[derive(Clone, Debug)]
 pub enum ScriptAction { Gpio(u8, bool), Serial(String), Uart(usize, String), Stop, Touch(u16, u16, bool), Poke(u32, u32), TouchPad(u8, bool), Ble(String), Analog(u8, esp_periph::AnalogSource),
@@ -58,6 +59,8 @@ pub struct HostIo {
     tails: [Vec<u8>; 2],
     /// sockets carrying a UART's bytes both ways (`uart_tcp::UartTcp`)
     pub uart_tcp: Vec<crate::uart_tcp::UartTcp>,
+    /// The service-owned destination for a coherent Flash snapshot.
+    pub service_flash_out: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

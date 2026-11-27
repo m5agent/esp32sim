@@ -16,6 +16,17 @@ impl Pm1Wiring {
         Self { pmic, state }
     }
     pub fn powered(&self) -> bool { !self.state.lock().unwrap().power_off_requested }
+    pub fn service_state(&self) -> esp_soc::json::Json {
+        use esp_soc::json::Json;
+        let state = self.state.lock().unwrap();
+        Json::object([
+            ("battery_mv", Json::Int(i64::from(state.battery_mv))),
+            ("charging", Json::Bool(state.charging)),
+            ("vbus_mv", Json::Int(i64::from(state.vbus_mv))),
+            ("driven_high", Json::Int(i64::from(state.driven_high))),
+            ("registers", Json::register_bytes(self.pmic.borrow().registers().iter().copied())),
+        ])
+    }
     pub fn command(&self, verb: &str, args: &[&str]) -> bool {
         match (verb, args) {
             ("battery", [millivolts, charging @ ("0" | "1")]) => {

@@ -252,6 +252,10 @@ impl BoardModel for StamPlc {
 
     fn uses_spi_pins(&self) -> bool { true }
     fn has_spi_sd_slot(&self) -> bool { true }
+    fn spi_sd_state(&self) -> Option<esp_periph::sdmmc::SdMediaState> { self.sd.as_ref().map(esp_periph::sdmmc::SpiSdCard::media_state) }
+    fn set_spi_sd_present(&mut self, _cycle: VirtualCycle, present: bool) -> bool {
+        self.sd.as_mut().is_some_and(|card| card.set_present(present))
+    }
     fn insert_spi_sd(&mut self, card: SdCard) { self.sd = Some(SpiSdCard::new(card)); }
     fn spi_transfer_pins(&mut self, host: u8, pins: SpiPins, tx: &[u8], rx_len: usize) -> Vec<u8> {
         let mut rx = vec![0xff; rx_len];
