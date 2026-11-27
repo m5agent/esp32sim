@@ -175,9 +175,10 @@ impl<S: Soc> Machine<S> {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(&temp)?;
-        let result = file.write_all(data).and_then(|_| file.sync_data());
-        drop(file);
+        let result = {
+            let mut file = options.open(&temp)?;
+            file.write_all(data).and_then(|_| file.sync_data())
+        };
         if let Err(error) = result.and_then(|_| std::fs::rename(&temp, dest)) {
             let _ = std::fs::remove_file(&temp);
             return Err(error);
