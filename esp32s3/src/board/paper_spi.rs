@@ -259,12 +259,14 @@ impl BoardModel for PaperSpi {
         read.unwrap_or_else(|| vec![0xff; rx_len])
     }
 
-    fn touch(&mut self, x: u16, y: u16, down: bool) {
-        if self.mono_board() {
-            self.touch.lock().unwrap()[0] = down.then_some((x.min(479), y.min(799)));
+    fn touch_at(&mut self, cycle: VirtualCycle, x: u16, y: u16, down: bool) {
+        if !self.mono_board() { return; }
+        let mut points = self.touch.lock().unwrap();
+        if points[0].is_some() != down {
+            self.edges.push(BoardEdge { cycle, pin: 4, level: !down });
         }
+        points[0] = down.then_some((x.min(479), y.min(799)));
     }
-    fn touch_irq(&self) -> Option<(u8, bool)> { self.mono_board().then(|| (4, self.touch.lock().unwrap()[0].is_none())) }
 
     fn next_deadline(&self) -> Option<u64> {
         self.display_deadline().into_iter()
