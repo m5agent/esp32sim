@@ -337,10 +337,12 @@ impl SocBus {
 
     /// Attach fresh peripheral-side devices and restore the levels driven by the persistent board.
     pub fn attach_board_devices(&mut self) {
-        if self.cycles == 0 && self.board.name() == "m5stack-sticks3" {
+        if self.cycles == 0 && matches!(self.board.name(),
+            "m5stack-sticks3" | "m5stack-atoms3r" | "m5stack-atoms3r-gc9107"
+            | "m5stack-atoms3r-cam" | "m5stack-atoms3r-m12" | "m5stack-atom-echos3r") {
             // ESP-IDF v5.4.2 efuse_reg.h: PKG_VERSION[23:21] in
-            // RD_MAC_SPI_SYS_3. StickS3's ESP32-S3-PICO-1 is LGA56 (1);
-            // M5GFX 0.3.0 dispatches the PM1 probe only for this package.
+            // RD_MAC_SPI_SYS_3. These ESP32-S3-PICO-1 boards use LGA56 (1).
+            // M5GFX 0.3.0 uses the package when choosing its board probe.
             let package = self.periph.efuse.ram.read(0x50);
             self.periph.efuse.ram.write(0x50, (package & !(7 << 21)) | (1 << 21));
         }

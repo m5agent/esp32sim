@@ -324,6 +324,13 @@ pub fn efuse_c6(mac: [u8; 6], rev_major: u32, rev_minor: u32, pkg: u32, blk_majo
     e
 }
 
+/// Nesso N1 uses the QFN40 ESP32-C6 with external SPI NOR (M5GFX package gate).
+pub fn nesso_n1_efuse(mac: [u8; 6]) -> Efuse {
+    let mut efuse = efuse_c6(mac, 0, 1, 0, 0, 3);
+    efuse.write(0x54, 0);
+    efuse
+}
+
 /// Cold devices share one allocation so unused ECC/PARLIO do not grow the hot bus.
 /// I2S stays at offset zero: its existing data path keeps the same indirection.
 #[repr(C)]

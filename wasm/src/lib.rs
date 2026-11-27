@@ -139,10 +139,13 @@ pub unsafe extern "C" fn esp32sim_new(board: *const u8, board_len: usize, flash_
     // `esp32p4` is rev < 3, `esp32p4-rev3` rev >= 3; `+c6` adds the ESP32-C6 co-processor on SDIO
     // (`esp32p4::coproc`), whose images load with `COPROC_KIND` / `COPROC_FLASH`.
     let (p4_name, coproc) = board.strip_suffix("+c6").map_or((board.as_str(), false), |b| (b, true));
+    let (p4_name, force_rev3) = p4_name.strip_suffix("-rev3")
+        .filter(|name| matches!(*name, "m5stack-tab5" | "m5stack-tab5-st7123"))
+        .map_or((p4_name, false), |name| (name, true));
     let p4_board = esp32p4::board::make_board(p4_name).filter(|_| !matches!(p4_name, "none" | "bare"));
     let tab5 = matches!(p4_name, "m5stack-tab5" | "m5stack-tab5-st7123");
     if tab5 && psram_bytes == 0 { psram_bytes = 32 << 20; }
-    let p4_rev3 = (p4_board.is_some() && !tab5) || matches!(p4_name, "esp32p4-rev3" | "p4-rev3");
+    let p4_rev3 = force_rev3 || (p4_board.is_some() && !tab5) || matches!(p4_name, "esp32p4-rev3" | "p4-rev3");
     let p4 = p4_rev3 || tab5 || matches!(p4_name, "esp32p4" | "p4");
     // The ESP32-S31: `esp32s31` is the bare module, `mosaico` the ESP-Mosaico (the CLI's names).
     let s31_board = esp32s31::board::make_board(&board).filter(|_| !matches!(board.as_str(), "none" | "bare"));
@@ -159,10 +162,10 @@ pub unsafe extern "C" fn esp32sim_new(board: *const u8, board_len: usize, flash_
         m.bus.board = b;
         m.bus.attach_board_devices();
         m.bus.set_flash_size(flash_bytes);
-        let classic_psram_bytes = if matches!(psram_mb, 0 | 4) {
+        let classic_psram_bytes = if matches!(psram_mb, 0 | 2 | 4 | 8) {
             psram_bytes
         } else {
-            log("[emu] classic ESP32 PSRAM is 0 or 4 MiB; starting without PSRAM");
+            log("[emu] classic ESP32 PSRAM supports 0, 2, 4 or 8 MiB; starting without PSRAM");
             0
         };
         if let Err(reason) = m.bus.set_psram_size(classic_psram_bytes) {
@@ -211,7 +214,11 @@ pub unsafe extern "C" fn esp32sim_new(board: *const u8, board_len: usize, flash_
         prepare(&mut m);
         MachineKind::S31(Box::new(m))
     } else if let Some(b) = c6_board {
-        let mut m = esp32c6::machine([0xdc, 0x1e, 0xd5, 0x6e, 0x8c, 0xdc], flash_bytes);
+        let mac = [0xdc, 0x1e, 0xd5, 0x6e, 0x8c, 0xdc];
+        let mut m = esp32c6::machine(mac, flash_bytes);
+        if b.name() == "arduino-nesso-n1" {
+            m.bus.periph.efuse = esp32c6::periph::nesso_n1_efuse(mac);
+        }
         m.bus.board = b;
         m.bus.attach_board_devices();
         m.bus.set_flash_size(flash_bytes);

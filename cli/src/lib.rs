@@ -594,12 +594,6 @@ fn setup_s3(o: &Opts) -> esp32s3::Machine {
     let flash_mb = o.flash_mb.unwrap_or(if large_flash { 16 } else { 8 });
     let atom_pico = matches!(m.bus.board.name(), "m5stack-atoms3r" | "m5stack-atoms3r-gc9107" |
         "m5stack-atoms3r-cam" | "m5stack-atoms3r-m12" | "m5stack-atom-echos3r");
-    if atom_pico {
-        // ESP32-S3-PICO-1 is LGA56. ESP-IDF v5.4.2 esp32s3/efuse_reg.h:
-        // EFUSE_PKG_VERSION is RD_MAC_SPI_SYS_3[23:21].
-        let reg = m.bus.periph.efuse.ram.read(0x50);
-        m.bus.periph.efuse.ram.write(0x50, (reg & !(7 << 21)) | (1 << 21));
-    }
     let psram_mb = o.psram_mb.unwrap_or(match m.bus.board.name() {
         "m5stack-cardputer" | "m5stack-cardputer-adv" | "m5stack-dial" | "m5stack-stamplc" | "m5stack-atoms3" | "m5stack-atoms3-gc9107" | "m5stack-atoms3-lite" | "m5stack-atoms3u" => 0,
         "m5stack-sticks3" => 8,
@@ -782,10 +776,7 @@ fn setup_c6(o: &Opts) -> esp32c6::Machine {
     let mac = o.mac.unwrap_or([0xdc, 0x1e, 0xd5, 0x6e, 0x8c, 0xdc]);
     let mut m = esp32c6::machine(mac, flash_mb << 20);
     if name == "arduino-nesso-n1" {
-        // Nesso uses the QFN40 C6 and an external SPI flash (M5GFX package gate).
-        let mut efuse = esp32c6::periph::efuse_c6(mac, 0, 1, 0, 0, 3);
-        efuse.write(0x54, 0);
-        m.bus.periph.efuse = efuse;
+        m.bus.periph.efuse = esp32c6::periph::nesso_n1_efuse(mac);
     }
     m.bus.set_flash_size(flash_mb << 20);   // the JEDEC capacity follows the size
     if !o.debug.is_empty() { let mut f = esp_soc::DebugFlags::from_env(); for d in &o.debug { f.parse(d); } m.set_debug(&f); }

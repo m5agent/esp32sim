@@ -27,10 +27,7 @@ fn physical_word(b: &mut esp32::bus::SocBus, addr: u32) -> u32 {
 /// Same factory, mapping, fault and lifecycle assertions on both compilation targets.
 #[no_mangle]
 pub extern "C" fn esp32sim_test_classic_psram() -> u32 {
-    // Existing manifest defaults (T-Display: 0 || 2), upload defaults and ABI callers.
-    for (board, flash, size) in [("esp32", 4, 1), ("esp32", 4, 2),
-        ("esp32", 4, 8), ("esp32", 4, 32), ("ttgo-tdisplay", 4, 2),
-        ("esp32", 32, 32)] {
+    for (board, flash, size) in [("esp32", 4, 1), ("esp32", 4, 32), ("esp32", 32, 32)] {
         // SAFETY: the board string is readable for its declared length.
         let p = unsafe { esp32sim_new(board.as_ptr(), board.len(), flash, size) };
         assert!(!p.is_null(), "unsupported classic PSRAM size must start without PSRAM");
@@ -52,6 +49,22 @@ pub extern "C" fn esp32sim_test_classic_psram() -> u32 {
     for size in [33, u32::MAX] {
         // SAFETY: the board literal is readable for its declared length.
         assert!(unsafe { esp32sim_new(b"esp32".as_ptr(), 5, 4, size) }.is_null(), "PSRAM cap still rejects oversized requests");
+    }
+    for (board, flash, size) in [("m5stack-stickc-plus2", 8, 2), ("m5stack-core2", 16, 8)] {
+        let p = unsafe { esp32sim_new(board.as_ptr(), board.len(), flash, size) };
+        assert!(!p.is_null());
+        let MachineKind::Esp32(m) = &mut unsafe { &mut *p }.m else { panic!("classic factory") };
+        let b = &mut m.bus;
+        enable(b);
+        // Map the last physical page (above 4 MiB on Core2) into the last virtual slot.
+        let last_page = size * 32 - 1;
+        map(b, 127, last_page);
+        let addr = LOW + 127 * 32768;
+        b.write32(addr, 0x12345678).unwrap();
+        assert_eq!(physical_word(b, last_page * 32768), 0x12345678);
+        map(b, 127, last_page + 1);
+        assert_eq!(b.read32(addr), Err(Fault::Unmapped));
+        unsafe { esp32sim_delete(p) };
     }
     for size in [4, 0, 4, 0] {
         // SAFETY: factory returns unique ownership, consumed by delete after the borrow ends.
