@@ -9,6 +9,8 @@ use std::{cell::Cell, rc::Rc, sync::{Arc, Mutex}};
 pub struct M5pm1State {
     pub battery_mv: u16,
     pub vbus_mv: u16,
+    pub vinout_mv: u16,
+    pub temperature_c: i16,
     pub charging: bool,
     pub power_off_requested: bool,
     pub driven_high: u8,
@@ -28,6 +30,10 @@ pub struct M5pm1Gpio {
     irq_outputs: u8,
 }
 
+impl M5pm1Gpio {
+    pub fn input_levels(&self) -> u8 { self.inputs }
+}
+
 impl Default for M5pm1Gpio {
     fn default() -> Self {
         Self { inputs: 0x1f, external: 0, wake: 0, rising: 0, status: 0, mask: 0x1f, irq_outputs: 0 }
@@ -36,7 +42,8 @@ impl Default for M5pm1Gpio {
 
 impl Default for M5pm1State {
     fn default() -> Self {
-        Self { battery_mv: 3900, vbus_mv: 0, charging: false, power_off_requested: false,
+        Self { battery_mv: 3900, vbus_mv: 0, vinout_mv: 5000, temperature_c: 25,
+            charging: false, power_off_requested: false,
             driven_high: 0, led_enabled: true, timer: None, gpio: M5pm1Gpio::default() }
     }
 }
@@ -53,6 +60,34 @@ pub struct M5pm1Timer {
 enum PowerAction { On, Off }
 
 impl M5pm1State {
+    pub fn set_supply_fixture(&mut self, property: &str, value: &str) -> bool {
+        match property {
+            "charging" => match value.parse() {
+                Ok(charging) => self.charging = charging,
+                Err(_) => return false,
+            },
+            "temperature-c" => match value.parse::<i16>() {
+                Ok(temperature @ -40..=125) => self.temperature_c = temperature,
+                _ => return false,
+            },
+            "gpio-input-bits" => match value.parse::<u8>() {
+                Ok(bits @ 0..=31) => for pin in 0..5 { self.gpio_input(pin, bits & (1 << pin) != 0); },
+                _ => return false,
+            },
+            property => {
+                let target = match property {
+                    "vbat-mv" => &mut self.battery_mv,
+                    "vin-mv" => &mut self.vbus_mv,
+                    "vinout-mv" => &mut self.vinout_mv,
+                    _ => return false,
+                };
+                let Ok(mv) = value.parse() else { return false };
+                *target = mv;
+            }
+        }
+        true
+    }
+
     pub fn gpio_input(&mut self, pin: u8, high: bool) {
         if pin >= 5 { return; }
         let bit = 1 << pin;
@@ -99,6 +134,12 @@ pub struct M5pm1 {
 
 impl M5pm1 {
     pub fn registers(&self) -> &[u8] { &self.registers.regs }
+
+    /// External input fixture, before direction, charge pin and pull resolution.
+    pub fn gpio_inputs(&self) -> u8 {
+        let state = self.state.lock().expect("M5PM1 state mutex poisoned");
+        if state.timer.is_some() { state.gpio.input_levels() } else { self.gpio_inputs }
+    }
 
     pub const ADDRESS: u8 = 0x6e;
 
@@ -212,6 +253,17 @@ impl I2cDevice for M5pm1 {
                 self.registers.ptr = reg.wrapping_add(1);
                 return true;
             }
+            // M5PM1 manual §ADC: bit zero starts conversion; channel 6 is
+            // the internal temperature. The 12-bit result is little-endian.
+            if reg == 0x2a {
+                let regs = &mut self.registers.regs;
+                if byte & 1 != 0 && (byte >> 1) & 7 == 6 {
+                    let state = self.state.lock().expect("M5PM1 state mutex poisoned");
+                    let raw = ((i32::from(state.temperature_c) + 40) * 16).clamp(0, 4095) as u16;
+                    [regs[0x28], regs[0x29]] = raw.to_le_bytes();
+                }
+                return self.registers.write(byte & !1);
+            }
             if matches!(reg, 0x06 | 0x18 | 0x19 | 0x40 | 0x43) {
                 let mut state = self.state.lock().expect("M5PM1 state mutex poisoned");
                 match reg {
@@ -293,6 +345,7 @@ impl I2cDevice for M5pm1 {
         }
         [self.registers.regs[0x22], self.registers.regs[0x23]] = state.battery_mv.to_le_bytes();
         [self.registers.regs[0x24], self.registers.regs[0x25]] = state.vbus_mv.to_le_bytes();
+        [self.registers.regs[0x26], self.registers.regs[0x27]] = state.vinout_mv.to_le_bytes();
         self.registers.read()
     }
 }
@@ -315,6 +368,8 @@ pub struct M5ioe1 {
     registers: Reg8Device,
     state: Arc<Mutex<M5ioe1State>>,
     outputs: Option<Rc<Cell<u16>>>,
+    input_bits: u16,
+    adc1_mv: u16,
 }
 
 impl M5ioe1 {
@@ -334,8 +389,21 @@ impl M5ioe1 {
             registers: Reg8Device::new("m5ioe1", &[
                 (0x00, lo), (0x01, hi), (0x02, b'A'), (0x13, 0xff), (0x14, 0x3f),
             ]),
-            state, outputs: None,
+            state, outputs: None, input_bits: 0x3fff, adc1_mv: 1650,
         }
+    }
+
+    pub fn input_bits(&self) -> u16 { self.input_bits }
+    pub fn adc1_mv(&self) -> u16 { self.adc1_mv }
+
+    pub fn set_fixture(&mut self, property: &str, value: &str) -> bool {
+        let Ok(value) = value.parse::<u16>() else { return false };
+        match property {
+            "input-bits" if value <= 0x3fff => self.input_bits = value,
+            "adc1-mv" if value <= 3300 => self.adc1_mv = value,
+            _ => return false,
+        }
+        true
     }
 
     /// Optional physical output observation for boards that wire other GPIO banks.
@@ -376,5 +444,15 @@ impl I2cDevice for M5ioe1 {
         ack
     }
 
-    fn read(&mut self) -> u8 { self.registers.read() }
+    fn read(&mut self) -> u8 {
+        let regs = &mut self.registers.regs;
+        for (bank, fixture) in self.input_bits.to_le_bytes().into_iter().enumerate() {
+            regs[0x07 + bank] = (regs[0x03 + bank] & regs[0x05 + bank]) | (!regs[0x03 + bank] & fixture);
+        }
+        let raw = if matches!(regs[0x15] & 7, 0 | 1) {
+            ((u32::from(self.adc1_mv) * 4095 + 1650) / 3300) as u16
+        } else { 0 };
+        [regs[0x16], regs[0x17]] = raw.to_le_bytes();
+        self.registers.read()
+    }
 }

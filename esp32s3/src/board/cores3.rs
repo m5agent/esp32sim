@@ -486,17 +486,32 @@ impl BoardModel for Cores3 {
     // The board supplies XCLK independently (pin_xclk = -1 in the sketch).
     fn camera_dvp_pins(&self) -> Option<[u8; 11]> { Some([39, 40, 41, 42, 15, 16, 48, 47, 45, 38, 46]) }
     fn named_pin(&self, _name: &str) -> Option<u8> { None }
+    fn set_service_property(&mut self, path: &str, property: &str, value: &str) -> bool {
+        matches!(path, "/board/imu" | "/board/magnetometer")
+            && self.hw.borrow_mut().bmi270.set_service_axis(property, value)
+    }
+
     fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
         use esp_soc::json::Json;
         let hw = self.hw.borrow();
-        vec![
-            ("pmic", Json::object([("registers", Json::register_bytes((0..=255).map(|register| hw.pmic.reg(register))))])),
-            ("rtc", Json::object([("registers", Json::register_bytes(hw.rtc.registers().iter().copied()))])),
+        let mut pmic = hw.pmic.supply_state().to_vec();
+        pmic.push(("registers", Json::register_bytes((0..=255).map(|register| hw.pmic.reg(register)))));
+        let mut nodes = vec![
+            ("pmic", Json::Obj(pmic.into_iter().map(|(key, value)| (key.into(), value)).collect())),
+            ("rtc", Json::object([("registers", Json::register_bytes(hw.rtc.registers().iter().copied())),
+                                 ("unix-time", Json::Int(hw.rtc.unix_time()))])),
             ("imu", hw.bmi270.service_state()),
             ("touch", Json::object([("report_reads", Json::counter(hw.touch.reads))])),
             ("panel/controller", Json::object([("pixels_written", Json::counter(hw.panel.pixels_written)),
                                               ("backlight", Json::Bool(hw.backlight)), ("reset", Json::Bool(hw.lcd_in_reset))])),
-        ]
+        ];
+        if let Some(base) = &self.stackchan {
+            nodes.extend(base.service_state());
+            if let Some(mag) = hw.bmi270.magnetometer_state() { nodes.push(("magnetometer", mag)); }
+            nodes.push(("ltr553", hw.ltr553.service_state()));
+            nodes.push(("aw9523", Json::object([("input-bits", Json::Int(hw.aw9523.external.into()))])));
+        }
+        nodes
     }
     fn report(&self) -> String {
         let hw = self.hw.borrow_mut();

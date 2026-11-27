@@ -12,6 +12,8 @@ pub struct Ip5306 {
     charging: bool,
     full: bool,
     supply: Option<(u16, bool)>,
+    power_off_requests: u64,
+    charger_present: bool,
 }
 
 impl Default for Ip5306 {
@@ -20,7 +22,7 @@ impl Default for Ip5306 {
         regs[0] = 0xbe;
         regs[1] = 0x05;
         regs[0x20..=0x23].copy_from_slice(&[0x02, 0x54, 0x01, 0x20]);
-        Self { regs, pointer: None, selecting: true, gauge: 0x0f, charging: false, full: false, supply: None }
+        Self { regs, pointer: None, selecting: true, gauge: 0x0f, charging: false, full: false, supply: None, power_off_requests: 0, charger_present: true }
     }
 }
 
@@ -31,11 +33,52 @@ impl Ip5306 {
         pmic
     }
 
-    pub fn supply(&mut self, millivolts: u16, usb: bool) {
+    fn charge_voltage_mv(&self) -> u16 {
         let charge = self.regs[0x22];
-        let target = [4200, 4300, 4350, 4400][usize::from((charge >> 2) & 3)]
-            + 14 * u16::from(charge & 3);
-        let full = millivolts >= target;
+        [4200, 4300, 4350, 4400][usize::from((charge >> 2) & 3)] + 14 * u16::from(charge & 3)
+    }
+
+    pub fn service_state(&self) -> crate::json::Json {
+        use crate::json::Json;
+        Json::object([
+            ("battery-mv", Json::Int(self.supply.map_or(i64::from(u32::MAX), |(mv, _)| i64::from(mv)))),
+            ("charger-present", Json::Bool(self.charger_present)),
+            ("boost-enabled", Json::Bool(self.regs[0] & 0x20 != 0)),
+            ("boost-keep-on", Json::Bool(self.regs[0] & 2 != 0)),
+            ("charge-voltage-mv", Json::Int(self.charge_voltage_mv().into())),
+            ("charge-current-ma", Json::Int(50 + i64::from(self.regs[0x24] & 0x1f) * 100)),
+            ("battery-code", Json::Int(if self.read_gauge() == 0xff && self.supply.is_none() { 0xff } else { self.gauge.into() })),
+            ("power-off-requests", Json::counter(self.power_off_requests)),
+        ])
+    }
+
+    fn read_gauge(&self) -> u8 { (self.gauge << 4) | 0x0f }
+
+    pub fn set_supply_fixture(&mut self, property: &str, value: &str) -> bool {
+        match property {
+            "charger-present" => {
+                let Ok(present) = value.parse() else { return false };
+                self.charger_present = present;
+                if let Some((mv, _)) = self.supply { self.supply(mv, present); }
+            }
+            "battery-mv" => {
+                if let Ok(mv) = value.parse::<u16>() {
+                    self.supply(mv, self.charger_present);
+                } else if value == "4294967295" {
+                    self.supply = None;
+                    self.set_battery(0, false, false);
+                } else {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    pub fn supply(&mut self, millivolts: u16, usb: bool) {
+        self.charger_present = usb;
+        let full = millivolts >= self.charge_voltage_mv();
         let bars = match millivolts { 4000.. => 4, 3800.. => 3, 3650.. => 2, 3450.. => 1, _ => 0 };
         self.set_battery(bars, usb && millivolts != 0 && !full, full);
         self.supply = Some((millivolts, usb));
@@ -77,7 +120,11 @@ impl I2cDevice for Ip5306 {
                 _ => 0xff,
             };
             let value = &mut self.regs[usize::from(reg)];
-            *value = (*value & !mask) | (byte & mask);
+            let old = *value;
+            *value = (old & !mask) | (byte & mask);
+            if reg == 0 && old & 0x22 != 0 && *value & 0x22 == 0 {
+                self.power_off_requests += 1;
+            }
             if let Some((mv, usb)) = self.supply.filter(|_| reg == 0x22) {
                 self.supply(mv, usb);
             }
@@ -89,7 +136,7 @@ impl I2cDevice for Ip5306 {
         match self.pointer {
             Some(0x70) => u8::from(self.charging && self.regs[0] & 0x10 != 0) << 3,
             Some(0x71) => u8::from(self.full) << 3,
-            Some(0x78) => (self.gauge << 4) | 0x0f,
+            Some(0x78) => self.read_gauge(),
             Some(0x72) => u8::from(!self.output_on()) << 2,
             Some(0x77) => 0,
             Some(reg) => self.regs.get(usize::from(reg)).copied().unwrap_or(0xff),

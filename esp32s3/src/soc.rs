@@ -318,6 +318,11 @@ impl esp_soc::SocBus for SocBus {
     fn observe_gpio(&mut self, on: bool) { self.gpio_events = if on { Some(Vec::new()) } else { None }; }
     fn take_gpio_events(&mut self) -> Vec<(u64, u8, bool)> { self.gpio_events.as_mut().map(std::mem::take).unwrap_or_default() }
     fn gpio_input(&self) -> u64 { self.periph.gpio.input }
+    fn rmt_tx_counts(&self, channel: usize) -> Option<[u64; 3]> {
+        let tx = self.periph.rmt.ch.get(channel)?;
+        Some([tx.tx_symbols, tx.tx_completions, tx.tx_errors])
+    }
+
     fn gpio_state(&self, pin: u8) -> Option<esp_soc::GpioState> {
         if pin > 48 || (22..=25).contains(&pin) { return None; }
         let mux = self.periph.io_mux.read(4 + u32::from(pin) * 4);

@@ -30,6 +30,15 @@ impl Ina226 {
     }
     pub fn supply(&mut self, mv: u16, ma: i16) { self.mv = mv; self.ma = ma; }
 
+    pub fn service_state(&self) -> crate::json::Json {
+        use crate::json::Json;
+        Json::object([
+            ("bus-voltage-mv", Json::Int(self.mv.into())),
+            ("current-ma", Json::Int(self.ma.into())),
+            ("shunt-ohms", Json::Float(f64::from(self.shunt_microohms) / 1_000_000.0)),
+        ])
+    }
+
     fn period(&self) -> Option<u64> {
         let config = self.regs[0];
         let shunt = if config & 1 != 0 { CONVERSION_US[usize::from((config >> 3) & 7)] } else { 0 };

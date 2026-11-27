@@ -39,6 +39,9 @@ pub struct RmtTxCh {
     loop_count: u32,
     pub acc_cycles: i64,
     pub bits: Vec<bool>,
+    pub tx_symbols: u64,
+    pub tx_completions: u64,
+    pub tx_errors: u64,
 }
 pub struct Rmt {
     pub ch: [RmtTxCh; 4],
@@ -141,6 +144,7 @@ impl Rmt {
                 c.running = false;
                 self.int_raw |= 1 << n;
                 self.tx_count += 1;
+                c.tx_completions += 1;
                 let bits = std::mem::take(&mut c.bits);
                 if bits.len() <= MAX_FRAME_BITS { self.done.push((n, bits)); }
                 break;
@@ -151,6 +155,7 @@ impl Rmt {
             if !DMA && (mem_words > self.mem.len() - base || (c.rd >= mem_words && !repeats)) {
                 c.running = false;
                 c.mem_empty = true;
+                c.tx_errors += 1;
                 self.int_raw |= 1 << (4 + n);
                 break;
             }
@@ -167,6 +172,7 @@ impl Rmt {
             if c.bits.len() <= MAX_FRAME_BITS { c.bits.push(ws2812_bit!(d0, l0, d1, l1)); }
             c.acc_cycles -= (d0 + d1) * cycles_per_tick;
             c.rd += 1;
+            c.tx_symbols += 1;
             c.since_thr += 1;
             if !DMA && c.tx_lim & 0x1ff != 0 && c.since_thr >= c.tx_lim & 0x1ff { c.since_thr = 0; self.int_raw |= 1 << (8 + n); }   // TX_THR_EVENT
             c.end_pending = d1 == 0;

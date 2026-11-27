@@ -31,6 +31,15 @@ impl Ltr553 {
         self.sample = [ch0, ch1, ps];
         self.mark_ready();
     }
+    pub fn service_state(&self) -> crate::json::Json {
+        use crate::json::Json;
+        let [ch0, ch1, ps] = self.sample;
+        Json::object([
+            ("light-level", Json::Int((i64::from(ch0) + i64::from(ch1)) / 2)),
+            ("proximity-level", Json::Int(ps.into())),
+        ])
+    }
+
     fn als_active(&self) -> bool { self.regs[0x80] & 1 != 0 }
     fn ps_active(&self) -> bool {
         // The CoreS3 docs sketch's LTR5XX.cpp setPsMode writes 0b10 for active.

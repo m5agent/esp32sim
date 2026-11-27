@@ -33,6 +33,26 @@ impl Mpu6886 {
         self.sample = sample;
     }
 
+    pub fn set_service_axis(&mut self, property: &str, value: &str) -> bool {
+        let Some((kind, axis)) = property.split_once('-') else { return false; };
+        let (accel, gyro) = self.sample.split_at_mut(3);
+        match kind {
+            "accel" => super::imu_motion::set_axis(accel.try_into().unwrap(), axis, value, 32.0),
+            "gyro" => super::imu_motion::set_axis(gyro.try_into().unwrap(), axis, value, 4000.0),
+            _ => false,
+        }
+    }
+
+    /// Physical inputs to the range conversion used by the I2C data burst.
+    pub fn service_state(&self) -> crate::json::Json {
+        use crate::json::Json;
+        let [ax, ay, az, gx, gy, gz] = self.sample;
+        Json::object([
+            ("accel-x", Json::Float(ax)), ("accel-y", Json::Float(ay)), ("accel-z", Json::Float(az)),
+            ("gyro-x", Json::Float(gx)), ("gyro-y", Json::Float(gy)), ("gyro-z", Json::Float(gz)),
+        ])
+    }
+
     /// Set the raw temperature ADC word, before the guest applies its conversion.
     pub fn set_temperature_raw(&mut self, temperature: i16) {
         self.temperature = temperature;
@@ -92,6 +112,20 @@ mod tests {
     fn select(imu: &mut Mpu6886, reg: u8) {
         assert!(imu.start(false));
         assert!(imu.write(reg));
+    }
+
+    #[test]
+    fn scalar_control_and_guest_burst_share_sample() {
+        let mut imu = Mpu6886::default();
+        select(&mut imu, 0x6b);
+        imu.write(1);
+        assert!(imu.set_service_axis("accel-y", "-0.5"));
+        assert!(!imu.set_service_axis("accel-z", "NaN"));
+        assert_eq!(imu.service_state().get("accel-y").and_then(crate::json::Json::as_f64), Some(-0.5));
+        assert_eq!(imu.service_state().get("accel-z").and_then(crate::json::Json::as_f64), Some(1.0));
+        select(&mut imu, 0x3d);
+        assert!(imu.start(true));
+        assert_eq!(i16::from_be_bytes([imu.read(), imu.read()]), -8192);
     }
 
     #[test]

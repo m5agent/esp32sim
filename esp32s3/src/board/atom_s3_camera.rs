@@ -31,6 +31,10 @@ impl Camera {
         match self.sensor { Sensor::Gc0308(_) => Gc0308::ADDRESS, Sensor::Ov3660(_) => Ov3660::ADDRESS }
     }
 
+    pub fn model(&self) -> &'static str {
+        match self.sensor { Sensor::Gc0308(_) => "gc0308", Sensor::Ov3660(_) => "ov3660" }
+    }
+
     fn sccb(&mut self) -> &mut dyn I2cDevice {
         match &mut self.sensor { Sensor::Gc0308(d) => d.as_mut(), Sensor::Ov3660(d) => d }
     }

@@ -64,3 +64,12 @@ pub fn motion_script_screen(t: f64) -> ([f64; 3], [f64; 3]) {
     let deg = 180.0 / PI / (2.0 * h);
     (a, [(l1 - l0) * deg, 0.0, (r1 - r0) * deg])
 }
+
+/// A scalar control updates one axis of an emulated sensor sample.
+pub(super) fn set_axis(sample: &mut [f64; 3], axis: &str, value: &str, limit: f64) -> bool {
+    let index = match axis { "x" => 0, "y" => 1, "z" => 2, _ => return false };
+    let Ok(value) = value.parse::<f64>() else { return false };
+    if !(-limit..=limit).contains(&value) { return false; }
+    sample[index] = value;
+    true
+}

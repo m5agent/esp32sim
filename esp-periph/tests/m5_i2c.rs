@@ -213,3 +213,22 @@ fn pm1_configured_falling_edge_wakes_powered_off_board() {
     assert!(!state.lock().unwrap().power_off_requested);
     assert_eq!(read(&mut pmic, 0x05, 1), [0x20]);
 }
+
+#[test]
+fn pmic_and_expander_service_inputs_reach_guest_registers() {
+    let state = Arc::new(Mutex::new(M5pm1State::default()));
+    let mut pmic = M5pm1::new(state.clone());
+    assert!(state.lock().unwrap().set_supply_fixture("temperature-c", "41"));
+    assert!(state.lock().unwrap().set_supply_fixture("vinout-mv", "4250"));
+    assert!(!state.lock().unwrap().set_supply_fixture("temperature-c", "999"));
+    write(&mut pmic, 0x2a, &[13]);
+    assert_eq!(read(&mut pmic, 0x28, 3), [0x10, 5, 12]);
+    assert_eq!(read(&mut pmic, 0x26, 2), 4250u16.to_le_bytes());
+
+    let mut ioe = M5ioe1::new(Default::default(), 0);
+    assert!(ioe.set_fixture("input-bits", "70"));
+    assert!(ioe.set_fixture("adc1-mv", "1100"));
+    assert_eq!(read(&mut ioe, 0x07, 2), [70, 0]);
+    write(&mut ioe, 0x15, &[1]);
+    assert_eq!(read(&mut ioe, 0x16, 2), 1365u16.to_le_bytes());
+}

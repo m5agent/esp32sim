@@ -29,6 +29,19 @@ pub struct Bm8563 {
 fn from_bcd(b: u8) -> u8 { (b >> 4) * 10 + (b & 15) }
 fn bcd(n: u8) -> u8 { ((n / 10) << 4) | (n % 10) }
 
+/// Decode a clock's BCD register values, using the same valid ranges as its calendar.
+pub(super) fn calendar_unix_time(year: i64, month: u8, day: u8, hour: u8, min: u8, sec: u8) -> i64 {
+    let leap = |y: i64| y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let days_before = |y: i64| (y - 1) * 365 + (y - 1) / 4 - (y - 1) / 100 + (y - 1) / 400;
+    let month_lengths = [31, 28 + i64::from(leap(year)), 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month = usize::from(from_bcd(month).clamp(1, 12) - 1);
+    let days = days_before(year) - days_before(1970)
+        + month_lengths[..month].iter().sum::<i64>()
+        + i64::from(from_bcd(day)).clamp(1, month_lengths[month]) - 1;
+    days * 86400 + i64::from(from_bcd(hour).min(23)) * 3600
+        + i64::from(from_bcd(min).min(59)) * 60 + i64::from(from_bcd(sec).min(59))
+}
+
 impl Bm8563 {
     pub fn registers(&self) -> &[u8] { &self.regs }
     pub fn new(hz: u64) -> Self {
@@ -130,6 +143,12 @@ impl Bm8563 {
     pub fn calendar_bcd(&self) -> [u8; 7] {
         self.regs[2..9].try_into().expect("fixed register range")
     }
+    pub fn unix_time(&self) -> i64 {
+        let [sec, min, hour, day, _, month, year] = self.calendar_bcd();
+        let base = if month & 0x80 == 0 { 2000 } else { 1900 };
+        calendar_unix_time(base + i64::from(from_bcd(year)), month & 0x1f, day, hour, min, sec & 0x7f)
+    }
+
     pub fn control2(&self) -> u8 { self.regs[1] }
     pub fn next_deadline(&self) -> Option<VirtualCycle> {
         let alarm = (self.regs[0] & STOP == 0 && self.regs[1] & (AF | AIE) == AIE && self.alarm_enabled())

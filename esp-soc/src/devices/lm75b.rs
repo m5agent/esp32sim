@@ -34,6 +34,8 @@ impl Lm75b {
         }
     }
 
+    pub fn temperature_c(&self) -> f64 { f64::from(self.temperature) / 256.0 }
+
     pub fn os_low(&self) -> bool { self.os ^ (self.config & 4 != 0) }
 }
 

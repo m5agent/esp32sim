@@ -492,6 +492,20 @@ impl BoardModel for Core {
         true
     }
 
+    fn set_service_property(&mut self, path: &str, property: &str, value: &str) -> bool {
+        match (&self.power, path) {
+            (Power::Basic(chip), "/board/ip5306") => chip.borrow_mut().set_supply_fixture(property, value),
+            _ => false,
+        }
+    }
+
+    fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
+        match &self.power {
+            Power::Basic(chip) => vec![("ip5306", chip.borrow().service_state())],
+            _ => Vec::new(),
+        }
+    }
+
     fn report(&self) -> String {
         let touch_reads = self.touch.as_ref().map_or(0, |t| t.borrow().reads);
         let p = &self.panel;

@@ -505,6 +505,22 @@ impl BoardModel for PaperSpi {
     fn finish_radio_peer(&mut self) -> io::Result<()> {
         self.radio.as_mut().and_then(|r| r.peer.as_mut()).map_or(Ok(()), RadioPeer::finish)
     }
+    fn set_service_property(&mut self, path: &str, property: &str, value: &str) -> bool {
+        match path {
+            "/board/imu" if self.mono_board() => self.imu_chip.borrow_mut().set_service_axis(property, value),
+            "/board/pmic" => self.pmic.lock().unwrap().set_supply_fixture(property, value),
+            "/board/sht40" if !self.mono_board() => {
+                let [t, h] = self.env.get().map(|value| value.to_string());
+                match property {
+                    "temperature-c" => self.board_command(self.now.get(), "sht40", &[value, &h]),
+                    "humidity-pct" => self.board_command(self.now.get(), "sht40", &[&t, value]),
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
     fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
         use esp_soc::json::Json;
         let rtc = self.rtc.borrow();
@@ -525,12 +541,18 @@ impl BoardModel for PaperSpi {
         }
         let mut nodes = vec![
             ("panel/controller", Json::Obj(panel)),
-            ("rtc", Json::object([("registers", Json::register_bytes(rtc.registers().iter().copied())), ("irq", Json::Bool(rtc.irq()))])),
+            ("rtc", Json::object([("registers", Json::register_bytes(rtc.registers().iter().copied())),
+                                 ("irq", Json::Bool(rtc.irq())), ("unix-time", Json::Int(rtc.unix_time()))])),
             ("pmic", Json::object([
                 ("battery_mv", Json::Int(i64::from(pmic.battery_mv))),
                 ("vbus_mv", Json::Int(i64::from(pmic.vbus_mv))),
+                ("vbat-mv", Json::Int(pmic.battery_mv.into())),
+                ("vin-mv", Json::Int(pmic.vbus_mv.into())),
+                ("vinout-mv", Json::Int(pmic.vinout_mv.into())),
+                ("temperature-c", Json::Int(pmic.temperature_c.into())),
                 ("charging", Json::Bool(pmic.charging)),
                 ("driven_high", Json::Int(i64::from(pmic.driven_high))),
+                ("gpio-input-bits", Json::Int(pmic.gpio.input_levels().into())),
             ])),
         ];
         if self.mono_board() {
@@ -542,6 +564,12 @@ impl BoardModel for PaperSpi {
                 ("y", point.map_or(Json::Null, |(_, y)| Json::Int(i64::from(y)))),
             ])));
             nodes.push(("imu", self.imu_chip.borrow().service_state()));
+            nodes.push(("charger", Json::object([("charging", Json::Bool(pmic.charging && pmic.vbus_mv > 1000))])));
+        } else {
+            let [temperature, humidity] = self.env.get();
+            nodes.push(("sht40", Json::object([
+                ("temperature-c", Json::Float(temperature.into())), ("humidity-pct", Json::Float(humidity.into())),
+            ])));
         }
         nodes
     }

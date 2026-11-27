@@ -155,8 +155,16 @@ impl BoardModel for StickS3 {
     }
     fn display_version(&self) -> u64 { self.lcd.version() }
     fn display_frames(&self) -> u64 { self.lcd.lcd.frames }
+    fn set_service_property(&mut self, path: &str, property: &str, value: &str) -> bool {
+        match path {
+            "/board/imu" => self.imu.borrow_mut().set_service_axis(property, value),
+            "/board/pmic" => self.power.set_service_property(property, value),
+            _ => false,
+        }
+    }
+
     fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
-        vec![("pmic", self.power.service_state()), ("imu", self.imu.borrow().service_state())]
+        vec![("pmic", self.power.service_state(Some(3))), ("imu", self.imu.borrow().service_state())]
     }
     fn report(&self) -> String {
         format!("[sticks3] RAMWR={} pixels={} lcd_rail={} powered={} timer_wakes={} RMT46_frames={} RMT46_active_low={} last_nec={:?} gpio_i2c={}",

@@ -256,6 +256,13 @@ impl StackChan {
         let positions = self.servo.positions();
         std::array::from_fn(|i| (f64::from(positions[i]) - f64::from(SERVO_ZERO[i])) * 0.3125)
     }
+    pub fn service_state(&self) -> [(&'static str, esp_soc::json::Json); 2] {
+        use esp_soc::json::Json;
+        let hw = self.hw.borrow();
+        [("ina226", hw.ina.service_state()),
+         ("si12t", Json::object([("touch-bits", Json::Int(hw.touch[0x10].into()))]))]
+    }
+
     pub fn report(&self) -> String {
         let hw = self.hw.borrow();
         let [yaw, pitch] = self.angles();

@@ -22,6 +22,8 @@ impl Default for Lp5562 {
 impl Lp5562 {
     pub const ADDRESS: u8 = 0x30;
 
+    pub fn rgb_pwm(&self) -> [u8; 3] { [self.regs[4], self.regs[3], self.regs[2]] }
+
     pub fn outputs(&self) -> [u8; 4] {
         let channel = |pwm, current, shift: u32| {
             if self.regs[0] & 0x40 != 0 && (self.regs[0x70] >> shift) & 3 == 0 && self.regs[current] != 0 {

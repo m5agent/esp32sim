@@ -57,6 +57,11 @@ impl Axp2101 {
         self.charging = charging;
     }
     pub fn set_vbus_mv(&mut self, mv: u16) { self.vbus_mv = mv.min(0x3fff); }
+    pub fn supply_state(&self) -> [(&'static str, crate::json::Json); 3] {
+        use crate::json::Json;
+        [("vbat-mv", Json::Int(self.battery_mv.into())), ("vin-mv", Json::Int(self.vbus_mv.into())),
+         ("charging", Json::Bool(self.charging))]
+    }
     pub fn powered(&self) -> bool { self.powered }
     /// A register as the guest last wrote or the model set it (rail enables, voltages).
     pub fn reg(&self, r: u8) -> u8 { self.regs[r as usize] }

@@ -23,6 +23,7 @@ pub struct Et047tc1 {
     endpoint: Vec<u8>,
     scanning: bool,
     pub scans: u64,
+    pub latched_lines: u64,
     pub frames: u64,
     pub version: u64,
 }
@@ -33,7 +34,7 @@ impl Default for Et047tc1 {
             frame: vec![0xffff; COLUMNS * ROWS], pending: vec![0xffff; COLUMNS * ROWS],
             scan: Vec::with_capacity(LINE_BYTES * ROWS), line: None,
             wave: vec![0; COLUMNS * ROWS], endpoint: vec![0; COLUMNS * ROWS],
-            scanning: false, scans: 0, frames: 0, version: 0,
+            scanning: false, scans: 0, latched_lines: 0, frames: 0, version: 0,
         }
     }
 }
@@ -55,6 +56,7 @@ impl Et047tc1 {
     pub fn latch(&mut self) {
         let Some(line) = self.line.take() else { return; };
         self.scan.extend_from_slice(&line);
+        self.latched_lines += 1;
         if self.scan.len() == LINE_BYTES * ROWS {
             self.scanning = false;
             self.scans += 1;
@@ -108,7 +110,9 @@ mod tests {
         let mut panel = Et047tc1::default();
         panel.start_scan();
         panel.shift(&[0x55; LINE_BYTES]);
+        assert_eq!(panel.latched_lines, 0);
         panel.latch();
+        assert_eq!(panel.latched_lines, 1);
         panel.power_off();
         assert_eq!(panel.version, 0, "incomplete gate scan is discarded");
         panel.start_scan();

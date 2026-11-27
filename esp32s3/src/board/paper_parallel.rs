@@ -203,6 +203,14 @@ impl BoardModel for PaperParallel {
             self.sync_touch_irq();
         }
     }
+    fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
+        use esp_soc::json::Json;
+        vec![("panel/controller", Json::object([
+            ("scan-frames", Json::counter(self.panel.scans)),
+            ("latched-lines", Json::counter(self.panel.latched_lines)),
+        ]))]
+    }
+
     fn report(&self) -> String {
         format!("[{}] ET047TC1 scans={} refreshes={} powered={} soft-i2c={}",
             self.name(), self.panel.scans, self.panel.frames, self.panel_on, self.i2c.transactions())

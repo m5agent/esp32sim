@@ -49,6 +49,9 @@ impl<S: Soc> Machine<S> {
             ("state-set", ["/board/sd", "present", present @ ("true" | "false")]) => {
                 self.service_sd_present(*present == "true")
             }
+            ("state-set", [path, property, value]) => {
+                self.bus.board().set_service_property(path, property, value).then_some(Json::Null)
+            }
             ("sd-media", [present]) if matches!(*present, "insert" | "eject") => {
                 self.service_sd_present(*present == "insert")
             }
@@ -138,6 +141,15 @@ impl<S: Soc> Machine<S> {
             nodes.push((format!("/board/leds/{name}"), led_state(leds, updates)));
         }
         for (path, value) in board.service_state() { nodes.push((format!("/board/{path}"), value)); }
+        if board.name() == "m5stack-atoms3u" {
+            if let Some([symbols, completions, errors]) = self.bus.rmt_tx_counts(0) {
+                nodes.push(("/soc/rmt/0".into(), Json::object([
+                    ("tx-symbols", Json::counter(symbols)),
+                    ("tx-completions", Json::counter(completions)),
+                    ("tx-errors", Json::counter(errors)),
+                ])));
+            }
+        }
         for pin in 0..64 {
             let Some(state) = self.bus.gpio_state(pin) else { continue };
             nodes.push((format!("/soc/gpio/{pin}"), Json::object([

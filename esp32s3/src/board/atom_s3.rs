@@ -260,16 +260,46 @@ impl BoardModel for AtomS3 {
     fn set_camera_jpeg(&mut self, jpeg: Jpeg) -> Result<(), JpegError> {
         self.camera.as_ref().ok_or(JpegError::Unsupported)?.borrow_mut().jpeg(jpeg)
     }
+    fn set_service_property(&mut self, path: &str, property: &str, value: &str) -> bool {
+        match path {
+            "/board/imu" => self.mpu.as_ref().is_some_and(|imu| imu.borrow_mut().set_service_axis(property, value))
+                || self.bmi.as_ref().is_some_and(|imu| imu.borrow_mut().set_service_axis(property, value)),
+            "/board/magnetometer" => self.bmi.as_ref().is_some_and(|imu| imu.borrow_mut().set_service_axis(property, value)),
+            _ => false,
+        }
+    }
+
     fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
         use esp_soc::json::Json;
-        let Some(camera) = &self.camera else { return Vec::new(); };
-        let camera = camera.borrow();
-        vec![("camera", Json::object([
-            ("auto-increment", Json::Bool(camera.auto_increment)),
-            ("powered", Json::Bool(camera.powered)),
-            ("frame-seed", Json::counter(camera.frame_seed.into())),
-            ("frames", Json::counter(camera.frames)),
-        ]))]
+        let mut nodes = Vec::new();
+        if let Some(mpu) = &self.mpu { nodes.push(("imu", mpu.borrow().service_state())); }
+        if let Some(bmi) = &self.bmi {
+            let bmi = bmi.borrow();
+            nodes.push(("imu", bmi.service_state()));
+            if let Some(mag) = bmi.magnetometer_state() { nodes.push(("magnetometer", mag)); }
+        }
+        if let Some(audio) = &self.audio { nodes.push(("es8311", audio.service_state())); }
+        if let Some(lp) = &self.lp {
+            let [red, green, blue] = lp.borrow().rgb_pwm();
+            nodes.push(("lp5562", Json::object([
+                ("red-pwm", Json::Int(red.into())), ("green-pwm", Json::Int(green.into())),
+                ("blue-pwm", Json::Int(blue.into())),
+            ])));
+        }
+        if let Some(camera) = &self.camera {
+            let camera = camera.borrow();
+            nodes.push(("camera", Json::object([
+                ("auto-increment", Json::Bool(camera.auto_increment)),
+                ("powered", Json::Bool(camera.powered)),
+                ("frame-seed", Json::counter(camera.frame_seed.into())),
+                ("frames", Json::counter(camera.frames)),
+            ])));
+            let model = camera.model();
+            nodes.push((model, Json::object([
+                ("model", Json::Str(model.into())), ("address", Json::Int(camera.address().into())),
+            ])));
+        }
+        nodes
     }
     fn set_camera_auto_increment(&mut self, enabled: bool) -> bool {
         let Some(camera) = &self.camera else { return false; };

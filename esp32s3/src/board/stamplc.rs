@@ -366,6 +366,18 @@ impl BoardModel for StamPlc {
         self.irq();
         true
     }
+    fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
+        use esp_soc::json::Json;
+        let devices = self.devices.borrow();
+        vec![
+            ("lm75", Json::object([("temperature-c", Json::Float(devices.temp.temperature_c()))])),
+            ("ina226", devices.ina.service_state()),
+            ("rtc", Json::object([("unix-time", Json::Int(devices.rtc.unix_time()))])),
+            ("aw9523", Json::object([("input-bits", Json::Int(devices.plc.external.into()))])),
+            ("pi4ioe", Json::object([("input-bits", Json::Int(devices.front.levels().into()))])),
+        ]
+    }
+
     fn report(&self) -> String {
         let d = self.devices.borrow();
         let mut report = format!("[emu] StamPLC: {} RAMWR, {} pixels, on={} sleep={} madctl={:#04x}, rgb={:#x}, rgb-seen={:#04x}, relays={:#x}, relay-states={:#06x}, io={:#06x}, soft-i2c={}, modbus-requests={}, modbus-echoes={}",

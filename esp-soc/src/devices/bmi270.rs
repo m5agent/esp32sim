@@ -186,7 +186,31 @@ impl Bmi270 {
         let (accel, gyro) = self.current_sample();
         let vec3 = |sample: [f64; 3]| Json::Arr(sample.into_iter().map(Json::Float).collect());
         Json::object([("initialized", Json::Bool(self.initialized())),
-                      ("accel_g", vec3(accel)), ("gyro_dps", vec3(gyro))])
+                      ("accel_g", vec3(accel)), ("gyro_dps", vec3(gyro)),
+                      ("accel-x", Json::Float(accel[0])), ("accel-y", Json::Float(accel[1])),
+                      ("accel-z", Json::Float(accel[2])), ("gyro-x", Json::Float(gyro[0])),
+                      ("gyro-y", Json::Float(gyro[1])), ("gyro-z", Json::Float(gyro[2]))])
+    }
+
+    pub fn set_service_axis(&mut self, property: &str, value: &str) -> bool {
+        let Some((kind, axis)) = property.split_once('-') else { return false; };
+        let (mut accel, mut gyro) = self.current_sample();
+        let applied = match kind {
+            "accel" => super::imu_motion::set_axis(&mut accel, axis, value, 32.0),
+            "gyro" => super::imu_motion::set_axis(&mut gyro, axis, value, 4000.0),
+            "mag" => return self.aux.as_mut().is_some_and(|aux| {
+                super::imu_motion::set_axis(&mut aux.mag.field, axis, value, 2000.0)
+            }),
+            _ => false,
+        };
+        if applied { self.set_sample(accel, gyro, None); }
+        applied
+    }
+
+    pub fn magnetometer_state(&self) -> Option<crate::json::Json> {
+        use crate::json::Json;
+        let [x, y, z] = self.aux.as_ref()?.mag.measured_field();
+        Some(Json::object([("mag-x", Json::Float(x)), ("mag-y", Json::Float(y)), ("mag-z", Json::Float(z))]))
     }
 
     pub fn initialized(&self) -> bool { self.regs[INTERNAL_STATUS] & 0x0f == 0x01 }

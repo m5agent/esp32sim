@@ -27,6 +27,9 @@ boundary.
 | `network-fault` | `link\|radio up\|down` | Cut or restore the attached Ethernet data path or virtual Wi-Fi air link and return the resulting `/soc/wifi` state. Radio loss clears virtual association so firmware must recover it. |
 | `flash-snapshot` | empty | Atomically replace the configured Flash image and return its byte count and guest cycle. |
 | `flash-stop` | empty | Atomically replace the configured Flash image at the final scheduler boundary and exit the emulator. The success receipt is process exit status 0, with no JSON reply. A rejection returns `ok:false` and leaves the guest running. |
+| `state-set` | `/board/imu PROPERTY VALUE`, `/board/magnetometer PROPERTY VALUE` | Set a supported scalar sensor input. Other axes retain their current sample. The corresponding guest data registers apply the chip's normal range and encoding. |
+| `state-set` | `/board/pmic PROPERTY VALUE`, `/board/ioe1 PROPERTY VALUE`, `/board/ip5306 PROPERTY VALUE` | Set a supported board input. The PMIC and expander read paths use these values for voltage, ADC, charging or pin status. |
+| `state-set` | `/board/sht40 temperature-c\|humidity-pct VALUE` | Set one PaperColor environmental input, leaving the other at its current value. |
 
 Paths describe device roles, with `/soc` for controller state and
 `/board` for board-wired devices. Model-specific detail can use a child
@@ -37,7 +40,10 @@ deadline or pixel counters. GPIO nodes use decimal pin numbers.
 Where implemented, `/board/pmic`, `/board/rtc`, `/board/imu` and
 `/board/touch` describe current device state. Raw register arrays start at
 address zero and reflect stored register bytes. Host reads do not perform
-I2C reads or clear IRQ flags. Unsupported nodes, properties and writes
+I2C reads or clear IRQ flags. The AtomS3U snapshot adds `/soc/rmt/0` counters for real channel 0 TX
+symbols, completions and errors. Board-specific nodes expose the wired
+camera identity, e-paper scan counters, and peripheral state for Device
+Service compatibility. Unsupported nodes, properties and writes
 return `ok:false`.
 
 `/board/sd` describes prepared media with `present`, `blocks`,

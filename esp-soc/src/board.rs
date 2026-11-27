@@ -96,6 +96,7 @@ pub trait BoardModel {
     fn insert_spi_sd(&mut self, _card: esp_periph::sdmmc::SdCard) {}
     /// Host observations of modeled devices, with canonical paths relative to /board.
     fn service_state(&self) -> Vec<(&'static str, crate::json::Json)> { Vec::new() }
+    fn set_service_property(&mut self, _path: &str, _property: &str, _value: &str) -> bool { false }
     /// Enable a deterministic advancing camera fixture on boards that have one.
     fn set_camera_auto_increment(&mut self, _enabled: bool) -> bool { false }
     fn reset_spi_sd_observation(&mut self) {}

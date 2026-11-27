@@ -16,17 +16,38 @@ impl Pm1Wiring {
         Self { pmic, state }
     }
     pub fn powered(&self) -> bool { !self.state.lock().unwrap().power_off_requested }
-    pub fn service_state(&self) -> esp_soc::json::Json {
+    pub fn service_state(&self, pa: Option<u8>) -> esp_soc::json::Json {
         use esp_soc::json::Json;
+        let pmic = self.pmic.borrow();
+        let gpio_inputs = pmic.gpio_inputs();
         let state = self.state.lock().unwrap();
-        Json::object([
+        let Json::Obj(mut fields) = Json::object([
             ("battery_mv", Json::Int(i64::from(state.battery_mv))),
             ("charging", Json::Bool(state.charging)),
             ("vbus_mv", Json::Int(i64::from(state.vbus_mv))),
+            ("vbat-mv", Json::Int(state.battery_mv.into())),
+            ("vin-mv", Json::Int(state.vbus_mv.into())),
+            ("vinout-mv", Json::Int(state.vinout_mv.into())),
+            ("temperature-c", Json::Int(state.temperature_c.into())),
             ("driven_high", Json::Int(i64::from(state.driven_high))),
-            ("registers", Json::register_bytes(self.pmic.borrow().registers().iter().copied())),
-        ])
+            ("registers", Json::register_bytes(pmic.registers().iter().copied())),
+            ("gpio-input-bits", Json::Int(gpio_inputs.into())),
+        ]) else { unreachable!() };
+        if let Some(pin) = pa {
+            fields.push(("pa-enabled".into(), Json::Bool(pmic.driven_high() & (1 << pin) != 0)));
+        }
+        Json::Obj(fields)
     }
+    pub fn set_service_property(&self, property: &str, value: &str) -> bool {
+        if property == "gpio-input-bits" {
+            let Ok(bits @ 0..=31) = value.parse::<u8>() else { return false };
+            let mut pmic = self.pmic.borrow_mut();
+            for pin in 0..5 { pmic.gpio_input(pin, bits & (1 << pin) != 0); }
+            return true;
+        }
+        self.state.lock().unwrap().set_supply_fixture(property, value)
+    }
+
     pub fn command(&self, verb: &str, args: &[&str]) -> bool {
         match (verb, args) {
             ("battery", [millivolts, charging @ ("0" | "1")]) => {

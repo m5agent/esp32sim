@@ -26,6 +26,7 @@ struct PowerWiring {
     panel: Mutex<PanelState>,
     power: Pm1Wiring,
     expander: Arc<Mutex<M5ioe1State>>,
+    ioe: Rc<RefCell<M5ioe1>>,
     touch: Arc<Mutex<TouchState>>,
     codec: Es8311,
     audio_powered: Cell<bool>,
@@ -103,6 +104,8 @@ impl StopWatch {
 
     pub fn new() -> Self {
         let us = CPU_HZ / 1_000_000;
+        let expander = Arc::new(Mutex::new(M5ioe1State::default()));
+        let ioe = Rc::new(RefCell::new(M5ioe1::new(expander.clone(), 0).with_revision(b'W')));
         let wiring = Rc::new(PowerWiring {
             panel: Mutex::new(PanelState {
                 panel: Co5300::new(Self::WIDTH, Self::HEIGHT, Self::X_OFFSET).with_scan(Co5300Scan {
@@ -113,7 +116,7 @@ impl StopWatch {
                 power_transitions: 0,
             }),
             power: Pm1Wiring::new(2),
-            expander: Default::default(),
+            expander, ioe,
             touch: Default::default(),
             codec: Es8311::new(),
             audio_powered: Cell::new(false),
@@ -126,7 +129,7 @@ impl StopWatch {
         let bus = I2cWiring::new((47, 48), vec![
             (M5pm1::ADDRESS, wrap(wiring.power.pmic.clone())),
             // M5IOE1 1.0.9 selects the StopWatch mapping for revision W.
-            (M5ioe1::ADDRESS, wrap(Rc::new(RefCell::new(M5ioe1::new(wiring.expander.clone(), 0).with_revision(b'W'))))),
+            (M5ioe1::ADDRESS, wrap(wiring.ioe.clone())),
             (0x15, Rc::new(RefCell::new(Cst820::new(wiring.touch.clone())))),
             (Rx8130::ADDRESS, rtc.clone()),
             (0x68, imu.clone()),
@@ -271,16 +274,30 @@ impl BoardModel for StopWatch {
             _ => None,
         }
     }
+    fn set_service_property(&mut self, path: &str, property: &str, value: &str) -> bool {
+        match path {
+            "/board/imu" => self.imu.borrow_mut().set_service_axis(property, value),
+            "/board/pmic" => self.wiring.power.set_service_property(property, value),
+            "/board/ioe1" => self.wiring.ioe.borrow_mut().set_fixture(property, value),
+            _ => false,
+        }
+    }
+
     fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
         use esp_soc::json::Json;
         let panel = self.wiring.panel.lock().unwrap();
         let rtc = self.rtc.borrow();
+        let ioe = self.wiring.ioe.borrow();
         vec![
             ("panel/controller", Json::object([("pixels_written", Json::counter(panel.panel.pixels_written)),
                                               ("active", Json::Bool(panel.active)),
                                               ("tear_enabled", Json::Bool(panel.panel.tear_enabled()))])),
             ("rtc", Json::object([("registers", Json::register_bytes(rtc.registers().iter().copied())), ("irq", Json::Bool(rtc.irq()))])),
-            ("pmic", self.wiring.power.service_state()),
+            ("pmic", self.wiring.power.service_state(None)),
+            ("ioe1", Json::object([
+                ("pa-enabled", Json::Bool(self.wiring.expander.lock().unwrap().amp_enabled)),
+                ("input-bits", Json::Int(ioe.input_bits().into())), ("adc1-mv", Json::Int(ioe.adc1_mv().into())),
+            ])),
             ("imu", self.imu.borrow().service_state()),
         ]
     }

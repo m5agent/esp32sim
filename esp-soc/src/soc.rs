@@ -231,6 +231,7 @@ pub trait SocBus: Bus {
     fn gpio_input(&self) -> u64;
     /// GPIO latch, enable and IO_MUX pulls. None for an unavailable pin or unsupported chip.
     /// Pulls describe the programmed bits; they do not change the input level.
+    fn rmt_tx_counts(&self, _channel: usize) -> Option<[u64; 3]> { None }
     fn gpio_state(&self, _pin: u8) -> Option<GpioState> { None }
     /// Averaged PWM at a GPIO-matrix output: frequency in Hz and high-time fraction scaled to 0..65535.
     /// `None` means no supported running PWM snapshot: unrouted, disabled, paused or unsupported.

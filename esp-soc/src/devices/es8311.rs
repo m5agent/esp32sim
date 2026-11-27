@@ -9,15 +9,22 @@ pub struct Es8311 {
     regs: Rc<RefCell<[u8; 256]>>,
     ptr: u8,
     first: bool,
+    traffic: Rc<std::cell::Cell<[u64; 2]>>,
 }
 
 impl Default for Es8311 { fn default() -> Self { Self::new() } }
 
 impl Es8311 {
     pub const ADDRESS: u8 = 0x18;
-    pub fn new() -> Self { Self { regs: Rc::new(RefCell::new(Self::reset_regs())), ptr: 0, first: true } }
-    pub fn i2c_port(&self) -> Self { Self { regs: self.regs.clone(), ptr: 0, first: true } }
+    pub fn new() -> Self { Self { regs: Rc::new(RefCell::new(Self::reset_regs())), ptr: 0, first: true, traffic: Default::default() } }
+    pub fn i2c_port(&self) -> Self { Self { regs: self.regs.clone(), ptr: 0, first: true, traffic: self.traffic.clone() } }
     pub fn power_loss(&self) { *self.regs.borrow_mut() = Self::reset_regs(); }
+
+    pub fn service_state(&self) -> crate::json::Json {
+        use crate::json::Json;
+        let [transactions, writes] = self.traffic.get();
+        Json::object([("transactions", Json::counter(transactions)), ("written-bytes", Json::counter(writes))])
+    }
 
     fn reset_regs() -> [u8; 256] {
         let mut regs = [0; 256];
@@ -54,9 +61,16 @@ impl Es8311 {
 }
 
 impl I2cDevice for Es8311 {
-    fn start(&mut self, read: bool) -> bool { self.first = !read; true }
+    fn start(&mut self, read: bool) -> bool {
+        let [transactions, writes] = self.traffic.get();
+        self.traffic.set([transactions + 1, writes]);
+        self.first = !read;
+        true
+    }
     fn write(&mut self, byte: u8) -> bool {
         if self.first { self.first = false; self.ptr = byte; return true; }
+        let [transactions, writes] = self.traffic.get();
+        self.traffic.set([transactions, writes + 1]);
         let mut r = self.regs.borrow_mut();
         match self.ptr {
             0xfa => {

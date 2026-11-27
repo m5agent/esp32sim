@@ -339,6 +339,17 @@ impl BoardModel for Stick {
         true
     }
 
+    fn set_service_property(&mut self, path: &str, property: &str, value: &str) -> bool {
+        path == "/board/imu" && self.imu.as_ref().is_some_and(|imu| imu.borrow_mut().set_service_axis(property, value))
+    }
+
+    fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
+        use esp_soc::json::Json;
+        let mut nodes = vec![("rtc", Json::object([("unix-time", Json::Int(self.rtc.borrow().unix_time()))]))];
+        if let Some(imu) = &self.imu { nodes.push(("imu", imu.borrow().service_state())); }
+        nodes
+    }
+
     fn report(&self) -> String {
         let [sec, min, hour, day, _, month, year] = self.rtc.borrow().calendar_bcd();
         let panel = &self.panel.ram;
