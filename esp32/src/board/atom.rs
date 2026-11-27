@@ -121,7 +121,7 @@ impl BoardModel for Atom {
         let accel = [-ax, ay, -az];
         let gyro = [-gx, gy, -gz];
         match &mut *imu.0.borrow_mut() {
-            Sensor::Mpu(sensor) => sensor.set_sample(accel, gyro),
+            Sensor::Mpu(sensor) => sensor.set_sample([-ax, ay, -az, -gx, gy, -gz]),
             Sensor::Bmi(sensor) => sensor.set_sample(accel, gyro, None),
         }
         true

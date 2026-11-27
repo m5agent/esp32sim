@@ -3,8 +3,6 @@
 //! FIFO, self-test and interrupt pins are outside this model.
 use esp_periph::i2c::I2cDevice;
 
-pub const MPU6886_ADDRESS: u8 = 0x68;
-
 pub struct Mpu6886 {
     regs: [u8; 128],
     ptr: u8,
@@ -22,6 +20,8 @@ impl Default for Mpu6886 {
 }
 
 impl Mpu6886 {
+    pub const ADDRESS: u8 = 0x68;
+
     fn reset(&mut self) {
         self.regs = [0; 128];
         self.regs[0x6b] = 0x40;
@@ -29,9 +29,9 @@ impl Mpu6886 {
     }
 
     /// Set accelerometer and gyroscope readings in sensor axes, in g and dps.
-    pub fn set_sample(&mut self, accel: [f64; 3], gyro: [f64; 3]) {
-        self.accel = accel;
-        self.gyro = gyro;
+    pub fn set_sample(&mut self, [ax, ay, az, gx, gy, gz]: [f64; 6]) {
+        self.accel = [ax, ay, az];
+        self.gyro = [gx, gy, gz];
     }
 
     fn latch(&mut self) {
@@ -104,7 +104,7 @@ mod tests {
         select(&mut imu, 0x1b);
         imu.write(0x18);
         imu.write(0x10);
-        imu.set_sample([-0.5, 0.25, 1.0], [-125.0, 250.0, -500.0]);
+        imu.set_sample([-0.5, 0.25, 1.0, -125.0, 250.0, -500.0]);
         select(&mut imu, 0x3a);
         imu.start(true);
         assert_eq!(imu.read(), 1);
