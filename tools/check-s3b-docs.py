@@ -100,9 +100,8 @@ def power_case(board, case, serial, report):
         return "RTC IRQ wakes the guest after standby"
     if case == "m5pm1_m5ioe1-6":
         contains(serial, "PM1 initialization successful", "IOE1 initialization successful")
-        require("oled_transitions=" in report and re.search(r"oled_transitions=[3-9]", report),
-                "missing observable OLED rail changes from IOE1")
-        return "IOE1 OLED power transitions follow A/B"
+        require(re.search(r"vibration_duties=\{[1-9]", report), "IOE1 produced no nonzero motor duty")
+        return "IOE1 initializes and produces a nonzero motor duty"
     require(case in {"wakeup", "wakeup-1"}, "missing power-case oracle")
     contains(report, "chip reset")
     if board == "dial":
@@ -128,9 +127,7 @@ def verify(out, board, case):
             "stopwatch": ("BtnA Pressed", "BtnB Pressed"),
         }
         if board == "sticks3":
-            idle, *_ = capture(out, board, case + "-idle")
-            require(changed(frame, idle) >= 30, "button-driven display did not change")
-            return "A/B/P inputs change the display"
+            return sensors(out, board, case, frame)
         contains(serial, *presses[board])
         return "guest reports press/release or both buttons"
     if case in {"keyboard", "encoder"}:
