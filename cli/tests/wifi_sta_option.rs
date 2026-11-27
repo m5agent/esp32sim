@@ -9,7 +9,7 @@ fn esp32sim(args: &[&str]) -> (Option<i32>, String) {
 #[test]
 fn wifi_sta_is_refused_where_it_does_not_work_yet() {
     for (args, why) in [
-        (&["--chip", "p4", "--wifi-sta", "ssid=lab"][..], "the P4 has no WiFi of its own"),
+        (&["--chip", "p4", "--wifi-sta", "ssid=lab"][..], "the P4 needs a WiFi co-processor (--coproc)"),
         (&["--chip", "c6", "--wifi-sta", "ssid=lab", "--wifi", "ssid=demo"][..], "are not modelled yet"),
         (&["--chip", "esp32", "--wifi-sta", "ssid=lab", "--wifi", "ssid=demo"][..], "are not modelled yet"),
         (&["--chip", "esp32", "--wifi-sta", "ssid=lab,psk=short"][..], "8 to 63 ASCII characters"),
