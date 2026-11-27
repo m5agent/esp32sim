@@ -45,6 +45,14 @@ impl I2cDevice for Clock {
     fn read(&mut self) -> u8 { self.0.borrow_mut().read() }
 }
 
+struct PowerPort(Rc<RefCell<M5pm1>>);
+impl I2cDevice for PowerPort {
+    fn start(&mut self, read: bool) -> bool { self.0.borrow_mut().start(read) }
+    fn write(&mut self, byte: u8) -> bool { self.0.borrow_mut().write(byte) }
+    fn read(&mut self) -> u8 { self.0.borrow_mut().read() }
+    fn stop(&mut self) { self.0.borrow_mut().stop(); }
+}
+
 struct TouchPort(Rc<RefCell<Ft5x06>>);
 impl I2cDevice for TouchPort {
     fn start(&mut self, read: bool) -> bool { self.0.borrow_mut().start(read) }
@@ -136,6 +144,7 @@ pub struct PaperSpi {
     display: Display,
     i2c: PaperI2c,
     pmic: Arc<Mutex<M5pm1State>>,
+    pmic_device: Rc<RefCell<M5pm1>>,
     rtc: Rc<RefCell<Rx8130>>,
     expander: Rc<Cell<u16>>,
     touch: Ft5x06Points,
@@ -179,9 +188,11 @@ impl PaperSpi {
         let imu = Arc::new(ImuMotion::default());
         let touch = Ft5x06Points::default();
         let touch_chip = Rc::new(RefCell::new(Ft5x06::new(touch.clone())));
+        let pmic = Arc::new(Mutex::new(M5pm1State::default()));
+        let pmic_device = Rc::new(RefCell::new(M5pm1::new(pmic.clone())));
         Self {
             display, i2c: PaperI2c::new(pins),
-            pmic: Default::default(), expander: Default::default(),
+            pmic, pmic_device, expander: Default::default(),
             touch, touch_chip, imu_chip: Rc::new(RefCell::new(Bmi270::new(imu.clone(), CPU_HZ).with_sampled_any_motion())), imu,
             env: Rc::new(Cell::new([23.0, 45.0])), measurements: Default::default(),
             rtc: Rc::new(RefCell::new(Rx8130::new(CPU_HZ))), now,
@@ -231,8 +242,9 @@ impl BoardModel for PaperSpi {
 
     fn i2c_devices(&mut self) -> Vec<(u8, u8, Box<dyn I2cDevice>)> {
         self.i2c.reset();
-        self.i2c.attach(0x6e, M5pm1::with_power_timer(self.pmic.clone(), CPU_HZ)
-            .with_wake_input(self.rtc_pmic_pin()));
+        *self.pmic_device.borrow_mut() = M5pm1::with_power_timer(self.pmic.clone(), CPU_HZ)
+            .with_wake_input(self.rtc_pmic_pin());
+        self.i2c.attach(M5pm1::ADDRESS, PowerPort(self.pmic_device.clone()));
         self.i2c.attach(0x32, Clock(self.rtc.clone()));
         if self.mono_board() {
             self.i2c.attach(M5ioe1::ADDRESS, M5ioe1::new(Default::default(), 0)
@@ -455,10 +467,14 @@ impl BoardModel for PaperSpi {
         }
     }
     fn accepts_command(&self, verb: &str) -> bool {
-        match verb { "paper-tag" | "imu" => self.mono_board(), "sht40" => !self.mono_board(), "paper-battery" => true, _ => false }
+        match verb { "paper-tag" | "imu" => self.mono_board(), "sht40" => !self.mono_board(), "paper-battery" | "pwrkey" => true, _ => false }
     }
     fn board_command(&mut self, _cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
         match (verb, args) {
+            ("pwrkey", []) => {
+                self.pmic_device.borrow_mut().power_key();
+                true
+            }
             ("paper-tag", [uid]) if self.mono_board() => {
                 let tag = if *uid == "none" { Vec::new() } else {
                     if !uid.is_ascii() || !matches!(uid.len(), 8 | 14) || uid.starts_with("88") { return false; }
