@@ -24,7 +24,7 @@ impl Lm75b {
 
     pub fn set_millicelsius(&mut self, value: i32) {
         if self.config & 1 != 0 { return; }
-        self.temperature = ((value.clamp(-55_000, 125_000) * 2 / 125) * 32) as i16;
+        self.temperature = ((value.clamp(-55_000, 125_000) / 125) * 32) as i16;
         if self.rising && self.temperature >= self.threshold {
             self.os = true;
             self.rising = false;
@@ -68,5 +68,20 @@ impl I2cDevice for Lm75b {
         self.phase ^= 1;
         if self.config & 2 != 0 { self.os = false; }
         byte
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lm75b_register_preserves_signed_eighth_degree_values() {
+        let mut chip = Lm75b::default();
+        for (input, expected) in [(-6250, [0xf9, 0xc0]), (38_125, [0x26, 0x20])] {
+            chip.set_millicelsius(input);
+            assert!(chip.start(false) && chip.write(0) && chip.start(true));
+            assert_eq!([chip.read(), chip.read()], expected);
+        }
     }
 }
