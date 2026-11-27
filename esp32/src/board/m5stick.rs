@@ -14,6 +14,9 @@ const DATA: u8 = 23;
 const CS: u8 = 14;
 const DC: u8 = 27;
 const RESET: u8 = 33;
+// The factory U8x8 SH1107 glass setup uses D3/0x60 to map RAM row zero
+// onto the first visible common of the 64×128 panel.
+const TOP_COMMON: usize = 0x60;
 
 pub(super) struct M5Stick {
     panel: Sh1107,
@@ -81,7 +84,7 @@ impl BoardModel for M5Stick {
     fn display(&self) -> Option<(u32, u32, Vec<u16>, u64)> {
         let lit = !self.reset && self.pmic.borrow().output_on();
         let pixels = (0..128).flat_map(|y| (0..64).map(move |x|
-            if lit { self.panel.pixel(x, y) } else { 0 })).collect();
+            if lit { self.panel.pixel(x, y + TOP_COMMON) } else { 0 })).collect();
         Some((64, 128, pixels, self.panel.generation))
     }
     fn display_version(&self) -> u64 { self.panel.generation }
