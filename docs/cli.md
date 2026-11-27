@@ -13,6 +13,39 @@ their chip has nothing behind: the C3 board, camera, PSRAM and register presets;
 a board and WiFi, only camera, PSRAM and register presets. The P4 boots from its ROM on UART0 by
 default too, with 16 MB of flash ([esp32p4.md](esp32p4.md)).
 
+## Classic M5Stack Core boards
+
+Use `--chip esp32 --board m5stack-basic-v27` for Basic v2.7. The
+`m5stack-core2` preset has the Core2 v1.1 AXP2101 and INA3221. Select
+`m5stack-core2-axp192` for the original AXP192 revision. Guest firmware
+discovers the PMIC at I2C address 0x34 using register 0x03.
+For the catalog image named `M5STACK BASIC(4MB)`, add `--flash-mb 4` so
+UIFlow2 finds the resources in that image's partition layout.
+
+UART0 carries the console. In an input script, Basic accepts `press a`,
+`press b` and `press c`. Core2 uses `touch X Y 1` and `touch X Y 0`,
+including the button strip below the LCD at Y=260. Use X=63, 160 or 258
+for A, B or C.
+
+The input commands are prefixed with their emulated timestamps.
+
+| Model | Command arguments |
+| --- | --- |
+| Basic IP5306 | `battery BARS CHARGING FULL` with 0–4 gauge bars and 0/1 status flags |
+| Core2 v1.1 AXP2101 | `battery MV PERCENT CHARGING` with 0–100 percent and a 0/1 charge flag |
+| Core2 AXP192 | `battery MV MA` with signed battery current, positive when charging |
+| Core2 v1.1 INA3221 | `ina CHANNEL BUS_MV SHUNT_UV` with zero-based channel and signed differential voltage |
+| Core2 MPU6886 | `imu AX AY AZ GX GY GZ` in g and degrees per second |
+
+Core2 microphone injection uses the controller's converted PDM path
+with `--i2s-tone 0:FREQUENCY:AMPLITUDE` or `--mic-wav 0:FILE`.
+Capture the Basic DAC or Core2 I2S speaker using `--wav FILE`.
+
+The [documentation runner](../tools/run-lx6-cores.py) replays the prebuilt
+Arduino examples and stock UIFlow2. Supply the firmware plan with
+`CORE_PLAN_DIR`, the catalog images with `CORE_STOCK_DIR`, the classic ROM
+with `ESP32SIM_ROM_DIR`, and a FAT32 image with `CORE_SD_SEED`.
+
 ## Images and boot
 | Flag | Meaning |
 | --- | --- |
@@ -25,14 +58,14 @@ default too, with 16 MB of flash ([esp32p4.md](esp32p4.md)).
 | `--cam-stream PATH\|-`, `--cam-size WIDTHxHEIGHT` | live RGB24 camera source and its dimensions; requires `waveshare-cam` |
 | `--serial TEXT` | bytes into the USB-Serial/JTAG console before the run |
 | `--elf F` (repeatable) | symbols for logs/profiles (app ELF, bootloader ELF) |
-| `--flash-mb N`, `--psram-mb N` | flash size (JEDEC follows it) and PSRAM size. S3 defaults: 8 / 2, or 16 / 8 for StopWatch; octal MR2 density follows 4, 8, 16, 32 and 64 MiB. Classic ESP32 defaults: 4 / 0; `--psram-mb 4` enables quad PSRAM, `0` disables it; other classic sizes are rejected. S31: 2 MiB by default (16 MiB with `--board mosaico`, which also has 16 MiB in-package PSRAM); 1, 2, 4, 8 or 16 |
+| `--flash-mb N`, `--psram-mb N` | flash size (JEDEC follows it) and PSRAM size. S3 defaults: 8 / 2, or 16 / 8 for StopWatch; octal MR2 density follows 4, 8, 16, 32 and 64 MiB. Classic ESP32 defaults: 4 / 0, 16 / 0 on Basic v2.7 and 16 / 8 on Core2. Classic quad PSRAM accepts 0, 2, 4 or 8 MiB. S31: 2 MiB by default (16 MiB with `--board mosaico`, which also has 16 MiB in-package PSRAM); 1, 2, 4, 8 or 16 |
 | `--flash-octal` | octal SPI flash (ESP32-S3-WROOM-2): Macronix octal commands, JEDEC C2 80 xx, efuse FLASH_TYPE octal; S3 only. An `--efuse-regs` dump is loaded after it: a dump that includes RD_REPEAT_DATA3 (efuse +0x3c) replaces that word, FLASH_TYPE (bit 9) with it |
-| `--sd IMAGE`, `--sd-rw IMAGE` | (P4, S3) an SD card holding the image; on the P4 in the reference board's socket (CLK 43, CMD 44, D0-D3 39-42), on CoreS3 in the SPI microSD socket shared with the LCD (CS GPIO 4, powered by AXP2101 ALDO4), and on other S3 boards on whichever pins the firmware routes an SDMMC slot's clock to through the GPIO matrix (the first slot that has one). The card is a high capacity card of the image's size, rounded down to 512 KiB. `--sd` is copy-on-write: what the firmware writes stays in memory and the file is never modified. `--sd-rw` writes through to the file. See [esp32p4.md](esp32p4.md), "SD card" |
+| `--sd IMAGE`, `--sd-rw IMAGE` | An SD card holding the image. Basic v2.7 and Core2 expose the SPI socket on GPIO 4, sharing clock and data output with the LCD; on the P4 in the reference board's socket (CLK 43, CMD 44, D0-D3 39-42), on CoreS3 in the SPI microSD socket shared with the LCD (CS GPIO 4, powered by AXP2101 ALDO4), and on other S3 boards on whichever pins the firmware routes an SDMMC slot's clock to through the GPIO matrix (the first slot that has one). The card is a high capacity card of the image's size, rounded down to 512 KiB. `--sd` is copy-on-write: what the firmware writes stays in memory and the file is never modified. `--sd-rw` writes through to the file. See [esp32p4.md](esp32p4.md), "SD card" |
 | `--sd-prg-us N`, `--sd-serial HEX` | (P4, S3) the card's programming time after a write or an erase, in microseconds of emulated time (default 0: instant), and its CID serial number (default: derived from the image size) |
 | `--sd-timing` | (P4 only: the S3 refuses it, its SDMMC clock tree is not decoded) commands and data take their time on the SD bus at the slot's card clock and width: CMD_DONE, DATA_OVER and the auto-stop come when the bits are through (default: at once); with `--coproc` the SDIO link's too. See [esp32p4.md](esp32p4.md), "The host" |
 | `--usb-host F` | (P4, S3, S31) a USB host on the USB-OTG port (high speed on the P4 and S31, full speed on the S3), running the commands in F (below) from power-up; the run then goes on to `--max-seconds`. On the S3 the host sees the device only once the firmware gives the internal PHY to USB-OTG (TinyUSB does). See [esp32p4.md](esp32p4.md), "USB", and [peripherals.md](peripherals.md) |
 | `--coproc c6:KEY=VALUE,...` | (P4) an ESP32-C6 co-processor on SDIO slot 1, run in lock-step with the P4 (below); `--wifi`, `--wifi-sta` and `--net` configure the C6's radio/network |
-| `--board atech14\|waveshare-cam\|waveshare-lcd4b\|waveshare-amoled18-v2\|stopwatch\|none` | board model (default atech14); on the C6: `waveshare-c6-lcd147`, `xiao-esp32c6` or `none`; on the P4: `waveshare-p4-lcd35` (rev ≥ 3) or `none`; on the S31: `mosaico` (alias `esp-mosaico`) or `none`; on the classic ESP32: `ttgo-tdisplay` (alias `tdisplay`), `cyd` (alias `esp32-2432s028`), `ulanzi-tc001` (alias `tc001`), `ai-thinker-cam` (alias `esp32cam`), `esp32dev-loopback` or `none`/`esp32dev` |
+| `--board atech14\|waveshare-cam\|waveshare-lcd4b\|waveshare-amoled18-v2\|stopwatch\|none` | board model (default atech14); on the C6: `waveshare-c6-lcd147`, `xiao-esp32c6` or `none`; on the P4: `waveshare-p4-lcd35` (rev ≥ 3) or `none`; on the S31: `mosaico` (alias `esp-mosaico`) or `none`; on the classic ESP32: `m5stack-basic-v27`, `m5stack-core2`, `m5stack-core2-axp192`, `ttgo-tdisplay` (alias `tdisplay`), `cyd` (alias `esp32-2432s028`), `ulanzi-tc001` (alias `tc001`), `ai-thinker-cam` (alias `esp32cam`), `esp32dev-loopback` or `none`/`esp32dev` |
 | `--strap HEX`, `--reset-cause HEX`, `--efuse-regs F`, `--regs-init F` | reproduce a real chip's boot state (used by the differential tests) |
 | `--no-reboot` | stop at the first chip reset instead of rebooting from ROM |
 | `--flash-at OFFSET=FILE` (repeatable) | write a file into flash at a hex offset — a data partition's contents (the panel's `demo` partition takes `energydata.json`) |

@@ -14,14 +14,24 @@ pub const FT5X06_POINTS: usize = 5;
 /// The fingers on the glass, shared between the board (which places them) and the controller.
 pub type Ft5x06Points = Arc<Mutex<[Option<(u16, u16)>; FT5X06_POINTS]>>;
 
-pub struct Ft5x06 { regs: [u8; 256], ptr: u8, first: bool, points: Ft5x06Points, pub reads: u64 }
+pub struct Ft5x06 { regs: [u8; 256], ptr: u8, first: bool, points: Ft5x06Points, limit: usize, pub reads: u64 }
 impl Ft5x06 {
     pub fn new(points: Ft5x06Points) -> Self {
         let mut regs = [0u8; 256];
         regs[0xa3] = 0x55;                 // ID_G_CIPHER: the FT5x06's chip ID
         regs[0xa8] = 0x11;                 // ID_G_FT5201ID: FocalTech
-        Ft5x06 { regs, ptr: 0, first: true, points, reads: 0 }
+        Ft5x06 { regs, ptr: 0, first: true, points, limit: FT5X06_POINTS, reads: 0 }
     }
+    /// FocalTech FT6336U Work mode register page: two concurrent
+    /// contacts and the 0x6402 chip code.
+    pub fn ft6336u(points: Ft5x06Points) -> Self {
+        let mut chip = Self::new(points);
+        chip.regs[0xa0] = 0x02;
+        chip.regs[0xa3] = 0x64;
+        chip.limit = 2;
+        chip
+    }
+
     /// TD_STATUS and the point records, from the fingers down now. The records are packed: the
     /// n-th finger down is the n-th record, its touch ID its slot.
     fn latch(&mut self) {
@@ -37,6 +47,7 @@ impl Ft5x06 {
             self.regs[r + 4] = 0x40;                                // weight
             self.regs[r + 5] = 0x10;                                // area
             n += 1;
+            if n == self.limit { break; }
         }
         self.regs[3 + 6 * n..3 + 6 * FT5X06_POINTS].fill(0xff);
         self.regs[2] = n as u8;

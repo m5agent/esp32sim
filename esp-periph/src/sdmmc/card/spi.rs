@@ -183,6 +183,12 @@ impl SpiSdCard {
                      else { Phase::Command };
     }
 
+    /// First byte already queued for the next clock. A GPIO SPI master
+    /// samples individual bits before the byte of MOSI has arrived.
+    pub fn pending_miso(&self, now_ns: u64) -> u8 {
+        self.response.front().copied().unwrap_or(if now_ns < self.card.busy_until { 0 } else { 0xff })
+    }
+
     /// Shift one byte with CS low. Clocks advance the card even when the host discards MISO.
     pub fn exchange(&mut self, mosi: u8, now_ns: u64) -> u8 {
         let had_response = !self.response.is_empty();
