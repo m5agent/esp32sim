@@ -15,13 +15,14 @@ use esp_soc::{
         ws2812::Ws2812Chain,
     },
 };
-use super::paper_i2c::PaperI2c;
+use super::{cardputer_adv_ir::NecReceiver, paper_i2c::PaperI2c};
 use crate::periph::CPU_HZ;
 
 const US: u64 = CPU_HZ / 1_000_000;
 const MS: u64 = US * 1000;
 const COLOR_SD: SpiPins = SpiPins { sclk: 1 << 15, mosi: 1 << 13, miso: Some(14), cs: 1 << 47 };
 const LORA_CS: u64 = 1 << 41;
+const COLOR_IR: u8 = 48;
 // C153 U14 NRST and antenna switch use IOE1 package pins 10 and 2.
 // M5IOE1.h exposes their zero-based latch bits as 9 and 1.
 const LORA_RESET: u16 = 1 << 9;
@@ -150,6 +151,7 @@ pub struct PaperSpi {
     dac: Es8311,
     adc: Rc<RefCell<Es7210>>,
     leds: Ws2812Chain,
+    ir: NecReceiver,
     mono_led: [[u8; 3]; 1],
     mono_led_changes: u64,
     sd: Option<Box<SpiSdCard>>,
@@ -184,6 +186,7 @@ impl PaperSpi {
             rtc: Rc::new(RefCell::new(Rx8130::new(now.clone(), CPU_HZ))), now,
             nfc: Default::default(), radio: None, dac: Es8311::new(),
             adc: Rc::new(RefCell::new(Es7210::new())), leds: Ws2812Chain::new(2),
+            ir: Default::default(),
             mono_led: [[0; 3]], mono_led_changes: 0,
             sd: None, output: 0, soc_was_on: true, sd_selected: false, busy_level, nfc_level: false,
             rtc_high: true, pmic_irq_high: true, radio_levels: [false; 2], edges: Vec::new(),
@@ -278,6 +281,14 @@ impl BoardModel for PaperSpi {
     }
 
     fn uses_spi_pins(&self) -> bool { true }
+    fn observes_ledc(&self) -> bool { !self.mono_board() }
+    fn ledc_output_at(&mut self, cycle: VirtualCycle, pwm: &dyn Fn(u8) -> Option<(f64, u32)>) {
+        let carrier = pwm(COLOR_IR).is_some_and(|(hz, duty)| {
+            (35_000.0..=41_000.0).contains(&hz) && (1..65535).contains(&duty)
+        });
+        self.ir.carrier(cycle, carrier);
+    }
+
     fn has_spi_sd_slot(&self) -> bool { !self.mono_board() }
     fn insert_spi_sd(&mut self, card: SdCard) { self.sd = Some(Box::new(SpiSdCard::new(card))); }
     fn spi_transfer_pins(&mut self, _host: u8, pins: SpiPins, tx: &[u8], rx_len: usize) -> Vec<u8> {
@@ -483,8 +494,17 @@ impl BoardModel for PaperSpi {
                 format!("[{}] SSD1677 refreshes={} bytes={} soft-i2c={} LoRa tx={} rx={} NFC selections={}",
                     self.name(), p.refreshes, p.bytes_written, self.i2c.transactions(), radio.tx, radio.rx, self.nfc.borrow().uid_reads)
             }
-            Display::Color(p) => format!("[{}] ED2208 refreshes={} bytes={} soft-i2c={} SHT40 samples={} LED updates={}",
-                self.name(), p.refreshes, p.bytes_written, self.i2c.transactions(), self.measurements.get(), self.leds.updates),
+            Display::Color(p) => {
+                let mut report = format!("[{}] ED2208 refreshes={} bytes={} soft-i2c={} SHT40 samples={} LED updates={}",
+                    self.name(), p.refreshes, p.bytes_written, self.i2c.transactions(), self.measurements.get(), self.leds.updates);
+                if self.ir.count != 0 {
+                    report += &format!("\n[{}] GPIO48 NEC: {} frames", self.name(), self.ir.count);
+                    for &(address, command) in &self.ir.recent {
+                        report += &format!(" address=0x{address:04x}/command=0x{command:02x}");
+                    }
+                }
+                report
+            }
         }
     }
 }
