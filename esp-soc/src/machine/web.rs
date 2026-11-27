@@ -102,6 +102,9 @@ impl<S: Soc> Machine<S> {
             for (id, leds, _) in board.led_grids() { hello.push(frame(1, format!("{{\"t\":\"grid\",\"id\":\"{}\",\"leds\":[{}]}}", id, leds_json(leds)).as_bytes())); }
             w.set_hello(hello);
         }
+        if let Some(([yaw, pitch], packets)) = board.servo_observation() {
+            w.send_text(&format!(r#"{{"t":"servo","yaw":{yaw:.4},"pitch":{pitch:.4},"packets":{packets}}}"#));
+        }
         w.send_text(&format!("{{\"t\":\"stat\",\"time\":{:.2},\"insns\":{},\"frames\":{},\"display_rotation\":{},\"behind\":{:.2},\"resyncs\":{},\"speed\":{},\"cam\":{},\"gpio_in\":\"{:x}\"}}", self.seconds(), self.insns(), board.display_frames(), board.display_rotation(), self.rt.behind, self.rt.resyncs, self.rt.speed.map_or_else(|| "null".to_string(), |s| format!("{:.3}", s)), self.bus.camera_frames(), self.bus.gpio_input()));
     }
 
@@ -121,6 +124,21 @@ impl<S: Soc> Machine<S> {
         let Some(w) = self.web.clone() else { return };
         use crate::json::{parse_json, Json};
         for b in w.poll_incoming_bin() {
+            // Type 6 carries a bounded PCM16 WAV into the modeled board's I2S receiver.
+            if let Some(wav) = b.strip_prefix(&[6]) {
+                let result = (|| {
+                    if wav.len() > 2 << 20 { return Err("WAV exceeds 2 MiB".into()); }
+                    let codecs = self.bus.board_ref().i2s_codecs().ok_or("board has no modeled microphone")?;
+                    let port = self.bus.i2s_input(codecs.mic_port).ok_or("I2S receiver unavailable")?;
+                    let (rate, frames) = esp_periph::i2s::parse_wav(wav)?;
+                    port.play(frames, rate).map_err(String::from)
+                })();
+                w.send_text(&match result {
+                    Ok(()) => r#"{"t":"mic-input","ok":true}"#.into(),
+                    Err(message) => format!(r#"{{"t":"mic-input","ok":false,"message":"{}"}}"#, json_escape(&message)),
+                });
+                continue;
+            }
             // type 3: camera picture from the browser — [3][w u16 le][h u16 le][RGBA...]
             if b.len() >= 5 && b[0] == 3 {
                 let wd = u16::from_le_bytes([b[1], b[2]]) as u32;
@@ -150,14 +168,41 @@ impl<S: Soc> Machine<S> {
                         self.bus.board_command("key-edge", &[&key, &down]);
                     }
                 }
+                "plc-key" if self.bus.board_ref().accepts_command("plc-key-edge") => {
+                    if let (Some(key), Some(down)) = (field("key"), field("down")) {
+                        self.bus.board_command("plc-key-edge", &[&key, &down]);
+                    }
+                }
+                "head-touch" if self.bus.board_ref().accepts_command("head-touch") => {
+                    if let (Some(zone), Some(level)) = (field("zone"), field("level")) {
+                        self.bus.board_command("head-touch", &[&zone, &level]);
+                    }
+                }
+                "camera-pattern" => {
+                    if let Some(enabled @ ("0" | "1")) = field("enabled").as_deref() {
+                        self.bus.board().set_camera_auto_increment(enabled == "1");
+                    }
+                }
                 "power-key" if self.bus.board_ref().accepts_command("pwrkey") => {
                     // A short PMIC press, measured in guest time.
                     self.bus.board_command("pwrkey", &["200"]);
                 }
-                "knobpress" => { let v = field("v").unwrap_or_default() == "1"; if let Some(sw) = self.bus.board_ref().named_pin("sw") { self.bus.gpio_set_input(sw, !v); *self.bus.irq_dirty() = true; } }
+                "knobpress" => {
+                    let down = field("v").as_deref() == Some("1");
+                    if self.bus.board_ref().accepts_command("encoder-button") {
+                        self.bus.board_command("encoder-button", &[if down { "down" } else { "up" }]);
+                    } else if let Some(sw) = self.bus.board_ref().named_pin("sw") {
+                        self.bus.gpio_set_input(sw, !down);
+                        *self.bus.irq_dirty() = true;
+                    }
+                }
                 "knob" => {
                     // Bound each browser message to about one second of encoder motion.
                     let d = field("d").and_then(|x| x.parse::<i32>().ok()).unwrap_or(1).clamp(-64, 64);
+                    if self.bus.board_ref().accepts_command("encoder-step") {
+                        self.bus.board_command("encoder-step", &[&d.to_string()]);
+                        continue;
+                    }
                     let Some((clk, dt)) = self.bus.board_ref().encoder() else { continue };
                     let step = S::CPU_HZ / 500;   // 2 ms per phase
                     let mut tc = (self.bus.cycles() + step).max(self.script.knob_next);   // queue detents back to back, never overlapping

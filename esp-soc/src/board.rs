@@ -194,6 +194,8 @@ pub trait BoardModel {
     fn named_pin(&self, _name: &str) -> Option<u8> { None }
     /// The rotary encoder's (CLK, DT) pins, if there is one.
     fn encoder(&self) -> Option<(u8, u8)> { None }
+    /// Present StackChan joint angles and UART transaction count, once the guest drives the servos.
+    fn servo_observation(&self) -> Option<([f64; 2], u64)> { None }
     /// Lines for the end-of-run report.
     fn report(&self) -> String { String::new() }
     /// Opt-in software drive after GPIO/IO_MUX writes and board attachment (including reset).

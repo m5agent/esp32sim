@@ -112,8 +112,8 @@ unsafe fn text<'a>(ptr: *const u8, len: usize) -> &'a str {
 /// `--board mosaico` sets them, its panel, touch, keys, motor and sensors) for the ESP32-S31.
 /// Null on failure.
 /// Flash and PSRAM are each limited to 32 MiB, matching the browser configuration form.
-/// Classic ESP32 enables PSRAM only at 4 MiB; other sizes within the cap start without
-/// PSRAM (0 is the default), preserving existing callers' configurations.
+/// Classic ESP32 supports PSRAM sizes of 0, 2, 4 or 8 MiB; other sizes within the cap
+/// start without PSRAM. The Tab5 board names accept "-rev3" before an optional "+c6".
 ///
 /// # Safety
 /// For nonzero `board_len`, `board` must be non-null and readable for `board_len` bytes throughout

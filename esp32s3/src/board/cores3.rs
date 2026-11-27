@@ -257,6 +257,7 @@ impl BoardModel for Cores3 {
         }
     }
     fn leds(&self) -> Option<(&[[u8; 3]], u64)> { self.stackchan.as_ref().map(StackChan::leds) }
+    fn servo_observation(&self) -> Option<([f64; 2], u64)> { self.stackchan.as_ref().and_then(StackChan::servo_observation) }
     fn gpio_changes(&mut self, changes: &[(u8, bool)]) {
         let mut hw = self.hw.borrow_mut();
         for &(pin, level) in changes {

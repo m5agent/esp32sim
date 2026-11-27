@@ -330,7 +330,7 @@ impl BoardModel for StamPlc {
                          dout: 44, din: 255, speaker_gain: 1.0, mic_lanes: [false; 2] })
     }
 
-    fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "plc-key" | "plc-input" | "plc-supply" | "plc-temperature" | "plc-modbus-coil") }
+    fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "plc-key" | "plc-key-edge" | "plc-input" | "plc-supply" | "plc-temperature" | "plc-modbus-coil") }
     fn board_command(&mut self, cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
         self.advance_to(cycle);
         let mut devices = self.devices.borrow_mut();
@@ -341,6 +341,12 @@ impl BoardModel for StamPlc {
                 if ms == 0 { return false; }
                 self.buttons[pin] = Some(cycle.saturating_add(u64::from(ms) * (CPU_HZ / 1000)));
                 devices.front.set_input(pin, Some(false));
+            }
+            ("plc-key-edge", [key, down]) => {
+                let pin = match *key { "a" => 2, "b" => 1, "c" => 0, _ => return false };
+                let pressed = match *down { "1" => true, "0" => false, _ => return false };
+                self.buttons[pin] = None;
+                devices.front.set_input(pin, Some(!pressed));
             }
             ("plc-modbus-coil", [coil, level]) => {
                 let Ok(coil @ 0..=3) = coil.parse::<u16>() else { return false };

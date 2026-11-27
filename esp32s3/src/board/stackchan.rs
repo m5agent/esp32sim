@@ -252,6 +252,10 @@ impl StackChan {
         }
         true
     }
+    pub fn servo_observation(&self) -> Option<([f64; 2], u64)> {
+        let packets = self.servo.reads + self.servo.writes;
+        (packets != 0 && self.hw.borrow().base.power()).then(|| (self.angles(), packets))
+    }
     fn angles(&self) -> [f64; 2] {
         let positions = self.servo.positions();
         std::array::from_fn(|i| (f64::from(positions[i]) - f64::from(SERVO_ZERO[i])) * 0.3125)
