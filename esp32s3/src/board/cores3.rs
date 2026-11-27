@@ -24,6 +24,7 @@ use esp_periph::sdmmc::{SdCard, SpiSdCard};
 use esp_soc::board::{BoardEdge, BoardModel, I2sCodecs, SpiPins, VirtualCycle};
 use esp_soc::camera::Gc0308;
 use esp_soc::picture::Picture;
+use esp_soc::devices::aw9523::Aw9523;
 use esp_soc::devices::{aw88298::Aw88298, es7210::Es7210};
 use esp_soc::devices::{Axp2101, Bm8563, Bmi270, Bmm150, DcsPanel, Ft5x06, Ft5x06Points, Ltr553, AXP2101_ADDRESS, BM8563_ADDRESS, BMI270_ADDRESS, FT5X06_ADDRESS, LTR553_ADDRESS};
 use esp_soc::devices::imu_motion::ImuMotion;
@@ -45,81 +46,9 @@ pub const CORES3_LCD_H: usize = 240;
 const LCD_RDDID: u8 = 0x04;
 const LCD_ID: [u8; 3] = [0xe3, 0, 0];
 
-/// AW9523B 16-bit IO expander, register map from the AW9523B datasheet (V1.1, section 9):
-/// 0x00/0x01 input P0/P1, 0x02/0x03 output, 0x04/0x05 direction (1 = input), 0x06/0x07 interrupt
-/// enable (0 = enabled), 0x10 ID (0x23), 0x11 global control, 0x12/0x13 LED mode, 0x7F soft reset.
-/// INTN is low while an enabled input differs from the value last read from its input register.
-pub struct Aw9523 {
-    pub regs: [u8; 256],
-    /// levels driven onto pins configured as inputs, by the board (bit 8+n = P1_n)
-    pub external: u16,
-    /// input values the firmware last read (reading 0x00/0x01 latches a port)
-    pub latched: u16,
-    ptr: u8,
-    first: bool,
-}
-
-impl Default for Aw9523 { fn default() -> Self { Self::new() } }
-
-impl Aw9523 {
-    pub const ADDRESS: u8 = 0x58;
-    const P0_TF_SW: u16 = 1 << 4;
-    pub const P1_LCD_RST: u16 = 1 << 9;
-    pub const P1_TOUCH_INT: u16 = 1 << 10;
-
-    pub fn new() -> Self {
-        let mut a = Aw9523 { regs: [0; 256], external: 0xffff, latched: 0, ptr: 0, first: true };
-        a.reset();
-        a
-    }
-    fn reset(&mut self) {
-        self.regs = [0; 256];
-        self.regs[0x04] = 0xff;
-        self.regs[0x05] = 0xff;
-        self.regs[0x10] = 0x23;
-        self.regs[0x12] = 0xff;
-        self.regs[0x13] = 0xff;
-        self.latched = self.inputs();
-    }
-    fn word(&self, lo: usize) -> u16 { u16::from_le_bytes([self.regs[lo], self.regs[lo + 1]]) }
-    /// Output latch (`0x02/0x03`).
-    pub fn outputs(&self) -> u16 { self.word(0x02) }
-    /// Pin levels: driven outputs, board-driven inputs.
-    pub fn inputs(&self) -> u16 {
-        let dir = self.word(0x04);
-        (self.outputs() & !dir) | (self.external & dir)
-    }
-    /// INTN asserted (low).
-    pub fn intn_low(&self) -> bool {
-        let enabled = !self.word(0x06) & self.word(0x04);
-        (self.inputs() ^ self.latched) & enabled != 0
-    }
-    /// Whether the LCD reset line (P1_1, active low) is released.
-    pub fn lcd_reset_released(&self) -> bool { self.outputs() & Self::P1_LCD_RST != 0 || self.word(0x04) & Self::P1_LCD_RST != 0 }
-}
-
-impl I2cDevice for Aw9523 {
-    fn start(&mut self, read: bool) -> bool { if !read { self.first = true; } true }
-    fn write(&mut self, b: u8) -> bool {
-        if self.first { self.ptr = b; self.first = false; return true; }
-        match self.ptr {
-            0x00 | 0x01 | 0x10 => {}
-            0x7f => if b == 0x00 { self.reset(); },
-            p => self.regs[p as usize] = b,
-        }
-        self.ptr = self.ptr.wrapping_add(1);
-        true
-    }
-    fn read(&mut self) -> u8 {
-        let v = match self.ptr {
-            0x00 => { let i = self.inputs(); self.latched = (self.latched & 0xff00) | (i & 0x00ff); i as u8 }
-            0x01 => { let i = self.inputs(); self.latched = (self.latched & 0x00ff) | (i & 0xff00); (i >> 8) as u8 }
-            p => self.regs[p as usize],
-        };
-        self.ptr = self.ptr.wrapping_add(1);
-        v
-    }
-}
+const AW_TF_SW: u16 = 1 << 4;
+const AW_LCD_RST: u16 = 1 << 9;
+const AW_TOUCH_INT: u16 = 1 << 10;
 
 /// Everything on the internal bus plus the panel, behind one lock so that the expander's
 /// LCD reset and touch interrupt act on the devices they are wired to.
@@ -146,17 +75,17 @@ pub struct Cores3Hw {
 impl Cores3Hw {
     fn sync(&mut self) {
         // CoreS3 K128 schematic v1.0: AW_RST is driven by AW9523 P0_2.
-        self.amp.set_reset_released(self.aw9523.outputs() & !self.aw9523.word(0x04) & (1 << 2) != 0);
+        self.amp.set_reset_released(self.aw9523.outputs() & !self.aw9523.directions() & (1 << 2) != 0);
         let backlight = self.pmic.backlight_on();
         if backlight != self.backlight { self.panel_version += 1; self.backlight = backlight; }
-        let in_reset = !self.aw9523.lcd_reset_released();
+        let in_reset = ((self.aw9523.outputs() | self.aw9523.directions()) & AW_LCD_RST) == 0;
         if in_reset && !self.lcd_in_reset {
             self.panel.reset(); self.panel_version += 1; self.lcd_id_offset = None;
         }
         self.lcd_in_reset = in_reset;
         let touched = self.points.lock().expect("CoreS3 touch mutex poisoned").iter().any(Option::is_some);
         let ext = self.aw9523.external;
-        self.aw9523.external = if touched { ext & !Aw9523::P1_TOUCH_INT } else { ext | Aw9523::P1_TOUCH_INT };
+        self.aw9523.external = if touched { ext & !AW_TOUCH_INT } else { ext | AW_TOUCH_INT };
     }
     // Sch_M5_CoreS3_v1.0 sheets 1 and 5 connect ALDO4 to VDD_3V3_SD.
     // M5Unified 0.3.0 Power_Class.inl enables ALDO4 (0x90 bit 3) and sets it to 3.3 V
@@ -366,7 +295,7 @@ impl BoardModel for Cores3 {
         let mut hw = self.hw.borrow_mut();
         hw.sd = Some(Box::new(SpiSdCard::new(card)));
         // TF_SW has a pull-up and closes to ground on insertion (schematic sheet 5).
-        hw.aw9523.external &= !Aw9523::P0_TF_SW;
+        hw.aw9523.external &= !AW_TF_SW;
     }
     fn spi_transfer_pins(&mut self, host: u8, pins: SpiPins, tx: &[u8], rx_len: usize) -> Vec<u8> {
         if pins.sclk & (1 << PIN_SPI_SCLK) == 0 { return vec![0xff; rx_len]; }
@@ -536,10 +465,10 @@ mod sd_tests {
         let cmd0 = [0x40, 0, 0, 0, 0, 0x95];
         let exchange = |b: &mut Cores3, pins, tx: &[u8], rx| b.spi_transfer_pins(2, pins, tx, rx);
         assert_eq!(exchange(&mut board, pins, &[], 2), [0xff; 2]);
-        assert_ne!(board.hw.borrow().aw9523.inputs() & Aw9523::P0_TF_SW, 0);
+        assert_ne!(board.hw.borrow().aw9523.inputs() & AW_TF_SW, 0);
 
         board.insert_spi_sd(SdCard::new(Box::new(MemStore(vec![0; 512 << 10]))).unwrap());
-        assert_eq!(board.hw.borrow().aw9523.inputs() & Aw9523::P0_TF_SW, 0);
+        assert_eq!(board.hw.borrow().aw9523.inputs() & AW_TF_SW, 0);
         let mut pmic = board.i2c_devices().into_iter().find(|&(bus, addr, _)| bus == 0 && addr == AXP2101_ADDRESS).unwrap().2;
         exchange(&mut board, pins, &cmd0, 0);
         assert_eq!(exchange(&mut board, pins, &[], 2), [0xff; 2]);

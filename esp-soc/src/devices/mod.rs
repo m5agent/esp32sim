@@ -3,6 +3,7 @@
 //! them and adds what is module-specific — pin numbers, the visible window of a glass, where
 //! each LED of a chain sits physically.
 pub mod aw88298;
+pub mod aw9523;
 pub mod axp2101;
 pub mod bm8563;
 pub mod bmi270;
@@ -16,7 +17,11 @@ pub mod es8311;
 pub mod ft5x06;
 pub mod gt911;
 pub mod imu_motion;
+pub mod ina226;
+pub mod lm75b;
 pub mod ltr553;
+pub mod pi4ioe5v6408;
+pub mod rx8130;
 pub mod soft_i2c;
 pub mod spi_bitbang;
 pub mod st25r3916;

@@ -1,5 +1,5 @@
 //! M5Stack Tab5 display/touch and internal I²C wiring (M5GFX 0.3.0, board_detect/m5/esp32p4*).
-use crate::tab5_aux::{Ina226, Rx8130};
+use esp_soc::devices::{ina226::Ina226, rx8130::Rx8130};
 use esp_periph::i2c::{I2cDevice, Reg8Device};
 use esp_soc::board::{BoardEdge, I2sCodecs, SpiPins, VirtualCycle};
 use esp_soc::devices::es7210::Es7210;
@@ -109,14 +109,14 @@ impl Tab5 {
         let rails = Rc::new(RefCell::new(pi4io()));
         let charger = Rc::new(RefCell::new(pi4io()));
         charger.borrow_mut().regs[0x0f] = 1 << 6;
-        let rtc = Rc::new(RefCell::new(Rx8130::new()));
-        let battery = Rc::new(RefCell::new(Ina226::new()));
+        let rtc = Rc::new(RefCell::new(Rx8130::new(crate::periph::CPU_HZ)));
+        let battery = Rc::new(RefCell::new(Ina226::new(crate::periph::CPU_HZ, 5000, true, 7400, -120)));
         let mic = Rc::new(RefCell::new(Es7210::new()));
         // ES8388 control registers used by M5Unified 0.3.0's Tab5 speaker callback.
         // Reset starts with CHIPPOWER/DACPOWER down and DACCONTROL3 muted.
         let dac = Rc::new(RefCell::new(Reg8Device::new("es8388", &[(2, 0xc3), (4, 0xc0), (25, 4)])));
         let mut bus = vec![(0x43, DevicePort(rails.clone())), (0x44, DevicePort(charger.clone())),
-                           (Rx8130::ADDRESS, DevicePort(rtc.clone())), (Ina226::ADDRESS, DevicePort(battery.clone())),
+                           (Rx8130::ADDRESS, DevicePort(rtc.clone())), (0x41, DevicePort(battery.clone())),
                            (Es7210::ADDRESS, DevicePort(mic.clone())), (0x10, DevicePort(dac.clone()))];
         let motion = Arc::<ImuMotion>::default();
         let imu = Rc::new(RefCell::new(Bmi270::new(motion.clone(), crate::periph::CPU_HZ)));
@@ -226,6 +226,7 @@ impl BoardModel for Tab5 {
         self.motion.cycle.store(cycle, std::sync::atomic::Ordering::Relaxed);
         let mut rtc = self.rtc.borrow_mut();
         rtc.advance(cycle);
+        self.battery.borrow_mut().advance(cycle);
         let rtc_irq = rtc.irq();
         drop(rtc);
         // Tab5 schematic: IOE 0x44 P4 (PWROFF_PLUSE) and U30 nIRQ feed the
