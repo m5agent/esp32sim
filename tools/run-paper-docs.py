@@ -26,7 +26,7 @@ INPUT = {
     "button": ["4.0 press a 350", "7.0 press b 400"],
     "touch": ["5.0 touch 60 120 1", "5.4 touch 60 120 0", "8.0 touch 190 320 1", "8.5 touch 190 320 0"],
     "wakeup": ["8.0 touch 80 180 1", "8.4 touch 80 180 0"],
-    "sht40": ["35.0 sht40 18 35", "65.0 sht40 32 71"],
+    "sht40": ["0.1 sht40 18 35", "115.0 sht40 32 71"],
     "m5pm1": ["4.0 press a 350", "9.0 press b 350"],
     "microsd": ["6.0 press a 300", "10.0 press b 300"],
     "battery": ["35.0 paper-battery 3678 0", "65.0 paper-battery 4200 1"],
@@ -34,6 +34,11 @@ INPUT = {
 }
 
 DIMS = {"paperdiy": (540, 960), "papers3": (540, 960), "papermono": (480, 800), "papercolor": (400, 600)}
+RTC_WIFI = {
+    ("papers3", "rtc"): "ssid=YOUR WIFI SSID NAME,psk=YOUR WIFI PASSWORD",
+    ("papermono", "rtc-2"): "ssid=ssid,psk=password",
+    ("papercolor", "rtc-2"): "ssid=ssid,psk=password",
+}
 
 
 def digest(path):
@@ -48,8 +53,10 @@ def run(board, binary, firmware, out, cases, args):
         if image is None or not image.is_file():
             return {"case": case, "kind": kind, "state": "NOT RUN", "reason": "No pinned merged image"}
         png, log = (out / f"{stem}.{ext}" for ext in ("png", "log"))
-        if board == "papercolor":
-            limit = 95 if case in {"battery", "button", "microsd", "sht40"} else 40
+        if board == "papercolor" and case == "sht40":
+            limit = 145
+        elif board == "papercolor":
+            limit = 95 if case in {"battery", "button", "microsd", "ir_nec"} else 40
         elif case in {"stock", "quickstart-longtextscroll"}:
             limit = 10
         else:
@@ -69,6 +76,8 @@ def run(board, binary, firmware, out, cases, args):
         elif case == "battery" and board == "papermono":
             lines = ["5.0 paper-battery 3678 0", "10.0 paper-battery 4200 1"]
         if kind == "input":
+            if (board, case) in RTC_WIFI:
+                command += ["--wifi", RTC_WIFI[board, case], "--net", "none"]
             if lines:
                 script = out / f"{stem}.txt"
                 script.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -95,7 +104,8 @@ def run(board, binary, firmware, out, cases, args):
                 "png_sha256": digest(png) if png.is_file() else None, "command": command}
 
     jobs = [(case, "input") for case in cases]
-    jobs += [(case, "control") for case in cases if case in INPUT or case in {"display-2", "imu", "sdcard", "mic"}]
+    jobs += [(case, "control") for case in cases if case in INPUT
+             or case in {"display-2", "imu", "sdcard", "mic"} or (board, case) in RTC_WIFI]
     jobs += [(case, "early") for case in cases if case.startswith(("display", "quickstart"))]
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         return list(pool.map(lambda job: one(*job), jobs))
@@ -118,7 +128,7 @@ def main():
     parser.add_argument("--lora-peer", help="PaperMono loopback ports for all LoRa cases, IN:OUT")
     args = parser.parse_args()
     cases = BOARDS[args.board].split() + (["stock"] if args.stock else [])
-    if args.lora_peer and (args.board != "papermono" or not args.case or len(args.case) != 1):
+    if args.lora_peer and (args.board != "papermono" or args.case not in (["lora-1"], ["lora-2"])):
         parser.error("--lora-peer needs one selected PaperMono LoRa case")
     if args.case:
         if not set(args.case) <= set(cases):
