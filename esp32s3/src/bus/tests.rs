@@ -600,6 +600,35 @@ fn descriptor_step_budget_is_typed() {
 }
 
 #[test]
+fn split_spi_data_phases_resume_inside_a_dma_descriptor() {
+    const DATA: u32 = 0x3fc9_0200;
+    let mut bus = dma_bus();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    bus.board = Box::new(ProbeBoard { events: events.clone() });
+    bus.periph.gdma.out[0].conf0 = 1 << 2;
+    bus.write32(DATA, 0x4433_2211).unwrap();
+    bus.write32(DATA + 4, 0x8877_6655).unwrap();
+    bus.write32(FIRST_DESC, 4 | (4 << 12) | (1 << 31)).unwrap();
+    bus.write32(FIRST_DESC + 4, DATA).unwrap();
+    bus.write32(FIRST_DESC + 8, FIRST_DESC + 12).unwrap();
+    bus.write32(FIRST_DESC + 12, 4 | (4 << 12) | (1 << 30) | (1 << 31)).unwrap();
+    bus.write32(FIRST_DESC + 16, DATA + 4).unwrap();
+    bus.write32(FIRST_DESC + 20, 0).unwrap();
+
+    start_dma(&mut bus, 16);
+    let channel = &bus.periph.gdma.out[0];
+    assert_eq!((channel.desc, channel.buf_pos, channel.running), (FIRST_DESC, 2, true));
+    assert_eq!(channel.int_raw & 0xb, 0);
+    assert_ne!(bus.read32(FIRST_DESC).unwrap() & (1 << 31), 0);
+
+    start_dma(&mut bus, 48);
+    assert_eq!(bus.spi2_dma_fault, None);
+    assert_eq!(&*events.lock().unwrap(), &["spi:2:[11, 22]:0", "spi:2:[33, 44, 55, 66, 77, 88]:0"]);
+    assert_eq!(bus.read32(FIRST_DESC).unwrap() & (1 << 31), 0);
+    assert!(!bus.periph.gdma.out[0].running);
+}
+
+#[test]
 fn short_ms_dlen_retires_an_overlong_eof_descriptor() {
     const DATA: u32 = 0x3fc9_0200;
     let mut bus = dma_bus();

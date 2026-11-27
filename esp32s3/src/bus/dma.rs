@@ -305,7 +305,10 @@ impl SocBus {
                     address,
                     fault,
                 })?;
-                channel.buf_pos += remaining as u32;                     // GDMA drains the descriptor
+                channel.buf_pos += count as u32;
+                // A command can end in the middle of a nonterminal descriptor.
+                // The next SPI data phase resumes on the same GDMA link.
+                if count < remaining && !eof { break; }
             }
             if channel.conf0 & (1 << 2) != 0 {
                 let writable = current.desc.checked_add(4).is_some_and(|end| {
