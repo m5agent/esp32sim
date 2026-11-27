@@ -9,7 +9,7 @@ octal PSRAM and expose the LGA56 package eFuse field.
 | `m5stack-atoms3-lite` | G41 button, G35 addressable LED, G4 IR |
 | `m5stack-atoms3` | ST7735S, MPU6886 on G38/G39, G41 button, G4 IR |
 | `m5stack-atoms3-gc9107` | AtomS3 with GC9107 panel and its own GRAM geometry and probe ID |
-| `m5stack-atoms3r` | ST7735S, LP5562, BMI270/BMM150 on G45/G0, G41 button, G47 IR |
+| `m5stack-atoms3r` | ST7735S, LP5562 and BMI270 on G45/G0, BMM150 on BMI270 AUX, G41 button, G47 IR |
 | `m5stack-atoms3r-gc9107` | AtomS3R with GC9107 panel |
 | `m5stack-atoms3u` | G41 button, G35 RGB, G12 IR, PDM microphone on G38/G39 |
 | `m5stack-atom-echos3r` | G41 button, G47 IR, ES8311 codec and G18 amplifier enable |
@@ -23,7 +23,7 @@ MOSI/readback line and different visible windows.
 
 Use `press btn MS` for G41 and `imu AX AY AZ GX GY GZ` for accelerometer and
 gyroscope inputs in sensor axes (g and dps). `mag X Y Z` supplies a BMM150
-field in µT. The guest can apply its board-specific axis conversion.
+field in µT through the BMI270 auxiliary interface. The guest can apply its board-specific axis conversion.
 The IR report lists frames observed at the transmitter pins. The LP5562 model
 supports direct PWM and register readback. AtomS3U takes host PCM after the
 I2S0 PDM converter when the guest has routed clock and data to the microphone.

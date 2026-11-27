@@ -96,7 +96,6 @@ pub(super) struct AtomS3 {
     panel: Option<Panel>,
     mpu: Option<Shared<Mpu6886>>,
     bmi: Option<Shared<Bmi270>>,
-    mag: Option<Shared<Bmm150>>,
     lp: Option<Shared<Lp5562>>,
     audio: Option<Es8311>,
     amp: bool,
@@ -121,9 +120,13 @@ impl AtomS3 {
         };
         let panel = lcd.map(|chip| Panel::new(r, chip));
         let mpu = (panel.is_some() && !r).then(|| Rc::new(RefCell::new(Mpu6886::default())));
-        let bmi = (r && model != AtomBoard::Voice)
-            .then(|| Rc::new(RefCell::new(Bmi270::new(Arc::new(ImuMotion::default()), CPU_HZ))));
-        let mag = bmi.as_ref().map(|_| Rc::new(RefCell::new(Bmm150::new(Default::default()))));
+        // The C126, CAM and M12 product schematics route BMM150 to the BMI270
+        // auxiliary bus. The SoC's G45/G0 bus sees only the BMI270 address.
+        let bmi = (r && model != AtomBoard::Voice).then(|| {
+            let sensor = Bmi270::new(Arc::new(ImuMotion::default()), CPU_HZ)
+                .with_aux_bmm150(Bmm150::new(Default::default()));
+            Rc::new(RefCell::new(sensor))
+        });
         let lp = (r && panel.is_some()).then(|| Rc::new(RefCell::new(Lp5562::default())));
         let audio = (model == AtomBoard::Voice).then(Es8311::new);
         let rgb = matches!(model, AtomBoard::Lite | AtomBoard::U).then(|| Ws2812Chain::new(1));
@@ -131,7 +134,6 @@ impl AtomS3 {
             let mut wire = Wire::new(if r { (45, 0) } else { (38, 39) });
             if let Some(d) = &mpu { wire.devices.push((Mpu6886::ADDRESS, d.clone())); }
             if let Some(d) = &bmi { wire.devices.push((0x68, d.clone())); }
-            if let Some(d) = &mag { wire.devices.push((0x10, d.clone())); }
             if let Some(d) = &lp { wire.devices.push((Lp5562::ADDRESS, d.clone())); }
             if let Some(d) = &audio { wire.devices.push((Es8311::ADDRESS, Rc::new(RefCell::new(d.i2c_port())))); }
             wire
@@ -143,7 +145,7 @@ impl AtomS3 {
             wire.devices.push((d.borrow().address(), d.clone()));
             wire
         });
-        Self { model, wire, sccb, camera, panel, mpu, bmi, mag, lp, audio, amp: false, rgb, rgb_recent: Vec::new(),
+        Self { model, wire, sccb, camera, panel, mpu, bmi, lp, audio, amp: false, rgb, rgb_recent: Vec::new(),
                ir: NecReceiver::default(), ir_pwm: false, backlight: 0, backlight_updates: 0,
                drive: [None; 49], edges: Vec::new(), releases: Vec::new() }
     }
@@ -272,7 +274,7 @@ impl BoardModel for AtomS3 {
     }
 
     fn accepts_command(&self, verb: &str) -> bool {
-        (verb == "imu" && (self.mpu.is_some() || self.bmi.is_some())) || (verb == "mag" && self.mag.is_some())
+        (verb == "imu" && (self.mpu.is_some() || self.bmi.is_some())) || (verb == "mag" && self.bmi.is_some())
     }
     fn board_command(&mut self, _cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
         if !self.accepts_command(verb) { return false; }
@@ -283,7 +285,7 @@ impl BoardModel for AtomS3 {
                 if let Some(d) = &self.bmi { d.borrow_mut().set_sample([x, y, z], [gx, gy, gz], None); }
             }
             ("mag", &[x, y, z]) => {
-                if let Some(d) = &self.mag { d.borrow_mut().field = [x, y, z]; }
+                if let Some(d) = &self.bmi { d.borrow_mut().set_mag_field([x, y, z]); }
             }
             _ => return false,
         }
