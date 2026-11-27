@@ -22,6 +22,10 @@ const US: u64 = CPU_HZ / 1_000_000;
 const MS: u64 = US * 1000;
 const COLOR_SD: SpiPins = SpiPins { sclk: 1 << 15, mosi: 1 << 13, miso: Some(14), cs: 1 << 47 };
 const LORA_CS: u64 = 1 << 41;
+// C153 U14 NRST and antenna switch use IOE1 package pins 10 and 2.
+// M5IOE1.h exposes their zero-based latch bits as 9 and 1.
+const LORA_RESET: u16 = 1 << 9;
+const LORA_ANTENNA_TX: u16 = 1 << 1;
 
 struct Microphone(Rc<RefCell<Es7210>>);
 impl I2cDevice for Microphone {
@@ -70,11 +74,11 @@ impl RadioLink {
         Ok(Self { chip: Default::default(), peer, next_poll: 0, selected: false, active: false, tx: 0, rx: 0 })
     }
 
-    fn advance(&mut self, now: u64) {
+    fn advance(&mut self, now: u64, antenna_tx: bool) {
         let channel = self.chip.channel();
         if let Some(data) = self.chip.advance(now) {
             self.tx += 1;
-            if let Some(socket) = &self.peer {
+            if let Some(socket) = self.peer.as_ref().filter(|_| antenna_tx) {
                 let mut datagram = vec![1];
                 datagram.extend(channel);
                 datagram.extend(data);
@@ -87,7 +91,7 @@ impl RadioLink {
         let mut datagram = [0; 267];
         for _ in 0..16 {
             let Ok(n) = socket.recv(&mut datagram) else { break; };
-            if self.active && n > 11 && datagram[0] == 1 && datagram[1..11] == channel
+            if !antenna_tx && n > 11 && datagram[0] == 1 && datagram[1..11] == channel
                 && self.chip.receive(&datagram[11..n]) { self.rx += 1; }
         }
     }
@@ -280,12 +284,16 @@ impl BoardModel for PaperSpi {
         match &mut self.display { Display::Mono(p) => p.advance_to(cycle), Display::Color(p) => p.advance_to(cycle) }
         self.nfc.borrow_mut().advance(cycle);
         if let Some(radio) = &mut self.radio {
-            let active = self.pmic.lock().unwrap().driven_high & 4 != 0 && self.expander.get() & (1 << 10) != 0;
+            let outputs = self.expander.get();
+            let pmic = self.pmic.lock().unwrap();
+            let active = !pmic.power_off_requested && pmic.driven_high & 4 != 0
+                && outputs & LORA_RESET != 0;
+            drop(pmic);
             if radio.active != active {
                 radio.active = active;
                 radio.chip.reset(cycle);
             }
-            if active { radio.advance(cycle); }
+            if active { radio.advance(cycle, outputs & LORA_ANTENNA_TX != 0); }
         }
         self.update_edges();
     }
