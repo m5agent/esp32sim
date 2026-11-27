@@ -11,11 +11,37 @@ pub struct M5pm1State {
     pub charging: bool,
     pub power_off_requested: bool,
     pub driven_high: u8,
+    pub timer: Option<M5pm1Timer>,
 }
 
 impl Default for M5pm1State {
     fn default() -> Self {
-        Self { battery_mv: 3900, charging: false, power_off_requested: false, driven_high: 0 }
+        Self { battery_mv: 3900, charging: false, power_off_requested: false, driven_high: 0, timer: None }
+    }
+}
+
+/// Virtual-time power actions for boards that wire M5PM1 to the SoC rail.
+#[derive(Debug)]
+pub struct M5pm1Timer {
+    hz: u64,
+    cycle: u64,
+    alarm: Option<(u64, PowerAction)>,
+}
+
+#[derive(Debug)]
+enum PowerAction { On, Off }
+
+impl M5pm1State {
+    pub fn power_deadline(&self) -> Option<u64> {
+        self.timer.as_ref()?.alarm.as_ref().map(|&(cycle, _)| cycle)
+    }
+
+    pub fn advance_power_timer(&mut self, cycle: u64) {
+        let Some(timer) = &mut self.timer else { return };
+        timer.cycle = cycle;
+        if timer.alarm.as_ref().is_some_and(|&(deadline, _)| cycle >= deadline) {
+            self.power_off_requested = matches!(timer.alarm.take(), Some((_, PowerAction::Off)));
+        }
     }
 }
 
@@ -41,6 +67,11 @@ impl M5pm1 {
             state,
         }
     }
+
+    pub fn with_power_timer(state: Arc<Mutex<M5pm1State>>, hz: u64) -> Self {
+        state.lock().expect("M5PM1 state mutex poisoned").timer.get_or_insert(M5pm1Timer { hz, cycle: 0, alarm: None });
+        Self::new(state)
+    }
 }
 
 impl I2cDevice for M5pm1 {
@@ -55,6 +86,21 @@ impl I2cDevice for M5pm1 {
             }
             if reg == 0x0c && byte == 0xa1 {
                 self.state.lock().expect("M5PM1 state mutex poisoned").power_off_requested = true;
+            }
+            if reg == 0x3d && byte == 0xa5 {
+                let r = &self.registers.regs;
+                let mut state = self.state.lock().expect("M5PM1 state mutex poisoned");
+                if let Some(timer) = &mut state.timer {
+                    let seconds = u32::from_le_bytes([r[0x38], r[0x39], r[0x3a], r[0x3b] & 0x7f]);
+                    let deadline = timer.cycle.saturating_add(u64::from(seconds).saturating_mul(timer.hz));
+                    // The power-on and power-off actions are idempotent. The relevant
+                    // transition is the first expiry, even if ARM requests auto reload.
+                    timer.alarm = match r[0x3c] & 7 {
+                        3 => Some((deadline, PowerAction::On)),
+                        4 => Some((deadline, PowerAction::Off)),
+                        _ => None,
+                    };
+                }
             }
         }
         let update = !self.registers.first && matches!(self.registers.ptr, 0x10 | 0x11 | 0x13 | 0x16 | 0x17);

@@ -1018,10 +1018,12 @@ impl SocBus {
 
     fn tick_impl(&mut self, cycles: u32) -> u32 {
         // Board time advances before peripheral callbacks; inputs are delivered after them.
+        let deadline_due = self.board_power.is_some()
+            && self.board.next_deadline().is_some_and(|deadline| deadline <= self.cycles);
         if self.board_edges { self.board.advance_to(self.cycles); }
-        if self.board_power_off() || self.power_on_reset {
+        if self.board_power_off() || self.power_on_reset || deadline_due {
             self.sync_board_power();
-            return u32::from(self.irq_dirty);
+            if self.board_power_off() || self.power_on_reset { return u32::from(self.irq_dirty); }
         }
         let board_i2c = self.board_power.is_some() && self.periph.i2c.iter().any(|i2c| i2c.is_active());
         // Reads may flush before the periodic backstop. Refresh for either edge

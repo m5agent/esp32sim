@@ -83,7 +83,9 @@ impl BoardModel for PaperParallel {
     fn i2c_devices(&mut self) -> Vec<(u8, u8, Box<dyn I2cDevice>)> {
         self.i2c.reset();
         if self.diy {
-            self.i2c.attach(M5pm1::ADDRESS, M5pm1::new(self.pmic.clone()));
+            self.output = 0;
+            self.panel_on = false;
+            self.i2c.attach(M5pm1::ADDRESS, M5pm1::with_power_timer(self.pmic.clone(), CPU_HZ));
         } else {
             self.i2c.attach(0x51, Clock(self.rtc.clone()));
             self.i2c.attach(0x5d, Gt911::new(self.touch.clone(), 540, 960).with_pending(self.touch_pending.clone()));
@@ -167,9 +169,19 @@ impl BoardModel for PaperParallel {
         true
     }
     fn take_edges(&mut self) -> Vec<BoardEdge> { std::mem::take(&mut self.edges) }
+    fn soc_powered(&self) -> Option<bool> {
+        self.diy.then(|| !self.pmic.lock().unwrap().power_off_requested)
+    }
+    fn next_deadline(&self) -> Option<VirtualCycle> {
+        if !self.diy { return None; }
+        self.pmic.lock().unwrap().power_deadline()
+    }
     fn advance_to(&mut self, cycle: VirtualCycle) {
         self.cycle = cycle;
-        if !self.diy {
+        if self.diy {
+            self.pmic.lock().unwrap().advance_power_timer(cycle);
+            self.sync_panel_power();
+        } else {
             self.imu.cycle.store(cycle, std::sync::atomic::Ordering::Relaxed);
             self.rtc.borrow_mut().advance_to(cycle);
             self.sync_touch_irq();
