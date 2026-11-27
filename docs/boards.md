@@ -271,6 +271,10 @@ is none; the page's manifest sets 32).
 
 Run `esp32sim-p4 --board m5stack-tab5` for the original ILI9881C/GT911 pair or
 `--board m5stack-tab5-st7123` for the ST7123 display and touch controller.
+`--board m5stack-tab5-dsi-only` models an ILI9881C Tab5 with the GT911 touch
+cable disconnected. Use it with `--debug dsi` to exercise and trace the
+stock firmware's panel-ID fallback. UIFlow2 v2.5.4 skips the DSI ID read
+when the GT911 answers its I2C probe.
 The P4 launcher defaults to 16 MiB flash and 32 MiB PSRAM for either profile.
 
 | Device | Emulator path |
@@ -280,7 +284,7 @@ The P4 launcher defaults to 16 MiB flash and 32 MiB PSRAM for either profile.
 | PI4IOE5V6408 pair | GPIO 31/32 software I²C and I2C1 share the expanders’ register state. |
 | Backlight | GPIO 22 LEDC PWM is sampled in the board report. Frame capture represents the panel's digital pixels. |
 | RTC and board power | RX8130 nIRQ powers the board back on after the 0x44 expander’s P4 output pulses the standby supervisor. When the P4 itself enters timer deep sleep, LP_TIMER restores the digital domain independently of the external RTC. |
-| USB host | Original Tab5 presents the 4.00a HS DWC2 identity. Script `usb-msc fs` attaches a full-speed drive with 64-byte bulk endpoints. `usb-msc` selects the high-speed drive. |
+| USB host | Original Tab5 presents the 4.00a HS DWC2 identity. Script `usb-msc fs` attaches a full-speed drive with 64-byte bulk endpoints. `usb-msc` selects the high-speed drive. Set `--usb-msc-image IMG` to serve a read-only raw image with 512-byte sectors. |
 | ESP32-C6 | `--coproc` connects SDIO slot 1 to CLK 12, CMD 13, D0–D3 11/10/9/8 and defaults EN to GPIO 15. Supply the matching ESP-Hosted firmware. |
 
 Arduino 3.2.5 (IDF `858a988d`) pins ESP-Hosted 2.0.13 and esp-wifi-remote 0.13.0 in its

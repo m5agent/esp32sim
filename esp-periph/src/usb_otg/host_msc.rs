@@ -1,5 +1,6 @@
-//! A USB Mass Storage Bulk-Only Transport target with a small read-only FAT12 volume.
+//! A USB Mass Storage Bulk-Only Transport target with read-only media.
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 const SECTOR: usize = 512;
 const BLOCKS: usize = 128;
@@ -10,9 +11,20 @@ pub(super) struct Msc {
     data: VecDeque<u8>,
     status: Option<[u8; 13]>,
     sense: (u8, u8),
+    image: Option<Arc<[u8]>>,
 }
 
 impl Msc {
+    pub(super) fn new(image: Option<Arc<[u8]>>) -> Self { Self { image, ..Self::default() } }
+
+    pub(super) fn reset(&mut self) {
+        self.data.clear();
+        self.status = None;
+        self.sense = (0, 0);
+    }
+
+    fn blocks(&self) -> usize { self.image.as_ref().map_or(BLOCKS, |image| image.len() / SECTOR) }
+
     pub(super) fn input(&mut self, len: usize) -> Result<Vec<u8>, u32> {
         if !self.data.is_empty() { return Ok(self.data.drain(..len.min(self.data.len())).collect()); }
         let status = self.status.take().ok_or(0u32)?;
@@ -45,14 +57,18 @@ impl Msc {
                 data
             }
             0x1a => vec![3, 0, 0x80, 0], // MODE SENSE(6): write protected
-            0x25 => [(BLOCKS as u32 - 1).to_be_bytes(), (SECTOR as u32).to_be_bytes()].concat(),
+            0x25 => [(self.blocks() as u32 - 1).to_be_bytes(), (SECTOR as u32).to_be_bytes()].concat(),
             0x28 => {
                 let lba = u32::from_be_bytes([scsi[2], scsi[3], scsi[4], scsi[5]]) as usize;
                 let count = u16::from_be_bytes([scsi[7], scsi[8]]) as usize;
-                if lba >= BLOCKS || lba.saturating_add(count) > BLOCKS {
+                if lba >= self.blocks() || lba.saturating_add(count) > self.blocks() {
                     self.sense = (5, 0x21);
                     fail = true;
                     Vec::new()
+                } else if let Some(image) = &self.image {
+                    let start = lba * SECTOR;
+                    let bytes = (count * SECTOR).min(want as usize);
+                    image[start..start + bytes].to_vec()
                 } else { (lba..lba + count).flat_map(sector).collect() }
             }
             _ => { self.sense = (5, 0x20); fail = true; Vec::new() }

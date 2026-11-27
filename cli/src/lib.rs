@@ -24,7 +24,7 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!("                        (Espressif's, not in the tarball: tools/fetch-rom-elfs.sh DIR downloads all of them)");
     eprintln!("  --board NAME          board model (S3: atech14, waveshare-lcd4b, waveshare-amoled18-v2, waveshare-cam, stopwatch, m5stack-cores3, m5stack-stamplc, m5stack-stackchan, m5stack-cardputer, m5stack-cardputer-adv, m5stack-dial, m5stack-sticks3, m5stack-paperdiy, m5stack-papers3, m5stack-papermono, m5stack-papercolor, none;");
     eprintln!("                        m5stack-atoms3[-lite|-gc9107], m5stack-atoms3u, m5stack-atoms3r[-gc9107|-cam|-m12], m5stack-atom-echos3r;");
-    eprintln!("                        C6: waveshare-c6-lcd147, xiao-esp32c6, m5stack-nanoc6[-enviii], arduino-nesso-n1, none; P4: waveshare-p4-lcd35, m5stack-tab5, m5stack-tab5-st7123, none; S31: mosaico, none;");
+    eprintln!("                        C6: waveshare-c6-lcd147, xiao-esp32c6, m5stack-nanoc6[-enviii], arduino-nesso-n1, none; P4: waveshare-p4-lcd35, m5stack-tab5, m5stack-tab5-st7123, m5stack-tab5-dsi-only, none; S31: mosaico, none;");
     eprintln!("                        classic: m5stack-basic-v27, m5stack-core2[-axp192], m5stack-atom-lite, m5stack-atom-matrix[-v11], m5stack-atomu, m5stack-atom-echo,");
     eprintln!("                        m5stack-stickc[-plus|-plus-se|-plus2], m5stack-m5stick, m5stack-stickt2, ttgo-tdisplay, cyd, ulanzi-tc001, ai-thinker-cam, esp32dev, none)");
     eprintln!("  --flash-mb N, --psram-mb N   memory sizes (S3 default 8 / 2, Cardputer-ADV 8 / 0, C3, C6 and classic 4 / 0, Basic v2.7 16 / 0, Core2 16 / 8, StickC Plus2 8 / 2, P4 16 / 0, S31 2, mosaico 16 / 16)");
@@ -55,6 +55,7 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!("  --sd IMG, --sd-rw IMG an SD card, copy-on-write / write-through;");
     eprintln!("                        --sd-prg-us N, --sd-serial HEX for its programming time and serial");
     eprintln!("  --usb-host F          (P4, S3, S31) a USB host on the USB-OTG port running F; --sd-timing (P4) for timed SD");
+    eprintln!("  --usb-msc-image IMG   (P4) read-only 512-byte sectors for scripted usb-msc attachment");
     eprintln!("  --coproc c6:KEY=V,... (P4) an ESP32-C6 co-processor on SDIO, run in lock-step");
     eprintln!("  --no-dump             skip the register dump at exit");
     eprintln!();
@@ -159,6 +160,7 @@ pub struct Opts {
     pub sd: Option<(String, bool)>, pub sd_prg_us: Option<u64>, pub sd_serial: Option<u32>, pub sd_timing: bool, pub sd_ejected: bool,
     /// `--usb-host FILE`: a USB host on the chip's USB-OTG port, running the commands in FILE
     pub usb_host: Option<String>,
+    pub usb_msc_image: Option<String>,
     /// `--pcap FILE`: every Ethernet frame the WiFi station sends and receives, as a pcap
     pub pcap: Option<String>,
     /// `--wifi-sta SPEC`: a virtual station that joins the guest's own access point
@@ -221,6 +223,7 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
             "--sd-prg-us" => o.sd_prg_us = Some(next().parse().unwrap_or_else(|_| usage_error("--sd-prg-us: expected microseconds"))),
             "--sd-serial" => o.sd_serial = Some(hex(&next(), "sd-serial")),
             "--usb-host" => o.usb_host = Some(next()),
+            "--usb-msc-image" => o.usb_msc_image = Some(next()),
             "--sd-timing" => o.sd_timing = true,
             "--sd-ejected" => o.sd_ejected = true,
             "--mac" => { let v = next(); let b: Vec<u8> = v.split(':').filter_map(|x| u8::from_str_radix(x, 16).ok()).collect(); if b.len() != 6 { eprintln!("--mac wants xx:xx:xx:xx:xx:xx"); std::process::exit(2); } let mut m = [0u8; 6]; m.copy_from_slice(&b); o.mac = Some(m); }
@@ -383,6 +386,7 @@ pub fn run_cli(default_chip: &str) {
         || !matches!(o.board.as_str(), "papermono" | "m5stack-papermono") || o.cooja || o.coproc.is_some()) {
         usage_error("--lora-peer requires a standalone PaperMono session");
     }
+    if o.usb_msc_image.is_some() && !matches!(o.chip.as_str(), "p4" | "esp32p4") { usage_error("--usb-msc-image requires the P4"); }
     if o.cap_peer.is_some() && o.cooja { usage_error("--cap-peer requires a standalone session"); }
     if o.cap_peer.is_some() && o.cap.is_none() && !matches!(o.chip.as_str(), "c6" | "esp32c6") { usage_error("--cap-peer requires --cap"); }
     if o.cap.is_some() && (!matches!(o.chip.as_str(), "s3" | "esp32s3") ||
@@ -823,11 +827,15 @@ fn setup_p4<R: esp32p4::Revision>(o: &Opts) -> esp_soc::Machine<esp32p4::Esp32p4
     let flash = o.flash_mb.unwrap_or(16) << 20;
     let mut m = esp32p4::machine_rev::<R>(o.mac.unwrap_or([0x30, 0xed, 0xa0, 0x00, 0x11, 0x22]), flash);
     m.bus.set_flash_size(flash);   // the JEDEC capacity follows the size
-    let tab5 = matches!(o.board.as_str(), "m5stack-tab5" | "m5stack-tab5-st7123");
+    if let Some(path) = &o.usb_msc_image {
+        let image = std::fs::read(path).unwrap_or_else(|e| usage_error(&format!("--usb-msc-image: {e}")));
+        m.bus.periph.usb_otg.set_msc_image(image).unwrap_or_else(|e| usage_error(&format!("--usb-msc-image: {e}")));
+    }
+    let tab5 = matches!(o.board.as_str(), "m5stack-tab5" | "m5stack-tab5-st7123" | "m5stack-tab5-dsi-only");
     if let Some(mb) = o.psram_mb.or(tab5.then_some(32)) { m.bus.set_psram_size(mb << 20).unwrap(); }
     if !o.debug.is_empty() { let mut f = esp_soc::DebugFlags::from_env(); for d in &o.debug { f.parse(d); } m.set_debug(&f); }
     let board = if o.board == "atech14" { "none" } else { o.board.as_str() };   // the S3 default means "bare module" here
-    match esp32p4::board::make_board(board) { Some(b) => m.bus.board = b, None => usage_error(&format!("--board {board}: none, waveshare-p4-lcd35, m5stack-tab5 or m5stack-tab5-st7123 on the P4")) }
+    match esp32p4::board::make_board(board) { Some(b) => m.bus.board = b, None => usage_error(&format!("--board {board}: none, waveshare-p4-lcd35, m5stack-tab5, m5stack-tab5-st7123 or m5stack-tab5-dsi-only on the P4")) }
     m.bus.attach_board_devices();
     for (flag, on) in [("--wifi", !o.wifi.is_empty() && o.coproc.is_none()), ("--cam-image", o.cam_image.is_some()), ("--cam-stream", o.cam_stream.is_some()), ("--cam-size", o.cam_size.is_some()), ("--flash-octal", o.flash_octal), ("--efuse-regs", o.efuse_regs.is_some()), ("--regs-init", o.regs_init.is_some()), ("--regstat", o.regstat.is_some())] {
         if on { eprintln!("{} is not available on the P4{}", flag, if flag == "--wifi" { " (it goes to a co-processor: --coproc)" } else { "" }); std::process::exit(2); }

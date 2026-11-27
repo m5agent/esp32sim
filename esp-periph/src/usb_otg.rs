@@ -188,6 +188,7 @@ pub struct Dwc2 {
     pub now: u64,
     pub link: Option<Box<UsbLink>>,
     host: Option<Box<host::Host>>,
+    msc_image: Option<std::sync::Arc<[u8]>>,
     pending: bool,
     /// the block's reset line is asserted: registers at reset values, writes ignored
     held: bool,
@@ -205,7 +206,7 @@ impl Dwc2 {
         let mut d = Dwc2 { cfg, gotgctl: 0, gotgint: 0, gahbcfg: 0, gusbcfg: 0, grstctl: 0, gintsts: 0, gintmsk: 0, grxfsiz: 0, gnptxfsiz: 0, gdfifocfg: 0,
             dieptxf: [0; 15], pcgcctl: 0, dcfg: 0, dctl: 0, diepmsk: 0, doepmsk: 0, daintmsk: 0, diepempmsk: 0,
             ep_in: [Ep::default(); 16], ep_out: [Ep::default(); 16], ram: RegRam::new(), fifo: None, vbus: false, speed: None, sof_since: None,
-            sof_ack: 0, suspended: false, setup_phase: false, setup_stash: None, pullup_seen: false, now: 0, link: None, host: None, pending: false,
+            sof_ack: 0, suspended: false, setup_phase: false, setup_stash: None, pullup_seen: false, now: 0, link: None, host: None, msc_image: None, pending: false,
             held: false, phy: true, frame: 0, stats: Dwc2Stats::default(), log: false };
         d.set_speed(None);
         d.reset_registers();
@@ -285,10 +286,18 @@ impl Dwc2 {
         if self.log { eprintln!("[usb-hcd] attach {} mode={} port={:#x}", if gamepad { "gamepad" } else { "keyboard" }, self.host_mode(), self.host.as_ref().map_or(0, |host| host.read(0x440, 0))); }
         true
     }
+    pub fn set_msc_image(&mut self, bytes: Vec<u8>) -> Result<(), &'static str> {
+        if bytes.is_empty() || !bytes.len().is_multiple_of(512) || u32::try_from(bytes.len() / 512).is_err() {
+            return Err("USB MSC image must contain 1 to 4294967295 whole 512-byte sectors");
+        }
+        self.msc_image = Some(bytes.into());
+        Ok(())
+    }
+    pub fn keep_msc_image(&mut self, previous: &mut Self) { self.msc_image = previous.msc_image.take(); }
     pub fn attach_msc(&mut self, now: u64, full_speed: bool) -> bool {
         if !self.cfg.high_speed || self.link.is_some() { return false; }
         self.now = now;
-        self.host.get_or_insert_with(Default::default).attach_msc(full_speed);
+        self.host.get_or_insert_with(Default::default).attach_msc(full_speed, self.msc_image.clone());
         true
     }
     pub fn hid_report(&mut self, data: &[u8]) -> bool {

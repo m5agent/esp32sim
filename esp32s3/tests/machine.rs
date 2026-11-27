@@ -865,3 +865,64 @@ fn busy_runs_honor_cycle_ceiling_with_virtual_and_batched_rounds() {
         }
     }
 }
+
+#[test]
+fn core1_systimer_mmio_survives_repeated_resets() {
+    // ESP-IDF v5.4.2 esp32s3/register/soc/systimer_reg.h: UNIT1_OP
+    // at +0x08 and INT_CLR at +0x6c. Exercise both load encodings from
+    // the StamPLC and AtomS3 Lite failure records on Core 1.
+    const SYSTIMER: u32 = 0x6002_3000;
+    const READS: [u8; 11] = [
+        0x88, 0x19,                    // l32i.n a8,a9,4 (a9 = SYSTIMER + 4)
+        0xa2, 0x27, 0x1b,              // l32i a10,a7,108 (INT_CLR)
+        0xb2, 0x27, 0x1a,              // l32i a11,a7,104 (INT_RAW)
+        0x06, 0xff, 0xff,              // j .
+    ];
+    for board in ["m5stack-stamplc", "m5stack-atoms3-lite", "m5stack-cardputer-adv"] {
+        for jit in [false, true] {
+            let mut m = machine64();
+            m.bus.board = make_board(board).unwrap();
+            m.bus.attach_board_devices();
+            for core in &mut m.cores { core.set_jit(jit); }
+            esp_soc::SocBus::load_bytes(&mut m.bus, RESET, &SPIN).unwrap();
+            for round in 0..6 {
+                park(&mut m, 0, IRAM, &WAITI_LOOP);
+                m.bus.write32(0x600c_0000, 2).unwrap();
+                let start = m.bus.cycles;
+                m.max_cycles = start + 64;
+                assert!(matches!(m.run(u64::MAX), Stop::Halted));
+                // Program a one-shot compare value of zero after the timer advanced.
+                m.bus.write32(SYSTIMER, (1 << 30) | (1 << 24)).unwrap();
+                m.bus.write32(SYSTIMER + 0x20, 0).unwrap();
+                m.bus.write32(SYSTIMER + 0x50, 1).unwrap();
+                m.max_cycles += 64;
+                assert!(matches!(m.run(u64::MAX), Stop::Halted));
+                park(&mut m, 1, IRAM + 32, &READS);
+                m.cores[1].set_ar(7, SYSTIMER);
+                m.cores[1].set_ar(9, SYSTIMER + 4);
+                m.max_cycles += 64;
+                assert!(matches!(m.run(u64::MAX), Stop::Halted));
+                assert_eq!(m.cores[1].get_ar(8), 1 << 29);
+                assert_eq!(m.cores[1].get_ar(10), 0);
+                assert_eq!(m.cores[1].get_ar(11) & 1, 1);
+                assert_eq!(m.exceptions, 0, "{board}, jit={jit}");
+
+                let cause = if round % 2 == 0 {
+                    park(&mut m, 0, IRAM + 64, &[0x22, 0x63, 0x00]); // s32i a2,a3,0
+                    m.cores[0].waiting = false;
+                    m.cores[0].set_ar(2, 1 << 31);
+                    m.cores[0].set_ar(3, 0x6000_8000); // RTC_CNTL_OPTIONS0.SW_SYS_RST
+                    esp_periph::RST_SW_SYS
+                } else {
+                    esp_soc::SocBus::request_reset(&mut m.bus, esp_periph::RST_POWERON);
+                    esp_periph::RST_POWERON
+                };
+                m.max_cycles = u64::MAX;
+                assert!(matches!(m.run(64), Stop::SwReset));
+                assert_eq!(m.reboot(), cause);
+                assert_eq!(m.bus.read32(SYSTIMER + 0x68).unwrap(), 0);
+            }
+            assert_eq!(m.reboots, 6);
+        }
+    }
+}
