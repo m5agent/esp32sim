@@ -159,6 +159,7 @@ impl I2cDevice for M5pm1 {
 /// external pulls and electrical behavior are not modeled.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct M5ioe1State {
+    pub external_usb: bool,
     pub oled_rail: bool,
     pub oled_reset_high: bool,
     pub touch_reset_high: bool,
@@ -187,6 +188,11 @@ impl M5ioe1 {
             state,
         }
     }
+
+    pub fn with_revision(mut self, revision: u8) -> Self {
+        self.registers.regs[0x02] = revision;
+        self
+    }
 }
 
 impl I2cDevice for M5ioe1 {
@@ -201,6 +207,7 @@ impl I2cDevice for M5ioe1 {
         let regs = &self.registers.regs;
         let high = regs[0x03] & regs[0x05] & !regs[0x13];
         *self.state.lock().expect("M5IOE1 state mutex poisoned") = M5ioe1State {
+            external_usb: high & 1 != 0,
             oled_rail: high & 0x80 != 0,
             oled_reset_high: high & 0x10 != 0,
             touch_reset_high: high & 0x08 != 0,

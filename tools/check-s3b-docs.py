@@ -118,8 +118,9 @@ def power_case(board, case, serial, report):
         return "RTC IRQ wakes the guest after standby"
     if case == "m5pm1_m5ioe1-6":
         contains(serial, "PM1 initialization successful", "IOE1 initialization successful")
+        contains(report, "ext_uart=true", "ext_usb=true")
         require(re.search(r"vibration_duties=\{[1-9]", report), "IOE1 produced no nonzero motor duty")
-        return "IOE1 initializes and produces a nonzero motor duty"
+        return "IOE1 initializes, switches the external connector mode and drives PWM1"
     require(case in {"wakeup", "wakeup-1"}, "missing power-case oracle")
     contains(report, "chip reset")
     if board == "dial":

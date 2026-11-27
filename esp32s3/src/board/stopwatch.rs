@@ -74,6 +74,7 @@ pub struct StopWatch {
     cycle: VirtualCycle,
     gpio_events: u64,
     vibration: BTreeSet<u16>,
+    external_port_routes: [bool; 2],
     lcd_selected: bool,
 }
 
@@ -105,14 +106,15 @@ impl StopWatch {
         let wrap = |device| Rc::new(RefCell::new(PowerDevice { device, wiring: wiring.clone() }));
         let bus = I2cWiring::new((47, 48), vec![
             (M5pm1::ADDRESS, wrap(wiring.power.pmic.clone())),
-            (M5ioe1::ADDRESS, wrap(Rc::new(RefCell::new(M5ioe1::new(wiring.expander.clone(), 0))))),
+            // M5IOE1 1.0.9 selects the StopWatch mapping for revision W.
+            (M5ioe1::ADDRESS, wrap(Rc::new(RefCell::new(M5ioe1::new(wiring.expander.clone(), 0).with_revision(b'W'))))),
             (0x15, Rc::new(RefCell::new(Cst820::new(wiring.touch.clone())))),
             (Rx8130::ADDRESS, rtc.clone()),
             (0x68, imu.clone()),
             (Es8311::ADDRESS, Rc::new(RefCell::new(codec.i2c_port()))),
         ]);
         Self { wiring, bus, codec, motion, imu, rtc, pm1_irq_high: true,
-            cycle: 0, gpio_events: 0, vibration: BTreeSet::new(), lcd_selected: false }
+            cycle: 0, gpio_events: 0, vibration: BTreeSet::new(), external_port_routes: [false; 2], lcd_selected: false }
     }
 }
 
@@ -209,8 +211,10 @@ impl BoardModel for StopWatch {
         }
         self.wiring.sync();
         let expander = self.wiring.expander.lock().unwrap();
-        if expander.vibration_duty > 0 && self.wiring.power.powered() {
-            self.vibration.insert(expander.vibration_duty);
+        if self.wiring.power.powered() {
+            if expander.vibration_duty > 0 { self.vibration.insert(expander.vibration_duty); }
+            // C152 schematic sheet 4: PYG1 selects UART0 or USB on J6 pins 2/3.
+            self.external_port_routes[usize::from(expander.external_usb)] = true;
         }
         self.wiring.panel.lock().expect("StopWatch panel mutex poisoned").panel.advance_to(cycle);
     }
@@ -238,8 +242,9 @@ impl BoardModel for StopWatch {
     }
     fn report(&self) -> String {
         let off = !self.wiring.power.powered();
-        format!("[stopwatch] power_off_requested={off} timer_wakes={} oled_transitions={} vibration_duties={:?} gpio_i2c={}",
+        format!("[stopwatch] power_off_requested={off} timer_wakes={} oled_transitions={} vibration_duties={:?} ext_uart={} ext_usb={} gpio_i2c={}",
             self.wiring.power.pmic.borrow().timer_wakes(),
-            self.wiring.panel.lock().unwrap().power_transitions, self.vibration, self.bus.transactions())
+            self.wiring.panel.lock().unwrap().power_transitions, self.vibration, self.external_port_routes[0],
+            self.external_port_routes[1], self.bus.transactions())
     }
 }
