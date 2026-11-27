@@ -114,14 +114,14 @@ fn stopwatch_expander_rmw_and_reset_pulse_leave_rail_on() {
     update(&mut *device, 0x13, 0, 0x9d);
     update(&mut *device, 0x03, 0x9d, 0);
     update(&mut *device, 0x05, 0x99, 0);
-    let ready = M5ioe1State { oled_rail: true, oled_reset_high: true, touch_reset_high: true, ..Default::default() };
+    let ready = M5ioe1State { external_usb: true, oled_rail: true, oled_reset_high: true, touch_reset_high: true, ..Default::default() };
     assert_eq!(*state.lock().unwrap(), ready);
     assert_eq!(read(&mut *device, 0x13, 1), [0x62]);
     assert_eq!(read(&mut *device, 0x03, 1), [0x9d]);
     assert_eq!(read(&mut *device, 0x05, 1), [0x99]);
     assert_eq!(read(&mut *device, 0x23, 1), [0]);
     update(&mut *device, 0x05, 0, 0x18);
-    assert_eq!(*state.lock().unwrap(), M5ioe1State { oled_rail: true, ..Default::default() });
+    assert_eq!(*state.lock().unwrap(), M5ioe1State { external_usb: true, oled_rail: true, ..Default::default() });
     assert_eq!(read(&mut *device, 0x05, 1), [0x81]);
     update(&mut *device, 0x05, 0x18, 0);
     assert_eq!(*state.lock().unwrap(), ready);

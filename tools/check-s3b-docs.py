@@ -31,6 +31,10 @@ SIZE = {"cardputer": (240, 135), "dial": (240, 240), "sticks3": (405, 720), "sto
 FAULT = re.compile(r"Guru Meditation|Interrupt wdt timeout|assert failed|Backtrace:|stack smashing", re.I)
 
 
+class DocsDefect(Exception):
+    """The pinned sketch contradicts its documented behavior."""
+
+
 def frame_pixels(path, size):
     """Read the simulator's filter-0 RGB8 display export."""
     data = path.read_bytes()
@@ -109,7 +113,7 @@ def heard_tone(path, hz, tolerance, window_ms):
     return False
 
 
-def power_case(board, case, serial, report):
+def power_case(out, board, case, serial, report):
     if case in {"m5pm1-1", "m5pm1_m5ioe1-1", "wakeup-2"}:
         contains(serial, "PM1 initialization successful")
         require(re.search(r"timer_wakes=[1-9]", report), "missing PM1 timer-driven power return")
@@ -129,8 +133,14 @@ def power_case(board, case, serial, report):
     if case == "m5pm1_m5ioe1-6":
         contains(serial, "PM1 initialization successful", "IOE1 initialization successful")
         contains(report, "ext_uart=true", "ext_usb=true")
-        require(re.search(r"vibration_duties=\{[1-9]", report), "IOE1 produced no nonzero motor duty")
-        return "IOE1 initializes, switches the external connector mode and drives PWM1"
+        require(re.search(r"vibration_duties=\{[^}]*\b2047\b", report), "IOE1 did not hold its programmed motor duty")
+        wav = out / (case + "-output.wav")
+        require(all(heard_tone(wav, hz, 180, 10) for hz in (4000, 6000)), "audible phases missing")
+        if heard_tone(wav, 10000, 180, 10):
+            raise DocsDefect("m5pm1_m5ioe1_6.ino:107–113 starts the speaker after disabling the audio rail. "
+                             "Its enable callback repowers the rail, and the capture contains the 10 kHz tone "
+                             "described as silent. Connector selects and programmed motor duty passed.")
+        return "IOE1 selects UART0 and USB, drives PWM1, and gates both audio paths"
     require(case in {"wakeup", "wakeup-1"}, "missing power-case oracle")
     contains(report, "chip reset")
     if board == "dial":
@@ -257,7 +267,7 @@ def verify(out, board, case):
         require(duties and {int(duty) for duty in duties[1].split(", ") if duty} == expected,
                 "IOE1 PWM1 duty steps differ")
         return "all nine vibrator PWM1 duties observed"
-    return power_case(board, case, serial, report)
+    return power_case(out, board, case, serial, report)
 
 
 def verify_stock(out, board):
@@ -290,6 +300,8 @@ def main():
             try:
                 detail = verify_stock(args.out, board) if case == "UIFlow2" else verify(args.out, board, case)
                 verdict = "PASS"
+            except DocsDefect as exc:
+                verdict, detail = "DOCS-DEFECT", str(exc)
             except (OSError, ValueError, wave.Error, EOFError, struct.error, zlib.error) as exc:
                 verdict, detail = "FAIL", str(exc)
         totals[verdict] += 1
