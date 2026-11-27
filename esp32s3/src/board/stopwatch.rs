@@ -95,7 +95,9 @@ pub struct StopWatch {
 }
 
 impl StopWatch {
-    pub const WIDTH: usize = 468;
+    // Panel RAM writes can span 468 columns. The visible glass starts at
+    // controller column 6 and only exposes 466 of them.
+    pub const WIDTH: usize = 466;
     pub const HEIGHT: usize = 466;
     pub const X_OFFSET: u16 = 6;
 

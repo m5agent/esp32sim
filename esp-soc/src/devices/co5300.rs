@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn window_boundaries_clip_at_both_board_geometries() {
-        for (width, height, offset) in [(368, 448, 16), (468, 466, 6)] {
+        for (width, height, offset) in [(368, 448, 16), (466, 466, 6)] {
             let mut panel = Co5300::new(width, height, offset);
             assert_eq!((panel.width(), panel.height(), panel.frame.len()), (width, height, width * height));
             set_window(&mut panel, offset - 1, offset + width as u16, 0, height as u16);
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn stopwatch_split_ramwr_ramwrc_strips_keep_the_468_column_stride() {
-        let mut panel = Co5300::new(468, 466, 6);
+        let mut panel = Co5300::new(466, 466, 6);
         set_window(&mut panel, 6, 473, 0, 465);
         let expected: Vec<u16> = (0..466).flat_map(|y| (0..468).map(move |x| 0x8080 | ((y % 128) << 8) | (x % 128))).collect();
         for (strip, pixels) in expected.chunks(468 * 16).enumerate() {
@@ -325,9 +325,10 @@ mod tests {
             panel.transaction(&dma_transfer(if strip == 0 { 0x2c } else { 0x3c }, &bytes[..1]));
             panel.transaction(&bytes[1..937]);
             panel.transaction(&bytes[937..]);
-            assert_eq!(panel.pixels_written as usize, ((strip + 1) * 468 * 16).min(468 * 466));
+            assert_eq!(panel.pixels_written as usize, ((strip + 1) * 466 * 16).min(466 * 466));
         }
-        assert_eq!(panel.frame, expected);
+        let visible: Vec<_> = expected.chunks_exact(468).flat_map(|row| row[..466].iter().copied()).collect();
+        assert_eq!(panel.frame, visible);
         assert_eq!(panel.frames, 1);
         assert_eq!((panel.x, panel.y), (6, 0));
     }
