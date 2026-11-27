@@ -867,7 +867,7 @@ fn busy_runs_honor_cycle_ceiling_with_virtual_and_batched_rounds() {
 }
 
 #[test]
-fn core1_systimer_mmio_survives_repeated_software_resets() {
+fn core1_systimer_mmio_survives_repeated_resets() {
     // ESP-IDF v5.4.2 esp32s3/register/soc/systimer_reg.h: UNIT1_OP
     // at +0x08 and INT_CLR at +0x6c. Exercise both load encodings from
     // the StamPLC and AtomS3 Lite failure records on Core 1.
@@ -885,7 +885,7 @@ fn core1_systimer_mmio_survives_repeated_software_resets() {
             m.bus.attach_board_devices();
             for core in &mut m.cores { core.set_jit(jit); }
             esp_soc::SocBus::load_bytes(&mut m.bus, RESET, &SPIN).unwrap();
-            for _ in 0..5 {
+            for round in 0..6 {
                 park(&mut m, 0, IRAM, &WAITI_LOOP);
                 m.bus.write32(0x600c_0000, 2).unwrap();
                 let start = m.bus.cycles;
@@ -907,16 +907,22 @@ fn core1_systimer_mmio_survives_repeated_software_resets() {
                 assert_eq!(m.cores[1].get_ar(11) & 1, 1);
                 assert_eq!(m.exceptions, 0, "{board}, jit={jit}");
 
-                park(&mut m, 0, IRAM + 64, &[0x22, 0x63, 0x00]); // s32i a2,a3,0
-                m.cores[0].waiting = false;
-                m.cores[0].set_ar(2, 1 << 31);
-                m.cores[0].set_ar(3, 0x6000_8000); // RTC_CNTL_OPTIONS0.SW_SYS_RST
+                let cause = if round % 2 == 0 {
+                    park(&mut m, 0, IRAM + 64, &[0x22, 0x63, 0x00]); // s32i a2,a3,0
+                    m.cores[0].waiting = false;
+                    m.cores[0].set_ar(2, 1 << 31);
+                    m.cores[0].set_ar(3, 0x6000_8000); // RTC_CNTL_OPTIONS0.SW_SYS_RST
+                    esp_periph::RST_SW_SYS
+                } else {
+                    esp_soc::SocBus::request_reset(&mut m.bus, esp_periph::RST_POWERON);
+                    esp_periph::RST_POWERON
+                };
                 m.max_cycles = u64::MAX;
                 assert!(matches!(m.run(64), Stop::SwReset));
-                assert_eq!(m.reboot(), esp_periph::RST_SW_SYS);
+                assert_eq!(m.reboot(), cause);
                 assert_eq!(m.bus.read32(SYSTIMER + 0x68).unwrap(), 0);
             }
-            assert_eq!(m.reboots, 5);
+            assert_eq!(m.reboots, 6);
         }
     }
 }
