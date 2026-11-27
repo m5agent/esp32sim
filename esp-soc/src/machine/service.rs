@@ -92,13 +92,22 @@ impl<S: Soc> Machine<S> {
 
     fn service_sd_state(&self) -> Option<Json> {
         let state = self.bus.sd_state()?;
-        Some(Json::object([
-            ("present", Json::Bool(state.present)),
-            ("blocks", Json::counter(state.blocks)),
-            ("commands", Json::counter(state.commands)),
-            ("blocks_read", Json::counter(state.blocks_read)),
-            ("blocks_written", Json::counter(state.blocks_written)),
-        ]))
+        let mut fields = vec![
+            ("present".into(), Json::Bool(state.present)),
+            ("blocks".into(), Json::counter(state.blocks)),
+            ("commands".into(), Json::counter(state.commands)),
+            ("blocks_read".into(), Json::counter(state.blocks_read)),
+            ("blocks_written".into(), Json::counter(state.blocks_written)),
+        ];
+        if let Some(stats) = state.spi_reads {
+            fields.extend([
+                ("accepted_cmd17".into(), Json::counter(stats.accepted_cmd17)),
+                ("accepted_cmd18".into(), Json::counter(stats.accepted_cmd18)),
+                ("completed_blocks".into(), Json::counter(stats.completed_blocks)),
+                ("reset_generation".into(), Json::counter(stats.reset_generation)),
+            ]);
+        }
+        Some(Json::Obj(fields))
     }
 
     fn service_snapshot(&self) -> Vec<(String, Json)> {

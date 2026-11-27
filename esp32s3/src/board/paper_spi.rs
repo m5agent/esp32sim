@@ -293,6 +293,9 @@ impl BoardModel for PaperSpi {
     }
 
     fn has_spi_sd_slot(&self) -> bool { !self.mono_board() }
+    fn reset_spi_sd_observation(&mut self) {
+        if let Some(card) = self.sd.as_deref_mut() { card.reset_observation(); }
+    }
     fn spi_sd_state(&self) -> Option<esp_periph::sdmmc::SdMediaState> { self.sd.as_deref().map(esp_periph::sdmmc::SpiSdCard::media_state) }
     fn set_spi_sd_present(&mut self, _cycle: VirtualCycle, present: bool) -> bool {
         self.sd.as_deref_mut().is_some_and(|card| card.set_present(present))

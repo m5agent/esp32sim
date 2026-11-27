@@ -320,6 +320,9 @@ impl BoardModel for Cores3 {
     }
     fn uses_spi_pins(&self) -> bool { self.hw.borrow().sd.is_some() }
     fn has_spi_sd_slot(&self) -> bool { true }
+    fn reset_spi_sd_observation(&mut self) {
+        if let Some(card) = self.hw.borrow_mut().sd.as_deref_mut() { card.reset_observation(); }
+    }
     fn spi_sd_state(&self) -> Option<esp_periph::sdmmc::SdMediaState> {
         self.hw.borrow().sd.as_deref().map(SpiSdCard::media_state)
     }

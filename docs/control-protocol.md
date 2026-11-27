@@ -41,7 +41,17 @@ return `ok:false`.
 
 `/board/sd` describes prepared media with `present`, `blocks`,
 `commands`, `blocks_read` and `blocks_written`. Prepare the image through
-`--sd` or `--sd-rw`; the socket does not accept new filenames. PaperDIY
+`--sd` or `--sd-rw`. Add `--sd-ejected` to prepare the image and begin with an
+empty slot before the first guest instruction. The socket does not accept
+new filenames. SPI slots also report `accepted_cmd17`, `accepted_cmd18`,
+`completed_blocks` and `reset_generation`. A read command is accepted once
+its first data block is available. A response block counts only after the
+guest clocks its last CRC byte, so raising CS during the response never
+counts as delivery. Machine reset and each media-presence change increment
+the generation and clear the three observation counters. Guest CMD0
+reinitializes the card protocol within the current observation generation.
+
+PaperDIY
 drives active-low GPIO48, CoreS3 and StackChan drive the AW9523 socket switch,
 and PaperColor routes powered card detect through the PMIC. Native SDMMC
 and SPI presentations of a Tab5 card share the same media; the ESP-Hosted

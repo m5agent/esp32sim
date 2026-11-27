@@ -155,7 +155,7 @@ pub struct Opts {
     pub mac: Option<[u8; 6]>, pub strap: Option<u32>, pub reset_cause: Option<u32>, pub efuse_regs: Option<String>, pub regs_init: Option<String>,
     /// `--sd IMAGE` (copy-on-write) or `--sd-rw IMAGE` (write-through): a card in the SD socket,
     /// with `--sd-prg-us` and `--sd-serial`
-    pub sd: Option<(String, bool)>, pub sd_prg_us: Option<u64>, pub sd_serial: Option<u32>, pub sd_timing: bool,
+    pub sd: Option<(String, bool)>, pub sd_prg_us: Option<u64>, pub sd_serial: Option<u32>, pub sd_timing: bool, pub sd_ejected: bool,
     /// `--usb-host FILE`: a USB host on the chip's USB-OTG port, running the commands in FILE
     pub usb_host: Option<String>,
     /// `--pcap FILE`: every Ethernet frame the WiFi station sends and receives, as a pcap
@@ -220,6 +220,7 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
             "--sd-serial" => o.sd_serial = Some(hex(&next(), "sd-serial")),
             "--usb-host" => o.usb_host = Some(next()),
             "--sd-timing" => o.sd_timing = true,
+            "--sd-ejected" => o.sd_ejected = true,
             "--mac" => { let v = next(); let b: Vec<u8> = v.split(':').filter_map(|x| u8::from_str_radix(x, 16).ok()).collect(); if b.len() != 6 { eprintln!("--mac wants xx:xx:xx:xx:xx:xx"); std::process::exit(2); } let mut m = [0u8; 6]; m.copy_from_slice(&b); o.mac = Some(m); }
             "--strap" => o.strap = Some(hex(&next(), "strap")),
             "--reset-cause" => o.reset_cause = Some(hex(&next(), "reset-cause")),
@@ -322,6 +323,7 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
         }
         i += 1;
     }
+    if o.sd_ejected && o.sd.is_none() { usage_error("--sd-ejected requires --sd or --sd-rw"); }
     if !o.hostfwd.is_empty() && o.wifi.is_empty() { usage_error("--hostfwd requires --wifi"); }
     if o.pcap.is_some() && o.wifi.is_empty() && o.wifi_sta.is_none() { usage_error("--pcap requires --wifi or --wifi-sta"); }
     if let Some(spec) = &o.wifi_sta {
@@ -1068,6 +1070,9 @@ fn prepare<S: Soc>(m: &mut Machine<S>, o: &Opts) -> String {
         let image = image.unwrap_or_else(|e| usage_error(&format!("--sd {path}: {e}")));
         let config = esp_periph::sdmmc::SdCardConfig { prg_ns: o.sd_prg_us.unwrap_or(0).saturating_mul(1000), serial: o.sd_serial, timed_bus: o.sd_timing, ..Default::default() };
         match m.bus.attach_sd_card(Box::new(image), config) { Ok(w) => eprintln!("[emu] SD card: {w}"), Err(e) => usage_error(&format!("--sd: {e}")) }
+    }
+    if o.sd_ejected && !m.bus.set_sd_present(false) {
+        usage_error("--sd-ejected is unsupported by the selected SD socket");
     }
     let mut ble_elf = esp_soc::elf::Elf::default();
     for p in &o.elfs {

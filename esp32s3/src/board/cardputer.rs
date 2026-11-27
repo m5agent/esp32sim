@@ -127,6 +127,9 @@ impl BoardModel for Cardputer {
     fn leds(&self) -> Option<(&[[u8; 3]], u64)> { Some((&self.rgb.leds, self.rgb.updates)) }
     fn uses_spi_pins(&self) -> bool { true }
     fn has_spi_sd_slot(&self) -> bool { true }
+    fn reset_spi_sd_observation(&mut self) {
+        if let Some(card) = self.sd.as_deref_mut() { card.reset_observation(); }
+    }
     fn spi_sd_state(&self) -> Option<esp_periph::sdmmc::SdMediaState> { self.sd.as_deref().map(esp_periph::sdmmc::SpiSdCard::media_state) }
     fn set_spi_sd_present(&mut self, _cycle: VirtualCycle, present: bool) -> bool {
         self.sd.as_deref_mut().is_some_and(|card| card.set_present(present))

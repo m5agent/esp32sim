@@ -128,3 +128,40 @@ fn multiple_blocks_stop_at_token_or_cmd12() {
     assert_eq!(command(&mut card, 17, 15), 0);
     assert_eq!(read_packet(&mut card, BLOCK), [0; BLOCK]);
 }
+
+#[test]
+fn read_receipt_counts_the_last_crc_byte_and_scopes_resets() {
+    let mut card = make_card();
+    initialize(&mut card);
+    assert_eq!(command(&mut card, 17, 1024), ADDRESS_ERROR);
+    assert_eq!(card.read_stats.accepted_cmd17, 0);
+
+    assert_eq!(command(&mut card, 17, 0), 0);
+    for _ in 0..(2 + BLOCK + 1) { clock(&mut card); }
+    assert_eq!(card.read_stats.accepted_cmd17, 1);
+    assert_eq!(card.read_stats.completed_blocks, 0);
+    card.deselect();
+    assert_eq!(clock(&mut card), 0xff);
+    assert_eq!(card.read_stats.completed_blocks, 0);
+
+    assert_eq!(command(&mut card, 18, 0), 0);
+    assert_eq!(read_packet(&mut card, BLOCK), [0; BLOCK]);
+    assert_eq!(card.read_stats.accepted_cmd18, 1);
+    assert_eq!(card.read_stats.completed_blocks, 1);
+    card.reset_observation();
+    assert_eq!(clock(&mut card), 0xff);
+    assert_eq!(card.read_stats, crate::sdmmc::card::SpiSdReadStats {
+        reset_generation: 1, ..Default::default()
+    });
+
+    card.set_present(false);
+    assert_eq!(command(&mut card, 0, 0), 0xff);
+    card.set_present(false);
+    assert_eq!(card.read_stats.reset_generation, 2);
+    card.set_present(true);
+    assert_eq!(card.read_stats.reset_generation, 3);
+    initialize(&mut card);
+    assert_eq!(command(&mut card, 17, 0), 0);
+    assert_eq!(read_packet(&mut card, BLOCK), [0; BLOCK]);
+    assert_eq!(card.read_stats.completed_blocks, 1);
+}

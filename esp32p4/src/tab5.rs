@@ -182,6 +182,9 @@ impl BoardModel for Tab5 {
     }
     fn has_spi_sd_slot(&self) -> bool { true }
     fn uses_spi_pins(&self) -> bool { self.sd_spi.is_some() }
+    fn reset_spi_sd_observation(&mut self) {
+        if let Some(card) = self.sd_spi.as_mut() { card.reset_observation(); }
+    }
     fn spi_sd_state(&self) -> Option<esp_periph::sdmmc::SdMediaState> { self.sd_spi.as_ref().map(esp_periph::sdmmc::SpiSdCard::media_state) }
     fn set_spi_sd_present(&mut self, _cycle: VirtualCycle, present: bool) -> bool {
         self.sd_spi.as_mut().is_some_and(|card| card.set_present(present))

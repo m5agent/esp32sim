@@ -126,6 +126,9 @@ impl BoardModel for PaperParallel {
 
     fn uses_spi_pins(&self) -> bool { true }
     fn has_spi_sd_slot(&self) -> bool { true }
+    fn reset_spi_sd_observation(&mut self) {
+        if let Some(card) = self.sd.as_deref_mut() { card.reset_observation(); }
+    }
     fn spi_sd_state(&self) -> Option<esp_periph::sdmmc::SdMediaState> {
         self.sd.as_deref().map(SpiSdCard::media_state)
     }

@@ -333,6 +333,7 @@ impl<S: Soc> Machine<S> {
     /// re-initialised; SRAM, RTC memories, efuses and the RTC-domain registers survive, as on
     /// silicon. Returns the reset cause that the ROM will report.
     pub fn reboot(&mut self) -> u32 {
+        self.bus.board().reset_spi_sd_observation();
         // where core 0 was when the reset took effect (the C6 ROM prints it as `Saved PC`)
         let pc = self.cores[0].pc();
         self.bus.note_pc(pc);

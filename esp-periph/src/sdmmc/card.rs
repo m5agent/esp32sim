@@ -160,11 +160,20 @@ impl Default for SdCardConfig {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SdMediaState {
+    pub spi_reads: Option<SpiSdReadStats>,
     pub present: bool,
     pub blocks: u64,
     pub commands: u64,
     pub blocks_read: u64,
     pub blocks_written: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpiSdReadStats {
+    pub accepted_cmd17: u64,
+    pub accepted_cmd18: u64,
+    pub completed_blocks: u64,
+    pub reset_generation: u64,
 }
 
 pub struct SdCard {
@@ -219,7 +228,7 @@ impl SdCard {
         }
     }
     pub fn media_state(&self) -> SdMediaState {
-        SdMediaState { present: self.present, blocks: self.blocks, commands: self.commands,
+        SdMediaState { spi_reads: None, present: self.present, blocks: self.blocks, commands: self.commands,
                        blocks_read: self.blocks_read, blocks_written: self.blocks_written }
     }
     pub fn state(&self) -> CardState { self.state }

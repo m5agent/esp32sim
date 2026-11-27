@@ -353,6 +353,9 @@ impl BoardModel for Core {
     fn released_inputs(&mut self) -> Vec<u8> { std::mem::take(&mut self.release) }
     fn uses_spi_pins(&self) -> bool { true }
     fn has_spi_sd_slot(&self) -> bool { true }
+    fn reset_spi_sd_observation(&mut self) {
+        if let Some(card) = self.sd.as_mut() { card.reset_observation(); }
+    }
     fn spi_sd_state(&self) -> Option<esp_periph::sdmmc::SdMediaState> { self.sd.as_ref().map(esp_periph::sdmmc::SpiSdCard::media_state) }
     fn set_spi_sd_present(&mut self, _cycle: VirtualCycle, present: bool) -> bool {
         self.sd.as_mut().is_some_and(|card| card.set_present(present))
