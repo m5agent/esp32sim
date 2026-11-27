@@ -134,6 +134,24 @@ impl HostFrameSource {
         self.jpeg.as_ref().filter(|j| (j.w, j.h) == (w, h)).map(|j| (w, h, j.bytes.clone()))
     }
     pub fn camera_preview(&self, w: u32, h: u32) -> Option<Vec<u8>> {
+        if self.test_pattern.is_some() {
+            let (config, frame) = self.cached.as_ref()?;
+            if config.format != picture::PixelFormat::Rgb565 { return None; }
+            let mut out = Vec::with_capacity((w * h * 3) as usize);
+            for y in 0..h {
+                let sy = y as u64 * config.h as u64 / h as u64;
+                for x in 0..w {
+                    let sx = x as u64 * config.w as u64 / w as u64;
+                    let offset = ((sy * config.w as u64 + sx) * 2) as usize;
+                    let word = u16::from_be_bytes([frame[offset], frame[offset + 1]]);
+                    let r = (word >> 11) as u8;
+                    let g = ((word >> 5) & 63) as u8;
+                    let b = (word & 31) as u8;
+                    out.extend_from_slice(&[(r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2)]);
+                }
+            }
+            return Some(out);
+        }
         let p = self.picture.as_ref()?;
         let mut out = Vec::with_capacity((w * h * 3) as usize);
         for y in 0..h { let sy = (y as u64 * p.h as u64 / h as u64) as usize; for x in 0..w { let sx = (x as u64 * p.w as u64 / w as u64) as usize; let o = (sy * p.w as usize + sx) * 3; out.extend_from_slice(&p.rgb[o..o + 3]); } }

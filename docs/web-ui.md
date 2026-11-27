@@ -36,6 +36,8 @@ Text frames (JSON):
 | `board` | `name`, `chip` (`esp32s3`, `esp32c3`, `esp32c6`, `esp32`, `esp32p4`, `esp32s31`) | on connect; the page switches layout and titles a bare module by the chip |
 | `serial` | `src` (`usb`/`uart0`), `data` | console output (ANSI colours stripped by the page) |
 | `ring` | `leds` `[[r,g,b]…]` | ring changed |
+| `servo` | `yaw`, `pitch` in degrees, `packets` | observed StackChan servo position after guest UART traffic |
+| `mic-input` | `ok`, optional `message` | status of loading a PCM input source |
 | `netmon` | `linktype` (1, Ethernet) | a run with a WiFi station (`--wifi` with `--web`; `esp32sim_netmon` in the browser): the page adds its Network panel |
 | `stat` | `time`, `insns`, `frames`, `behind`, `resyncs`, `speed` (emulated seconds per wall second over the last second, `null` before the first second and when not paced), `cam`, `gpio_in` | every 20 ms emulated |
 
@@ -64,7 +66,10 @@ Text frames:
 | `btn` | `pin`, `v` (1 = pressed) |
 | `knobpress` | `v` |
 | `reset` | none: the board's reset button. The page's Restart sends it to a native run; in the browser build Restart reloads the page, which is the same thing there. Honoured when the run can come back up: through the ROM, or for `--boot app` by entering the app again; ignored with `--no-reboot` |
-| `knob` | `d` (+1 cw / −1 ccw per detent); the emulator queues the quadrature edges 2 ms apart |
+| `knob` | `d` (+1 cw / −1 ccw per detent); turns the I2C encoder on StickT2 or queues quadrature edges 2 ms apart |
+| `plc-key` | `key` (a, b or c), `down` (0 or 1); drives the StamPLC front expander |
+| `head-touch` | `zone` (0–2), `level` (0–3); drives the StackChan SI12T |
+| `camera-pattern` | `enabled` (0 or 1); controls camera test pattern auto-increment on AtomS3R-CAM/M12 |
 | `serial` | `line`, optional `src` (`usb` default, `uart0`, `uart1`) — the line plus a newline into that console's RX |
 | `key` | `src`, `data` — bytes exactly as typed, no newline added: the page's console is a terminal (click it, type; Enter is CR, Backspace DEL, arrows and Ctrl-letters their escape/control codes, paste sends the text). The **Terminal** tab (`web/terminal.js`) is a real VT100 on UART0 — xterm.js (MIT; `tools/fetch-web-vendor.sh` puts it in `web/vendor/xterm`, pinned by hash — not committed), 100×30 — so cursor movement, colours and full-screen programs render; it encodes its own keys into the same `key` message |
 | `gpio` | `pin`, `level` |
@@ -72,6 +77,10 @@ Text frames:
 
 Binary frame type 3: camera picture, `w u16le, h u16le`, RGBA8888 — used by the picture
 upload and the webcam (4 fps). Frames up to 8 MB are accepted.
+
+Binary frame type 6 carries a PCM16 WAV up to 2 MiB into the board's I2S
+microphone input. The reply confirms the source was loaded. The guest still
+must configure and start the I2S receiver.
 
 ## Sending is never blocking
 
