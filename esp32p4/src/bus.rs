@@ -527,9 +527,8 @@ impl SocBus {
             else if sample_bytes == 1 { (sample[0] as i8 as i16) << 8 }
             else { i16::from_le_bytes([sample[sample_bytes - 2], sample[sample_bytes - 1]]) }
         };
-        if i.stereo_pcm.is_some() {
-            let slots = i.stereo_slots();
-            let stereo = i.stereo_pcm.as_mut().unwrap();
+        let slots = i.stereo_slots();
+        if let Some(stereo) = &mut i.stereo_pcm {
             // The service retains at most 16 MiB of PCM for one lease.
             const MAX_STEREO_FRAMES: usize = 16 * 1024 * 1024 / 4;
             let remaining = MAX_STEREO_FRAMES.saturating_sub(stereo.len() / 2);
