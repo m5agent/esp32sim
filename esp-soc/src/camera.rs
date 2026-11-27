@@ -3,6 +3,8 @@
 //! this module does not model LCD_CAM, I2S, DMA, board wiring or capture timing.
 mod gc0308;
 pub use gc0308::Gc0308;
+mod ov3660;
+pub use ov3660::Ov3660;
 mod ov2640;
 pub use ov2640::{Ov2640, Ov2640State};
 

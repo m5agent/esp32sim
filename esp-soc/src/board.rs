@@ -214,6 +214,11 @@ pub trait BoardModel {
     /// Observe routed LEDC PWM frequency and duty after the peripheral advances.
     fn observes_ledc(&self) -> bool { false }
     fn ledc_output_at(&mut self, _cycle: VirtualCycle, _pwm: &dyn Fn(u8) -> Option<(f64, u32)>) {}
+    /// Physical PDM microphone pins (clock, data). PCM enters after the
+    /// controller's PDM decimator only while the guest selects this route.
+    fn pdm_mic(&self) -> Option<(u8, u8)> { None }
+    /// GPIO that receives the camera master clock, if required for parallel capture.
+    fn camera_xclk_pin(&self) -> Option<u8> { None }
 }
 
 pub type Board = Box<dyn BoardModel>;
