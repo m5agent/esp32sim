@@ -1,13 +1,14 @@
 //! Arduino Nesso N1 DK001 (TPX00227 schematic), M5GFX 0.3.0 C6 board data,
 //! and the M5Unified Nesso N1 power, GPIO expander, and IMU setup.
 
-use std::{cell::{Cell, RefCell}, net::UdpSocket, rc::Rc, sync::{Arc, atomic::Ordering}};
+use std::{cell::{Cell, RefCell}, rc::Rc, sync::{Arc, atomic::Ordering}};
 use esp_periph::i2c::I2cDevice;
 use esp_soc::{BoardModel, board::{BoardEdge, SpiPins}, pins::PinRoutes};
 use esp_soc::devices::{
     Bmi270, DcsPanel, Ft5x06, Ft5x06Points, BMI270_ADDRESS, FT5X06_ADDRESS,
     aw32001::{self, Aw32001}, bq27220::{self, BatterySample, Bq27220},
     imu_motion::ImuMotion, pi4ioe5v6408::Pi4ioe5v6408,
+    radio_peer::{RadioPeer, SX1262},
     soft_i2c::{SoftI2c, SoftOp}, sx1262::Sx1262,
 };
 
@@ -79,8 +80,7 @@ pub struct NessoN1 {
     radio: Sx1262,
     radio_ready: bool,
     radio_selected: bool,
-    peer: Option<UdpSocket>,
-    poll_at: u64,
+    peer: Option<RadioPeer>,
     tx: u64,
     rx: u64,
     ir_rmt_frames: u64,
@@ -117,15 +117,12 @@ impl NessoN1 {
             levels: 1 << SYS_IRQ | 1 << SDA | 1 << SCL, leds: [[0; 3]], led_changes: 0,
             grove_power: false, grove_changes: 0, received_touches: 0,
             radio: Sx1262::default(), radio_ready: false, radio_selected: false,
-            peer: None, poll_at: 0, tx: 0, rx: 0, ir_rmt_frames: 0, ir: Default::default(),
+            peer: None, tx: 0, rx: 0, ir_rmt_frames: 0, ir: Default::default(),
         }
     }
 
     pub fn connect_lora(&mut self, local: u16, remote: u16) -> std::io::Result<()> {
-        let socket = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, local))?;
-        socket.connect((std::net::Ipv4Addr::LOCALHOST, remote))?;
-        socket.set_nonblocking(true)?;
-        self.peer = Some(socket);
+        self.peer = Some(RadioPeer::connect((local, remote), US)?);
         Ok(())
     }
 
@@ -179,27 +176,17 @@ impl NessoN1 {
         self.drive(LORA_IRQ, self.radio_ready && self.radio.dio1());
     }
 
-    fn poll_radio(&mut self) {
-        // Same packet contract as the Cardputer ADV LoRa CAP, with no RF claims.
+    fn advance_radio(&mut self) {
         if let Some(payload) = self.radio.advance(self.cycle) {
             self.tx += 1;
-            if let Some(peer) = &self.peer {
-                let mut packet = Vec::with_capacity(11 + payload.len());
-                packet.push(1);
-                packet.extend(self.radio.channel());
-                packet.extend(payload);
-                let _ = peer.send(&packet);
+            if let Some(peer) = &mut self.peer {
+                peer.transmit(self.cycle, SX1262, self.radio.channel(), &payload);
             }
         }
-        let Some(peer) = &self.peer else { return };
-        if self.cycle < self.poll_at { return; }
-        self.poll_at = self.cycle + 2_000 * US;
+        let Some(peer) = &mut self.peer else { return };
         let channel = self.radio.channel();
-        let mut data = [0; 267];
-        for _ in 0..16 {
-            let Ok(n) = peer.recv(&mut data) else { break };
-            if self.radio_ready && (11..267).contains(&n) && data[0] == 1 && data[1..11] == channel
-                && self.radio.receive(&data[11..n]) {
+        for frame in peer.advance(self.cycle) {
+            if self.radio_ready && frame.matching(SX1262, channel).is_some_and(|data| self.radio.receive(data)) {
                 self.rx += 1;
             }
         }
@@ -269,14 +256,14 @@ impl BoardModel for NessoN1 {
     fn advance_to(&mut self, cycle: u64) {
         self.cycle = cycle;
         self.imu.cycle.store(cycle, Ordering::Relaxed);
-        self.poll_radio();
+        self.advance_radio();
         if self.ioe_changed.get() { self.sync_expanders(); }
         self.sync_radio_pins();
     }
 
     fn next_deadline(&self) -> Option<u64> {
         self.radio.deadline(self.cycle).into_iter()
-            .chain(self.peer.as_ref().map(|_| self.poll_at)).min()
+            .chain(self.peer.as_ref().and_then(RadioPeer::deadline)).min()
     }
 
     fn take_edges(&mut self) -> Vec<BoardEdge> { std::mem::take(&mut self.edges) }
@@ -381,6 +368,10 @@ impl BoardModel for NessoN1 {
 
     fn rmt_frame(&mut self, pin: u8, _: &[bool]) {
         if pin == 9 { self.ir_rmt_frames += 1; }
+    }
+
+    fn finish_radio_peer(&mut self) -> std::io::Result<()> {
+        self.peer.as_mut().map_or(Ok(()), RadioPeer::finish)
     }
 
     fn report(&self) -> String {

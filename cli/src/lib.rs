@@ -31,8 +31,8 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!("  --max-seconds S       stop after S emulated seconds (always give one: the run returns)");
     eprintln!("  --console usb|uart0|both|none   which consoles to print (uart0 shows the ROM and bootloader)");
     eprintln!("  --cap NAME            Cardputer-ADV accessory: lora1262, lora868 or cc1101");
-    eprintln!("  --cap-peer IN:OUT     CAP packet link, bound and connected to IPv4 loopback UDP ports");
-    eprintln!("  --lora-peer IN:OUT   PaperMono virtual LoRa peer over loopback UDP");
+    eprintln!("  --cap-peer IN:OUT     synchronized CAP or Nesso N1 packet link on loopback");
+    eprintln!("  --lora-peer IN:OUT   synchronized PaperMono LoRa packet link on loopback");
     eprintln!("  --imu-motion N        scripted IMU motion: 0 at rest, 1 the 30 s tilt/flip/shake script (amoled18-v2, m5stack-cardputer-adv, mosaico)");
     eprintln!("  --wifi ssid=…,psk=…   a virtual access point with DHCP, DNS, NTP and NAT to the host network");
     eprintln!("  --wifi-sta ssid=…,psk=…   a virtual station that joins the guest's own access point (not the P4)");
@@ -231,7 +231,7 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
                     let (local, remote) = (local.parse().ok()?, remote.parse().ok()?);
                     (local != 0 && remote != 0 && local != remote).then_some((local, remote))
                 });
-                if ports.is_none() { usage_error(&format!("{flag}: expected two distinct, nonzero UDP ports IN:OUT")); }
+                if ports.is_none() { usage_error(&format!("{flag}: expected two distinct, nonzero TCP ports IN:OUT")); }
                 if flag == "--lora-peer" { o.lora_peer = ports; } else { o.cap_peer = ports; }
             }
             "--spi2-timing" => o.spi2_timing = true,
@@ -369,6 +369,7 @@ pub fn run_cli(default_chip: &str) {
         || !matches!(o.board.as_str(), "papermono" | "m5stack-papermono") || o.cooja || o.coproc.is_some()) {
         usage_error("--lora-peer requires a standalone PaperMono session");
     }
+    if o.cap_peer.is_some() && o.cooja { usage_error("--cap-peer requires a standalone session"); }
     if o.cap_peer.is_some() && o.cap.is_none() && !matches!(o.chip.as_str(), "c6" | "esp32c6") { usage_error("--cap-peer requires --cap"); }
     if o.cap.is_some() && (!matches!(o.chip.as_str(), "s3" | "esp32s3") ||
         !matches!(o.board.as_str(), "cardputer-adv" | "m5stack-cardputer-adv") || o.cooja || o.coproc.is_some()) {
@@ -929,7 +930,12 @@ fn run<S: Soc>(mut m: Machine<S>, o: &Opts) {
     // --exit-on matched: 0, as for any run that ends; --timeout: 124, as coreutils `timeout`; --exit-on never matched: 1.
     // The machine goes first: what it writes on drop (--regtrace's buffer) is not lost to `exit`.
     let ended = m.host.ended;
+    let radio_result = m.bus.board().finish_radio_peer();
     drop(m);
+    if let Err(e) = radio_result {
+        eprintln!("[emu] radio peer: {e}");
+        std::process::exit(1);
+    }
     match ended {
         Some(esp_soc::HostEnd::Timeout) => std::process::exit(124),
         None if o.exit_on.is_some() => std::process::exit(1),

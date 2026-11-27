@@ -244,6 +244,8 @@ pub trait BoardModel {
     fn lcd_i80_data(&mut self, _pins: LcdI80Pins, _data: &[u8]) {}
     /// Piezo element wired straight to a serialized single-bit I2S stream.
     fn i2s_bitstream_pin(&self) -> Option<u8> { None }
+    /// Flush the final paired-radio transmissions and report transport failures.
+    fn finish_radio_peer(&mut self) -> std::io::Result<()> { Ok(()) }
 }
 
 pub type Board = Box<dyn BoardModel>;

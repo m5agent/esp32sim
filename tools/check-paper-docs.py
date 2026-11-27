@@ -591,11 +591,11 @@ def verify(board, case, log, pixels, control, early, control_frame, first_frame,
     if case.startswith("lora-"):
         sender, receiver, idle = [(out / f"{stem}.log").read_text(errors="replace")
                                   for stem in ("lora-1", "lora-2", "lora-2-control")]
-        sent = set(re.findall(r"\[LoRa TX\] Sent: (Hello PaperMono #\d+)", sender))
-        received = set(re.findall(r"\[LoRa RX\] Data: (Hello PaperMono #\d+)", receiver))
-        require(re.search(r"LoRa tx=[1-9]\d* rx=0", sender)
-                and re.search(r"LoRa tx=0 rx=[1-9]\d*", receiver)
-                and len(sent & received) >= 2 and received <= sent
+        sent = re.findall(r"\[LoRa TX\] Sent: (Hello PaperMono #\d+)", sender)
+        received = re.findall(r"\[LoRa RX\] Data: (Hello PaperMono #\d+)", receiver)
+        require(sent and received == sent
+                and re.search(rf"LoRa tx={len(sent)} rx=0\b", sender)
+                and re.search(rf"LoRa tx=0 rx={len(sent)}\b", receiver)
                 and "LoRa tx=0 rx=0" in idle and "[LoRa RX] Data:" not in idle,
                 "Loopback payloads or disconnected receiver control failed")
         return "PASS", f"SX1262 peer read {len(received)} exact payloads; disconnected control read none"
