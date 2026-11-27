@@ -75,7 +75,11 @@ def run(board, binary, firmware, out, cases, args):
             if elf.is_file():
                 command += ["--elf", str(elf), "--trace-fn", "_Z4loopv"]
         lines = list(INPUT.get(case, ()))
-        if case == "display-2":
+        if (board, case) == ("papermono", "display-2"):
+            lines = ["4.0 touch 240 299 1", "4.5 touch 240 299 0",
+                     "7.0 touch 240 423 1", "7.5 touch 240 423 0",
+                     "10.0 touch 240 547 1", "10.5 touch 240 547 0"]
+        elif case == "display-2":
             lines = ["4.0 press a 350", "8.0 press b 400"]
         if board == "papercolor" and case in {"button", "microsd", "ir_nec"}:
             lines = ["35.0 press a 350", "55.0 press b 400", "75.0 press c 350"]
