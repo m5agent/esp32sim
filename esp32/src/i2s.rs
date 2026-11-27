@@ -127,6 +127,10 @@ impl ClassicI2s {
         Device::write(&mut self.inner, 0x20, ((conf >> 1) & 1) | ((conf >> 2) & 2) | ((conf >> 3) & 4) | ((conf & (1 << 7)) >> 4) | fill24 | pdm_flags);
         self.sync_tx(conf, clock, sample, div);
     }
+    fn dac_mode(&self) -> bool {
+        self.camera_capable && self.ram.read(0xa8) & 0x21 == 0x20
+    }
+
     fn sync_tx(&mut self, conf: u32, clock: u32, sample: u32, div: u32) {
         let bits = (sample >> 12) & 63;
         let bck = sample & 63;
@@ -135,7 +139,10 @@ impl ClassicI2s {
         // Classic FIFO packs 24-bit samples into 32 bits. BCK still shifts
         // bits_mod bits per slot, so keep the wire width independent.
         let packed_bits = if bits == 24 { 32 } else { bits };
-        let width = bits.saturating_sub(1) << 18;
+        // ESP-IDF v5.5.4 dac_dma.c selects the built-in path, where
+        // I2S_LL_AD_BCK_FACTOR is two BCKs per sample even though DMA
+        // words are 16 bits. Keep the FIFO packing width independent.
+        let width = if self.dac_mode() { 0 } else { bits.saturating_sub(1) << 18 };
         let cfg = (bck.saturating_sub(1) << 7) | (packed_bits.saturating_sub(1) << 13) | width;
         let channels = self.ram.read(0x2c) & 7;
         Device::write(&mut self.inner, 0x34, (clock & 255) | (2 << 27) | if supported { 1 << 26 } else { 0 });
@@ -281,7 +288,7 @@ impl SocBus {
         let cfg = i2s.ram.read(0x60);
         // IDF v5.5.4 dac_dma.c: I2S0 in ADC/DAC mode sends unsigned
         // samples to the enabled RTC DAC pads. Only the high 8 bits are used.
-        let dac_mode = port == 0 && i2s.ram.read(0xa8) & 0x21 == 0x20;
+        let dac_mode = i2s.dac_mode();
         let dac_channels = if dac_mode { self.periph.adc.i2s_dac_channels() } else { 0 };
         let mut out = i2s.out;
         let audible = self.board.i2s_codecs().is_none_or(|codec| {
