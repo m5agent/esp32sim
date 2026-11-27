@@ -58,7 +58,7 @@ def nano_cases(out, peers):
                      and "Hello,M5Stack" in thread_rx),
         "thread-3": (re.search(r"Thread Node State: (Child|Router)", thread_rx) is not None
                      and "Hello,M5Stack" in thread_rx),
-        "thread-4": bool(re.search(r"\|\s*0x[0-9a-f]+\s*\|", read(peers / "thread-scan", "node1.log"), re.I)),
+        "thread-4": bool(re.search(r"\|\s*[0-9a-f]{4}\s*\|\s*[0-9a-f]{16}\s*\|\s*(?:1[1-9]|2[0-6])\s*\|", read(peers / "thread-scan", "node1.log"), re.I)),
         "thread-5": "openthread-esp32/" in log("thread-5") and "disabled" in log("thread-5"),
         "thread-6": re.search(r"OpenThread CLI RESP===> leader", log("thread-6"), re.I) is not None,
         "zigbee-1": "Temperature received:" in read(peers / "zigbee-temp", "node0.log"),
