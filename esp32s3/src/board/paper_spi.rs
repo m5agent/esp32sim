@@ -409,7 +409,7 @@ impl BoardModel for PaperSpi {
         }
     }
     fn accepts_command(&self, verb: &str) -> bool {
-        match verb { "paper-tag" => self.mono_board(), "sht40" => !self.mono_board(), "paper-battery" => true, _ => false }
+        match verb { "paper-tag" | "imu" => self.mono_board(), "sht40" => !self.mono_board(), "paper-battery" => true, _ => false }
     }
     fn board_command(&mut self, _cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
         match (verb, args) {
@@ -421,6 +421,13 @@ impl BoardModel for PaperSpi {
                     tag
                 };
                 self.nfc.borrow_mut().set_tag(tag);
+                true
+            }
+            ("imu", args) if self.mono_board() => {
+                let Ok(values) = args.iter().map(|value| value.parse::<f64>()).collect::<Result<Vec<_>, _>>() else { return false; };
+                let &[ax, ay, az, gx, gy, gz] = values.as_slice() else { return false; };
+                if !values.iter().all(|value| value.is_finite()) { return false; }
+                self.imu_chip.borrow_mut().set_sample([ax, ay, az], [gx, gy, gz], None);
                 true
             }
             ("paper-battery", [millivolts, charging, supply @ ..]) if supply.len() <= 1 => {

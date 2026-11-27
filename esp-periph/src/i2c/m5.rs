@@ -20,6 +20,7 @@ pub struct M5pm1State {
 #[derive(Debug)]
 pub struct M5pm1Gpio {
     inputs: u8,
+    external: u8,
     wake: u8,
     rising: u8,
     status: u8,
@@ -29,7 +30,7 @@ pub struct M5pm1Gpio {
 
 impl Default for M5pm1Gpio {
     fn default() -> Self {
-        Self { inputs: 0x1f, wake: 0, rising: 0, status: 0, mask: 0x1f, irq_outputs: 0 }
+        Self { inputs: 0x1f, external: 0, wake: 0, rising: 0, status: 0, mask: 0x1f, irq_outputs: 0 }
     }
 }
 
@@ -53,8 +54,10 @@ enum PowerAction { On, Off }
 
 impl M5pm1State {
     pub fn gpio_input(&mut self, pin: u8, high: bool) {
+        if pin >= 5 { return; }
         let bit = 1 << pin;
         let was_high = self.gpio.inputs & bit != 0;
+        self.gpio.external |= bit;
         self.gpio.inputs = (self.gpio.inputs & !bit) | (u8::from(high) << pin);
         if was_high != high && high == (self.gpio.rising & bit != 0) {
             self.gpio.status |= bit;
@@ -182,8 +185,18 @@ impl I2cDevice for M5pm1 {
 
     fn read(&mut self) -> u8 {
         let state = self.state.lock().expect("M5PM1 state mutex poisoned");
-        self.registers.regs[0x12] = (state.gpio.inputs & !4) | (u8::from(!state.charging && state.gpio.inputs & 4 != 0) << 2);
-        self.registers.regs[0x40] = state.gpio.status;
+        let r = &mut self.registers.regs;
+        let mut pulled_high = 0;
+        for pin in 0..5 {
+            let pull = if pin < 4 { (r[0x14] >> (pin * 2)) & 3 } else { r[0x15] & 3 };
+            if pull == 1 { pulled_high |= 1 << pin; }
+        }
+        // Keep the legacy active-low charging input on the unwired pin. The
+        // connected signal wins on boards that use this pin for RTC IRQ.
+        let defaults = (pulled_high & !4) | (u8::from(!state.charging) << 2);
+        let inputs = (defaults & !state.gpio.external) | (state.gpio.inputs & state.gpio.external);
+        r[0x12] = (inputs & !r[0x10]) | (r[0x11] & r[0x10]);
+        r[0x40] = state.gpio.status;
         [self.registers.regs[0x22], self.registers.regs[0x23]] = state.battery_mv.to_le_bytes();
         [self.registers.regs[0x24], self.registers.regs[0x25]] = state.vbus_mv.to_le_bytes();
         self.registers.read()
