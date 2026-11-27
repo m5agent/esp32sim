@@ -346,11 +346,6 @@ mod tests {
         spi.write(0x11c, 1 << 8);
         assert_eq!(spi.irq_sources(), 0);
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     #[test]
     fn cpu_buffer_repeats_when_the_data_phase_wraps_the_fifo() {
