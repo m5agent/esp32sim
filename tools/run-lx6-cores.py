@@ -75,7 +75,8 @@ def plan(device):
     add("microsd", 0.9, "microsd-absent")
     add("microsd", 3.8, card=True)
     add("microsd", 2.8, "microsd-first", card=True)
-    add("wav", 2.8, card=True, audio=True)
+    add("wav", 8.5 if device == "basic-v27" else 16, card=True, audio=True,
+        extra=("--exit-on", "playback completed!") if device == "core2" else ())
     add("wakeup", 7.8, actions=key(device, 1.15, 0, 160))
     add("stock", 2.7, "stock-home")
     navigation = key(device, 2.55, 2, 200) if device == "basic-v27" else touch(2.55, 34, 48)
@@ -125,9 +126,13 @@ def main():
         ["git", "-C", root, "rev-parse", f"{args.source or 'HEAD'}^{{commit}}"], text=True,
     ).strip()
     diff = subprocess.check_output(["git", "-C", root, "status", "--porcelain", "-uno"], text=True)
-    jobs = [job for job in plan(args.device) if args.only is None or job["label"] in args.only]
-    if not jobs:
-        parser.error("no jobs selected")
+    jobs = plan(args.device)
+    if args.only:
+        by_label = {job["label"]: job for job in jobs}
+        unknown = [label for label in args.only if label not in by_label]
+        if unknown:
+            parser.error(f"unknown labels: {', '.join(unknown)}")
+        jobs = [by_label[label] for label in args.only]
     seeds = dict(simulator=digest(binary), rom=digest(rom), sd_seed=digest(seed), stock=digest(stock))
 
     def run(job):

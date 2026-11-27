@@ -10,7 +10,7 @@ import subprocess
 import sys
 import wave
 
-from check_cores3 import changed, png_rgb, require
+from check_cores3 import changed, png_rgb, region, require
 
 
 class Run:
@@ -155,7 +155,15 @@ def checks(device, run):
                     f"PCM lacks expected {frequency} Hz component")
         return f"PCM capture at {rate} Hz contains the required tone(s)"
 
-    check("wav", lambda: sound("wav", (997 if basic else 733,)))
+    def playback():
+        result = sound("wav", (733 if basic else 997,))
+        serial = run.read("wav").lower()
+        require("wav: 12000hz, 1ch, 16bit" in serial or "starting playback..." in serial,
+                "did not open the seeded WAV")
+        require("playback completed!" in serial, "guest did not complete playback")
+        return result + " and the guest reached playback completion"
+
+    check("wav", playback)
     if basic:
         check("speaker", lambda: sound("speaker", (10000, 4000)))
 
@@ -217,8 +225,11 @@ def checks(device, run):
         check("mic", microphone)
 
     def stock():
-        _, colors = run.frame("stock-home")
+        home, colors = run.frame("stock-home")
         require(len(colors) >= 8 and "Startup with network type" in run.read("stock-home"), "no complete stock home screen")
+        navigation = run.png_reply("stock-navigation")
+        require(changed(region(home, 0, 26, 320, 238), region(navigation, 0, 26, 320, 238)) >= 800,
+                "stock input did not change the launcher")
         run.ran("stock-input")
         serial = run.read("stock-input")
         require(f"LX6-BOARD {1 if basic else 2}" in serial, "UART0 did not report the expected M5Unified board")
