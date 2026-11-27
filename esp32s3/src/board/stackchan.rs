@@ -202,7 +202,7 @@ impl StackChan {
     pub fn leds(&self) -> (&[[u8; 3]], u64) { (&self.leds, self.updates) }
 
     pub fn accepts_command(verb: &str) -> bool {
-        matches!(verb, "head-touch" | "base-supply" | "nfc-tag" | "servo-angle")
+        matches!(verb, "head-touch" | "base-supply" | "nfc-tag" | "servo-angle" | "servo-pose")
     }
     pub fn command(&mut self, verb: &str, args: &[&str]) -> bool {
         let mut hw = self.hw.borrow_mut();
@@ -221,6 +221,12 @@ impl StackChan {
                 let uid: Option<Vec<_>> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i+2], 16).ok()).collect();
                 let Some(uid) = uid else { return false };
                 hw.nfc.set_tag(uid);
+            }
+            ("servo-pose", [yaw, pitch]) => {
+                let (Ok(yaw @ 0..=1000), Ok(pitch @ 0..=1000)) = (yaw.parse::<u16>(), pitch.parse::<u16>()) else {
+                    return false;
+                };
+                self.servo.pose([yaw, pitch]);
             }
             ("servo-angle", []) => {
                 let [yaw, pitch] = self.angles();

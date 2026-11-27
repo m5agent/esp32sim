@@ -174,12 +174,14 @@ def stack(root, case, serial, log, frame):
                 f"expected two guest-driven angles and servo responses, got {angles}")
         return "top touch drives 45° pitch and then 90° yaw using serial servos"
     if case == "servo-1":
-        require(field(log, "servo-reads") > 0 and field(log, "servo-writes") > 0 and "servo-angle:" in log,
-                "missing SCSCL commands or feedback")
-        return None
+        angles = re.findall(r"StackChan servo-angle: yaw=(-?[\d.]+) pitch=(-?[\d.]+)", log)
+        require(angles == [("0.000", "0.000"), ("40.000", "40.000")] and
+                field(log, "servo-reads") > 0 and field(log, "servo-writes") > 0,
+                f"Set Home / Go Home did not restore the saved encoder positions: {angles}")
+        return "touch saves two SCSCL encoder positions and restores them after displacement"
     if case == "ir_nec":
-        require(field(log, "ir") >= 2 and "Send NEC: addr=0x0000, cmd=0x55" in serial and
-                "Send NEC: addr=0x0001, cmd=0x56" in serial, "missing two decoded IR transmissions")
+        require(field(log, "ir") >= 2 and "Received: protocol=NEC, addr=0x0000, cmd=0x55" in serial and
+                "Received: protocol=NEC, addr=0x0001, cmd=0x56" in serial, "missing two decoded IR transmissions")
         return "GPIO carrier delivered two valid NEC frames"
     if case == "nfc-1":
         _, baseline, _ = capture(root, case + "-control", (320, 240))
@@ -206,6 +208,13 @@ def stack(root, case, serial, log, frame):
     if case in ("speaker", "wav", "mic"):
         _, tones = audio(root / f"{case}.wav")
         require(tones, "audio output contains no non-silent PCM")
+        if case == "mic":
+            _, control_tones = audio(root / "mic-control.wav")
+            _, alternate_tones = audio(root / "mic-alternate.wav")
+            require(not control_tones and any(abs(tone[3] - 733) < 2 for tone in tones) and
+                    any(abs(tone[3] - 548) < 2 for tone in alternate_tones),
+                    "mic did not round-trip both fixture frequencies and silence")
+            return "I²S mic recording played back distinct 733 Hz and 548 Hz signals, with silence control"
         if case == "speaker":
             require(any(abs(tone[3] - 10_000) < 60 for tone in tones) and
                     any(abs(tone[3] - 4000) < 60 for tone in tones), f"documented tones missing: {tones}")

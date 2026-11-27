@@ -4,6 +4,7 @@ struct Servo {
     regs: [u8; 71],
     pending: Option<(u8, Vec<u8>)>,
     movement: Option<(u64, u64, u16, u16)>,
+    rotation: Option<(u64, u16, i16)>,
 }
 
 impl Servo {
@@ -16,15 +17,25 @@ impl Servo {
         regs[56..58].copy_from_slice(&zero.to_be_bytes());
         regs[62] = 74;
         regs[63] = 25;
-        Self { regs, pending: None, movement: None }
+        Self { regs, pending: None, movement: None, rotation: None }
     }
 
     fn position(&self) -> u16 { u16::from_be_bytes([self.regs[56], self.regs[57]]) }
-    fn advance(&mut self, cycle: u64) {
+    fn set_position(&mut self, position: u16) {
+        self.regs[56..58].copy_from_slice(&position.to_be_bytes());
+    }
+    fn advance(&mut self, cycle: u64, hz: u64) {
+        if let Some((start, initial, effort)) = self.rotation {
+            // Virtual speed scale: full effort is one 1024-count revolution per second.
+            let elapsed = i128::from(cycle.saturating_sub(start));
+            let offset = elapsed * i128::from(effort) * 1024 / (i128::from(hz.max(1)) * 1000);
+            self.set_position((i128::from(initial) + offset).rem_euclid(1024) as u16);
+            return;
+        }
         let Some((start, end, from, to)) = self.movement else { return };
         let elapsed = cycle.saturating_sub(start).min(end - start);
         let pos = i64::from(from) + (i64::from(to) - i64::from(from)) * elapsed as i64 / (end - start) as i64;
-        self.regs[56..58].copy_from_slice(&(pos as u16).to_be_bytes());
+        self.set_position(pos as u16);
         if cycle >= end {
             self.movement = None;
             self.regs[66] = 0;
@@ -35,10 +46,20 @@ impl Servo {
         let end = start + data.len();
         let Some(target) = self.regs.get_mut(start..end).filter(|_| start >= 5 && end <= 56) else { return false };
         target.copy_from_slice(data);
-        if self.regs[40] == 0 {
+        let wheel_mode = self.regs[9..13] == [0; 4];
+        if self.regs[40] == 0 || (start < 13 && end > 9) {
             self.movement = None;
+            self.rotation = None;
             self.regs[66] = 0;
-        } else if start <= 42 && end >= 44 {
+        }
+        if self.regs[40] == 0 { return true; }
+        if wheel_mode && start <= 44 && end >= 46 {
+            let raw = u16::from_be_bytes([self.regs[44], self.regs[45]]);
+            let effort = (raw & 1023).min(1000) as i16 * if raw & 1024 == 0 { 1 } else { -1 };
+            self.movement = None;
+            self.rotation = (effort != 0).then(|| (cycle, self.position(), effort));
+            self.regs[66] = u8::from(effort != 0);
+        } else if !wheel_mode && start <= 42 && end >= 44 {
             let target = u16::from_be_bytes([self.regs[42], self.regs[43]]).min(1000);
             let time_ms = u16::from_be_bytes([self.regs[44], self.regs[45]]).max(1);
             let due = cycle.saturating_add(u64::from(time_ms) * (hz / 1000).max(1));
@@ -66,6 +87,15 @@ impl ScsclPair {
         Self { devices: [Servo::new(1, zeros[0]), Servo::new(2, zeros[1])], frame: Vec::with_capacity(32),
                response: None, hz, last_byte: 0, reads: 0, writes: 0 }
     }
+    /// Apply a manual displacement in encoder counts for a home calibration fixture.
+    pub fn pose(&mut self, positions: [u16; 2]) {
+        for (servo, position) in self.devices.iter_mut().zip(positions) {
+            servo.set_position(position.min(1000));
+            servo.movement = None;
+            servo.rotation = None;
+            servo.regs[66] = 0;
+        }
+    }
     pub fn positions(&self) -> [u16; 2] { self.devices.each_ref().map(Servo::position) }
     pub fn deadline(&self) -> Option<u64> { self.response.as_ref().map(|reply| reply.0) }
     pub fn receive(&mut self, cycle: u64) -> Option<Vec<u8>> {
@@ -73,7 +103,7 @@ impl ScsclPair {
         self.response.take().map(|reply| reply.1)
     }
     pub fn advance(&mut self, cycle: u64) {
-        for servo in &mut self.devices { servo.advance(cycle); }
+        for servo in &mut self.devices { servo.advance(cycle, self.hz); }
     }
     pub fn transmit(&mut self, cycle: u64, byte: u8) {
         if cycle.saturating_sub(self.last_byte) > self.hz / 1000 { self.frame.clear(); }

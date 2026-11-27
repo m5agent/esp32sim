@@ -227,6 +227,7 @@ Both profiles expose their SPI microSD sockets through `--sd` and `--sd-rw`.
 | StamPLC | `plc-modbus-coil 0..3 0\|1` | Issue a Modbus RTU coil write from the virtual peer. |
 | StackChan | `head-touch 0..2 0..3` | Set the capacitive pad intensity. Zero releases the pad. |
 | StackChan | `base-supply MILLIVOLTS MILLIAMPS` | Set the base INA226 input. |
+| StackChan | `servo-pose YAW PITCH` | Displace the two virtual servos to the supplied encoder counts (0–1000). |
 | StackChan | `servo-angle` | Print the current yaw and pitch in degrees relative to factory zero. |
 | StackChan | `nfc-tag HEX_UID\|none` | Insert a synthetic NFC-A tag with a 4- or 7-byte UID, or remove it. |
 

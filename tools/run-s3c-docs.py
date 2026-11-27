@@ -34,7 +34,9 @@ STACK = {
     "imu": "3 imu 0.50 -0.25 1.0 125 -50 25\n",
     "ltr553": "3 als 1200 300 321\n",
     "mic": playback_script(),
-    "servo-1": "3 touch 160 175 1\n3.2 touch 160 175 0\n3.8 servo-angle\n4 touch 160 55 1\n4.2 touch 160 55 0\n4.8 servo-angle\n",
+    "servo-1": ("2.6 servo-pose 588 748\n3 touch 160 55 1\n3.2 touch 160 55 0\n"
+                "3.6 servo-pose 460 620\n3.8 servo-angle\n"
+                "4 touch 160 175 1\n4.2 touch 160 175 0\n4.8 servo-angle\n"),
     "servo-2": "3 head-touch 0 3\n3.4 head-touch 0 0\n3.8 servo-angle\n4 head-touch 1 2\n4.4 head-touch 1 0\n4.8 servo-angle\n",
     "touch": "3 touch 30 30 1\n3.2 touch 70 70 1\n3.4 touch 70 70 0\n4 touch 100 120 1\n4.2 touch 100 120 0\n",
     "touchsensor": "3 head-touch 0 2\n3.5 head-touch 0 0\n4 head-touch 2 3\n",
