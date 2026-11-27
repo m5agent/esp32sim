@@ -70,7 +70,14 @@ impl Dsi {
 impl Device for Dsi {
     fn read(&mut self, off: u32) -> u32 {
         match off {
-            0x70 => u32::from_le_bytes(std::array::from_fn(|_| self.rx.pop_front().unwrap_or(0))),
+            0x70 => {
+                let bytes = self.rx.len().min(4);
+                let word = u32::from_le_bytes(std::array::from_fn(|_| self.rx.pop_front().unwrap_or(0)));
+                if self.debug && bytes != 0 {
+                    eprintln!("[dsi] RX FIFO pop: bytes={bytes} word={word:#010x} remaining={}", self.rx.len());
+                }
+                word
+            }
             0x74 => (1 << 16) | 1 | (u32::from(self.tx.is_empty()) << 2) |
                 (u32::from(self.tx.len() == 65536) << 3) | (u32::from(self.rx.is_empty()) << 4),
             0xb0 => if self.host.read(0xa0) & 3 == 3 { 0x1bd } else { 0 }, // locked, lanes in LP stop state

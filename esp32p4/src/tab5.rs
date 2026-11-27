@@ -83,6 +83,7 @@ pub struct Tab5 {
     edges: Vec<BoardEdge>,
     released: Vec<u8>,
     touch_irq: bool,
+    touch_connected: bool,
     goodix_pending: Rc<Cell<bool>>,
     backlight: Option<(f64, u32)>,
     mic: Rc<RefCell<Es7210>>,
@@ -101,7 +102,9 @@ pub struct Tab5 {
     sd_spi: Option<esp_periph::sdmmc::SpiSdCard>,
 }
 impl Tab5 {
-    pub fn new(panel: Panel) -> Self {
+    pub fn new(panel: Panel) -> Self { Self::with_touch(panel, true) }
+
+    pub(crate) fn with_touch(panel: Panel, touch_connected: bool) -> Self {
         let contacts = Points::default();
         // The two PI4IOE5V6408s retain direction and output latches across
         // transactions, including when the guest switches from bit-bang to I2C1.
@@ -121,16 +124,18 @@ impl Tab5 {
         let imu = Rc::new(RefCell::new(Bmi270::new(motion.clone(), crate::periph::CPU_HZ)));
         bus.push((BMI270_ADDRESS, DevicePort(imu.clone())));
         let goodix_pending = Rc::new(Cell::new(false));
-        match panel {
-            Panel::Ili9881c => bus.push((0x14, DevicePort::new(Gt911::new_multi(contacts.clone(), WIDTH as u16, HEIGHT as u16).with_pending(goodix_pending.clone())))),
-            Panel::St7123 => bus.push((0x55, DevicePort::new(Sitronix { pointer: 0, phase: 0, points: contacts.clone(), report: [0; 35] }))),
+        match (panel, touch_connected) {
+            (Panel::Ili9881c, true) => bus.push((0x14, DevicePort::new(Gt911::new_multi(contacts.clone(), WIDTH as u16, HEIGHT as u16).with_pending(goodix_pending.clone())))),
+            (Panel::St7123, true) => bus.push((0x55, DevicePort::new(Sitronix { pointer: 0, phase: 0, points: contacts.clone(), report: [0; 35] }))),
+            (_, false) => {}
         }
         Self { panel, screen: Vec::new(), sleeping: true, on: false, page: 0,
                scans: 0, version: 0, reads: 0, contacts, bus, soft: SoftI2c::idle(),
-               edges: Vec::new(), released: Vec::new(), touch_irq: true, goodix_pending, backlight: None, mic, dac, rails, charger, rtc, powered: true, power_off_line: false, rtc_irq: false, off_at: None, on_at: None, battery, imu, motion, sd_spi: None }
+               edges: Vec::new(), released: Vec::new(), touch_irq: true, touch_connected, goodix_pending, backlight: None, mic, dac, rails, charger, rtc, powered: true, power_off_line: false, rtc_irq: false, off_at: None, on_at: None, battery, imu, motion, sd_spi: None }
     }
 
     fn contact(&mut self, cycle: VirtualCycle, id: usize, x: u16, y: u16, down: bool) -> bool {
+        if !self.touch_connected { return false; }
         let (x, y) = (x.min(WIDTH as u16 - 1), y.min(HEIGHT as u16 - 1));
         let irq = {
             let mut points = self.contacts.lock().unwrap();
@@ -153,7 +158,11 @@ impl Tab5 {
 
 impl BoardModel for Tab5 {
     fn name(&self) -> &'static str {
-        match self.panel { Panel::Ili9881c => "m5stack-tab5", Panel::St7123 => "m5stack-tab5-st7123" }
+        match (self.panel, self.touch_connected) {
+            (Panel::Ili9881c, false) => "m5stack-tab5-dsi-only",
+            (Panel::Ili9881c, true) => "m5stack-tab5",
+            (Panel::St7123, _) => "m5stack-tab5-st7123",
+        }
     }
     fn i2s_codecs(&self) -> Option<I2sCodecs> {
         let rails = self.rails.borrow();

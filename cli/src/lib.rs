@@ -24,7 +24,7 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!("                        (Espressif's, not in the tarball: tools/fetch-rom-elfs.sh DIR downloads all of them)");
     eprintln!("  --board NAME          board model (S3: atech14, waveshare-lcd4b, waveshare-amoled18-v2, waveshare-cam, stopwatch, m5stack-cores3, m5stack-stamplc, m5stack-stackchan, m5stack-cardputer, m5stack-cardputer-adv, m5stack-dial, m5stack-sticks3, m5stack-paperdiy, m5stack-papers3, m5stack-papermono, m5stack-papercolor, none;");
     eprintln!("                        m5stack-atoms3[-lite|-gc9107], m5stack-atoms3u, m5stack-atoms3r[-gc9107|-cam|-m12], m5stack-atom-echos3r;");
-    eprintln!("                        C6: waveshare-c6-lcd147, xiao-esp32c6, m5stack-nanoc6[-enviii], arduino-nesso-n1, none; P4: waveshare-p4-lcd35, m5stack-tab5, m5stack-tab5-st7123, none; S31: mosaico, none;");
+    eprintln!("                        C6: waveshare-c6-lcd147, xiao-esp32c6, m5stack-nanoc6[-enviii], arduino-nesso-n1, none; P4: waveshare-p4-lcd35, m5stack-tab5, m5stack-tab5-st7123, m5stack-tab5-dsi-only, none; S31: mosaico, none;");
     eprintln!("                        classic: m5stack-basic-v27, m5stack-core2[-axp192], m5stack-atom-lite, m5stack-atom-matrix[-v11], m5stack-atomu, m5stack-atom-echo,");
     eprintln!("                        m5stack-stickc[-plus|-plus-se|-plus2], m5stack-m5stick, m5stack-stickt2, ttgo-tdisplay, cyd, ulanzi-tc001, ai-thinker-cam, esp32dev, none)");
     eprintln!("  --flash-mb N, --psram-mb N   memory sizes (S3 default 8 / 2, Cardputer-ADV 8 / 0, C3, C6 and classic 4 / 0, Basic v2.7 16 / 0, Core2 16 / 8, StickC Plus2 8 / 2, P4 16 / 0, S31 2, mosaico 16 / 16)");
@@ -808,11 +808,11 @@ fn setup_p4<R: esp32p4::Revision>(o: &Opts) -> esp_soc::Machine<esp32p4::Esp32p4
     let flash = o.flash_mb.unwrap_or(16) << 20;
     let mut m = esp32p4::machine_rev::<R>(o.mac.unwrap_or([0x30, 0xed, 0xa0, 0x00, 0x11, 0x22]), flash);
     m.bus.set_flash_size(flash);   // the JEDEC capacity follows the size
-    let tab5 = matches!(o.board.as_str(), "m5stack-tab5" | "m5stack-tab5-st7123");
+    let tab5 = matches!(o.board.as_str(), "m5stack-tab5" | "m5stack-tab5-st7123" | "m5stack-tab5-dsi-only");
     if let Some(mb) = o.psram_mb.or(tab5.then_some(32)) { m.bus.set_psram_size(mb << 20).unwrap(); }
     if !o.debug.is_empty() { let mut f = esp_soc::DebugFlags::from_env(); for d in &o.debug { f.parse(d); } m.set_debug(&f); }
     let board = if o.board == "atech14" { "none" } else { o.board.as_str() };   // the S3 default means "bare module" here
-    match esp32p4::board::make_board(board) { Some(b) => m.bus.board = b, None => usage_error(&format!("--board {board}: none, waveshare-p4-lcd35, m5stack-tab5 or m5stack-tab5-st7123 on the P4")) }
+    match esp32p4::board::make_board(board) { Some(b) => m.bus.board = b, None => usage_error(&format!("--board {board}: none, waveshare-p4-lcd35, m5stack-tab5, m5stack-tab5-st7123 or m5stack-tab5-dsi-only on the P4")) }
     m.bus.attach_board_devices();
     for (flag, on) in [("--wifi", !o.wifi.is_empty() && o.coproc.is_none()), ("--cam-image", o.cam_image.is_some()), ("--cam-stream", o.cam_stream.is_some()), ("--cam-size", o.cam_size.is_some()), ("--flash-octal", o.flash_octal), ("--efuse-regs", o.efuse_regs.is_some()), ("--regs-init", o.regs_init.is_some()), ("--regstat", o.regstat.is_some())] {
         if on { eprintln!("{} is not available on the P4{}", flag, if flag == "--wifi" { " (it goes to a co-processor: --coproc)" } else { "" }); std::process::exit(2); }

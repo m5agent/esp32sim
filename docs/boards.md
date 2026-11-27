@@ -271,6 +271,10 @@ is none; the page's manifest sets 32).
 
 Run `esp32sim-p4 --board m5stack-tab5` for the original ILI9881C/GT911 pair or
 `--board m5stack-tab5-st7123` for the ST7123 display and touch controller.
+`--board m5stack-tab5-dsi-only` models an ILI9881C Tab5 with the GT911 touch
+cable disconnected. Use it with `--debug dsi` to exercise and trace the
+stock firmware's panel-ID fallback. UIFlow2 v2.5.4 skips the DSI ID read
+when the GT911 answers its I2C probe.
 The P4 launcher defaults to 16 MiB flash and 32 MiB PSRAM for either profile.
 
 | Device | Emulator path |
