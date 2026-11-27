@@ -476,8 +476,10 @@ impl Peripherals {
         // UART_SCLK_RTC = SOC_MOD_CLK_RC_FAST, SOC_CLK_RC_FAST_FREQ_APPROX = 17.5 MHz.
         // IDF 4.4 used 20 MHz (RTC_CLK_FREQ).
         let clock = self.uart[port].clock_config();
-        esp_soc::uart::UartPins::S3.route(port, &self.gpio, &self.io_mux,
-            self.uart[port].baud(clock, 17_500_000))
+        let mut route = esp_soc::uart::UartPins::S3.route(port, &self.gpio, &self.io_mux,
+            self.uart[port].baud(clock, 17_500_000));
+        route.rs485_transmitting = self.uart[port].rs485_transmitting();
+        route
     }
 
     pub fn uart_pin_input(&mut self, input: &esp_soc::uart::UartInput) {
@@ -524,7 +526,8 @@ impl Peripherals {
         if addr == PERIPH_BASE + 0xc0020 {
             for (group, bit) in [17, 20].iter().enumerate() { if v & (1 << bit) != 0 { self.mcpwm[group] = Mcpwm::new(160 + group as u32 * 6, 9); } }
         }
-        if addr == 0x600c_0020 && v & (1 << 13) != 0 {
+        // ESP-IDF v5.4.2 ESP32-S3 system_reg.h: PERIP_RST_EN0.TWAI_RST bit 19.
+        if addr == 0x600c_0020 && v & (1 << 19) != 0 {
             let peer = self.twai.peer;
             self.twai = crate::twai::Twai::default();
             self.twai.peer = peer;

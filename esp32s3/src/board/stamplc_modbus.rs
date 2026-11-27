@@ -41,7 +41,7 @@ pub struct Peer {
 impl Peer {
     pub fn deadline(&self) -> Option<u64> { self.stop }
     pub fn transmit(&mut self, cycle: u64, route: UartRoute, byte: u8) {
-        if !route.transmits_on(TX) || !route.matches_baud(BAUD) || !(self.de || self.hardware_rts) { return; }
+        if !route.transmits_on(TX) || !route.matches_baud(BAUD) || !(self.de || self.hardware_rts && route.rs485_transmitting) { return; }
         if self.guest.len() < 256 { self.guest.push(byte); }
         self.stop = Some(cycle.saturating_add(GAP));
     }

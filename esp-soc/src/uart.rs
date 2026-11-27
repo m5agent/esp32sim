@@ -11,11 +11,12 @@ pub struct UartRoute {
     pub rx_pin: Option<u8>,
     /// None when no source or divider is configured.
     pub baud: Option<u32>,
+    pub rs485_transmitting: bool,
 }
 impl UartRoute {
     /// Route decoded by a chip with its own GPIO matrix and IO_MUX layout.
     pub fn new(port: usize, tx_pins: u64, rx_pin: Option<u8>, baud: Option<u32>) -> Self {
-        Self { port, tx_pins, rx_pin, baud }
+        Self { port, tx_pins, rx_pin, baud, rs485_transmitting: false }
     }
     /// Three percent tolerance for divider rounding and oscillator error.
     pub fn matches_baud(&self, baud: u32) -> bool {
@@ -51,7 +52,7 @@ impl UartPins {
     pub const C6: Self = Self { chip: ChipPins::C6, signals: &[6, 9], native: &[(16, 17, 0)] };
 
     pub fn route(&self, port: usize, gpio: &Gpio, mux: &RegRam, baud: Option<u32>) -> UartRoute {
-        let mut route = UartRoute { port, tx_pins: 0, rx_pin: None, baud };
+        let mut route = UartRoute::new(port, 0, None, baud);
         let Some(&signal) = self.signals.get(port) else { return route };
         let pins = self.chip.routes(gpio, mux);
         let native = self.native.get(port);
