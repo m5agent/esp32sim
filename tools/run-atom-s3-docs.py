@@ -95,10 +95,15 @@ def main():
     p.add_argument("rom", type=Path, help="ESP32-S3 ROM ELF")
     p.add_argument("out", type=Path, help="new evidence directory")
     p.add_argument("--source", required=True, help="simulator source commit for BINARY")
+    p.add_argument("--case", action="append", help="replay only this case (repeatable, or stock)")
     p.add_argument("--gc9107", action="store_true", help="select the GC9107 LCD revision")
     args = p.parse_args()
     if args.gc9107 and args.board not in {"atoms3", "atoms3r"}:
         p.error("--gc9107 is available for AtomS3 and AtomS3R")
+    all_cases = (*CASES[args.board], "stock")
+    selected = args.case or all_cases
+    if any(case not in all_cases for case in selected):
+        p.error(f"valid cases for {args.board}: {', '.join(all_cases)}")
     args.variant = args.board + ("-gc9107" if args.gc9107 else "")
     args.out = args.out.resolve()
     args.out.mkdir(parents=True)
@@ -106,7 +111,7 @@ def main():
     (args.out / "esp32sim").chmod(0o755)
     (args.out / "run.json").write_text(json.dumps(
         {"source": args.source, "board": args.board, "variant": args.variant,
-         "binary_sha256": sha(args.binary), "rom_sha256": sha(args.rom)}, indent=2) + "\n")
+         "selected_cases": list(selected), "binary_sha256": sha(args.binary), "rom_sha256": sha(args.rom)}, indent=2) + "\n")
     stock = args.out / "usb-repl.txt"
     poll_button = ('import time\nfor _ in range(48):\n'
                    " M5.update(); print('ATOM_BTN', int(M5.BtnA.isPressed())); time.sleep_ms(100)")
@@ -118,6 +123,8 @@ def main():
     button = "1.9 press btn 200\n2.7 press btn 200\n"
     tasks = []
     for case in CASES[args.board]:
+        if case not in selected:
+            continue
         fw = args.firmware / args.board / case / "sketch.merged.bin"
         if case == "quickstart-camera":
             jpeg = args.board == "atoms3r-m12"
@@ -139,12 +146,14 @@ def main():
                 opts = ("--i2s-tone", f"{port}:{tone[0]}:{tone[1]}") if case == "mic" and tone else ()
                 tasks.append((f"{case}-{suffix}", fw, 10, opts, script))
         else:
-            seconds = 3.5 if case == "button" else 7
+            seconds = {"button": 3.5, "display": 2.5, "quickstart-display": 3.3,
+                       "quickstart-bargraph": 4}.get(case, 7)
             tasks.append((case, fw, seconds, (), button if case in ("button", "rgb_led", "speaker") else ""))
             if case == "button":
                 tasks.append(("button-still", fw, seconds, (), ""))
-    tasks.append(("stock", args.stock, 16, ("--usb-host", str(stock)),
-                  "7.8 press btn 1000\n9.4 press btn 1000\n"))
+    if "stock" in selected:
+        tasks.append(("stock", args.stock, 16, ("--usb-host", str(stock)),
+                      "7.8 press btn 1000\n9.4 press btn 1000\n"))
     with ThreadPoolExecutor(3) as workers:
         runs = [workers.submit(run, args, *task) for task in tasks]
         for result in runs:
