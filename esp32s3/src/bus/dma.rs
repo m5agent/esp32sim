@@ -341,7 +341,11 @@ impl SocBus {
             signals.clock = Self::i2s_clock_signals(port as usize, !i2s.rx_slave());
             let [bck, ws] = signals.clock;
             let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
-            if routes.matrix_output(c.bck as usize, bck as u32) && routes.matrix_output(c.ws as usize, ws as u32)
+            let pdm = self.board.pdm_mic();
+            let bck_valid = if pdm { i2s.rx_pdm() && port as usize == c.mic_port }
+                else { routes.matrix_output(c.bck as usize, bck as u32) };
+            if bck_valid
+                && routes.matrix_output(c.ws as usize, ws as u32)
                 && routes.matrix_input(signals.data) == Some(c.din)
                 && c.mck.is_none_or(|pin| routes.matrix_output(pin as usize, if port == 0 { 23 } else { 21 })) {
                 c.mic_lanes
@@ -425,6 +429,15 @@ impl SocBus {
                 && routes.matrix_output(codecs.dout as usize, if which == 0 { 25 } else { 30 }) { codecs.speaker_gain } else { 0.0 };
             if gain == 0.0 { samples.fill(0); }
             else if gain != 1.0 { for sample in &mut samples { *sample = (f32::from(*sample) * gain).round() as i16; } }
+        }
+        if let Some(pin) = self.board.i2s_buzzer_pin() {
+            let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
+            if !routes.matrix_output(pin as usize, if which == 0 { 25 } else { 30 }) { return; }
+            // M5Unified 0.3.0 Speaker_Class: each half-word carries 16 one-bit symbols.
+            // Reduce duty to the digital amplitude supplied to the audio sink.
+            for word in &mut samples {
+                *word = (((*word as u16).count_ones() as i32 - 8) * 4096).clamp(-32768, 32767) as i16;
+            }
         }
         let i2s = if which == 0 { &mut self.periph.i2s0 } else { &mut self.periph.i2s1 };
         i2s.frames_out += samples.len() as u64;

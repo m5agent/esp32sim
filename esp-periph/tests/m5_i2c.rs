@@ -114,7 +114,7 @@ fn stopwatch_expander_rmw_and_reset_pulse_leave_rail_on() {
     update(&mut *device, 0x13, 0, 0x9d);
     update(&mut *device, 0x03, 0x9d, 0);
     update(&mut *device, 0x05, 0x99, 0);
-    let ready = M5ioe1State { oled_rail: true, oled_reset_high: true, touch_reset_high: true };
+    let ready = M5ioe1State { oled_rail: true, oled_reset_high: true, touch_reset_high: true, ..Default::default() };
     assert_eq!(*state.lock().unwrap(), ready);
     assert_eq!(read(&mut *device, 0x13, 1), [0x62]);
     assert_eq!(read(&mut *device, 0x03, 1), [0x9d]);
@@ -138,7 +138,7 @@ fn expander_levels_require_output_mode_and_push_pull_drive() {
     write(&mut device, 0x03, &[0x98]);
     assert_eq!(*state.lock().unwrap(), M5ioe1State::default());
     write(&mut device, 0x13, &[0x67]);
-    assert_eq!(*state.lock().unwrap(), M5ioe1State { oled_rail: true, oled_reset_high: true, touch_reset_high: true });
+    assert_eq!(*state.lock().unwrap(), M5ioe1State { oled_rail: true, oled_reset_high: true, touch_reset_high: true, ..Default::default() });
     update(&mut device, 0x03, 0, 0x10);
     assert!(!state.lock().unwrap().oled_reset_high);
     update(&mut device, 0x13, 0x80, 0);
@@ -158,4 +158,35 @@ fn identity_and_battery_registers_are_read_only_and_bursts_increment() {
     let mut expander = M5ioe1::new(Default::default(), 0x1234);
     write(&mut expander, 0x00, &[0, 0, 0, 0x9d]);
     assert_eq!(read(&mut expander, 0x00, 4), [0x34, 0x12, b'A', 0x9d]);
+}
+
+#[test]
+fn pm1_timer_only_wakes_after_armed_deadline() {
+    let state = Arc::new(Mutex::new(M5pm1State::default()));
+    let mut pmic = M5pm1::new(state.clone()).with_wiring(100, 0);
+    pmic.advance(1000);
+    write(&mut pmic, 0x38, &[5, 0, 0, 0, 3, 0xa5]);
+    write(&mut pmic, 0x0c, &[0xa1]);
+    assert_eq!(pmic.next_deadline(), Some(1500));
+    pmic.advance(1499);
+    assert!(state.lock().unwrap().power_off_requested);
+    pmic.advance(1500);
+    assert!(!state.lock().unwrap().power_off_requested);
+    assert_eq!(pmic.timer_wakes(), 1);
+    assert_eq!(read(&mut pmic, 0x05, 1), [1]);
+    write(&mut pmic, 0x05, &[0xfe]);
+    assert_eq!(read(&mut pmic, 0x05, 1), [0]);
+}
+
+#[test]
+fn pm1_configured_falling_edge_wakes_powered_off_board() {
+    let state = Arc::new(Mutex::new(M5pm1State::default()));
+    let mut pmic = M5pm1::new(state.clone());
+    write(&mut pmic, 0x18, &[0x10, 0]);
+    write(&mut pmic, 0x0c, &[0xa1]);
+    pmic.gpio_input(4, true);
+    assert!(state.lock().unwrap().power_off_requested);
+    pmic.gpio_input(4, false);
+    assert!(!state.lock().unwrap().power_off_requested);
+    assert_eq!(read(&mut pmic, 0x05, 1), [0x20]);
 }

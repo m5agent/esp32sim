@@ -1,4 +1,4 @@
-//! M5Stack StopWatch's I2C register subset, not analog power or sleep timing simulation.
+//! M5Stack PM1 power/standby controls and IOE1 digital pin states.
 //! Register sources: M5PM1 Chip User Manual v1.9, pp. 4–10, 12–18, 23;
 //! M5IOE1 Chip User Manual, sections III and IV (links and wiring in docs/m5-i2c.md).
 use super::{I2cDevice, Reg8Device};
@@ -21,6 +21,14 @@ impl Default for M5pm1State {
 pub struct M5pm1 {
     registers: Reg8Device,
     state: Arc<Mutex<M5pm1State>>,
+    charging_pin: u8,
+    timer_at: Option<u64>,
+    cycle: u64,
+    hz: u64,
+    external: u8,
+    gpio_inputs: u8,
+    gpio_events: u8,
+    timer_wakes: u64,
 }
 
 impl M5pm1 {
@@ -33,9 +41,76 @@ impl M5pm1 {
                 (0x00, 0x50), (0x01, 0x20), (0x02, 0x05), (0x03, 0x06),
                 (0x06, 0x17), (0x08, 0x40), (0x13, 0x1f), (0x49, 0x2a),
             ]),
-            state,
+            state, charging_pin: 2, timer_at: None, cycle: 0, hz: 240_000_000,
+            external: 0, gpio_inputs: 0, gpio_events: 0, timer_wakes: 0,
         }
     }
+    pub fn with_wiring(mut self, hz: u64, charging_pin: u8) -> Self {
+        assert!(hz > 0 && charging_pin < 5);
+        self.hz = hz;
+        self.charging_pin = charging_pin;
+        self
+    }
+    pub fn driven_high(&self) -> u8 {
+        let r = &self.registers.regs;
+        r[0x10] & r[0x11] & !r[0x13] & 0x1f
+    }
+    pub fn gpio_input(&mut self, pin: u8, level: bool) {
+        if pin >= 5 { return; }
+        let mask = 1 << pin;
+        let old = self.gpio_inputs & mask != 0;
+        self.external |= mask;
+        self.gpio_inputs = (self.gpio_inputs & !mask) | if level { mask } else { 0 };
+        if old == level { return; }
+        let r = &mut self.registers.regs;
+        if !level && r[0x43] & mask == 0 {
+            r[0x40] |= mask;
+            self.gpio_events |= mask;
+        }
+        if r[0x18] & mask != 0 && (r[0x19] & mask != 0) == level {
+            self.wake(0x20);
+        }
+    }
+    pub fn power_key(&mut self) {
+        let was_off = self.state.lock().unwrap().power_off_requested;
+        self.registers.regs[0x42] |= if was_off { 2 } else { 1 };
+        if was_off { self.wake(4); }
+    }
+    pub fn gpio_events(&self) -> u8 { self.gpio_events }
+    pub fn timer_wakes(&self) -> u64 { self.timer_wakes }
+    pub fn drives_irq(&self, pin: u8) -> bool {
+        pin < 4 && self.registers.regs[0x10] & (1 << pin) != 0
+            && (self.registers.regs[0x16] >> (2 * pin)) & 3 == 1
+            && self.irq_low()
+    }
+    fn irq_low(&self) -> bool {
+        let r = &self.registers.regs;
+        r[0x40] & !r[0x43] != 0 || r[0x41] & !r[0x44] != 0 || r[0x42] & !r[0x45] != 0
+    }
+    pub fn next_deadline(&self) -> Option<u64> { self.timer_at }
+    pub fn advance(&mut self, cycle: u64) {
+        self.cycle = self.cycle.max(cycle);
+        if self.timer_at.is_none_or(|at| at > self.cycle) { return; }
+        self.timer_at = None;
+        let config = self.registers.regs[0x3c];
+        match config & 7 {
+            3 if self.state.lock().unwrap().power_off_requested => { self.wake(1); self.timer_wakes += 1; }
+            4 => self.state.lock().unwrap().power_off_requested = true,
+            _ => {}
+        }
+        if config & 8 != 0 { self.reload_timer(); }
+    }
+    fn wake(&mut self, source: u8) {
+        self.registers.regs[5] |= source;
+        self.state.lock().unwrap().power_off_requested = false;
+    }
+    fn reload_timer(&mut self) {
+        let r = &self.registers.regs;
+        let secs = u64::from(u32::from_le_bytes([r[0x38], r[0x39], r[0x3a], r[0x3b] & 0x7f]));
+        self.timer_at = (r[0x3c] & 7 != 0 && secs != 0)
+            .then(|| self.cycle.saturating_add(self.hz.saturating_mul(secs)));
+    }
+
 }
 
 impl I2cDevice for M5pm1 {
@@ -44,10 +119,17 @@ impl I2cDevice for M5pm1 {
     fn write(&mut self, byte: u8) -> bool {
         if !self.registers.first {
             let reg = self.registers.ptr;
-            if matches!(reg, 0x00..=0x03 | 0x12 | 0x22..=0x23) {
+            if matches!(reg, 0x00..=0x04 | 0x12 | 0x22..=0x23) {
                 self.registers.ptr = reg.wrapping_add(1);
                 return true;
             }
+            if matches!(reg, 0x05 | 0x40..=0x42) {
+                self.registers.regs[reg as usize] &= byte;
+                self.registers.ptr = reg.wrapping_add(1);
+                return true;
+            }
+            if reg == 0x3d && byte == 0xa5 { self.reload_timer(); }
+            if reg == 0x3c && byte & 7 == 0 { self.timer_at = None; }
             if reg == 0x0c && byte == 0xa1 {
                 self.state.lock().expect("M5PM1 state mutex poisoned").power_off_requested = true;
             }
@@ -57,7 +139,17 @@ impl I2cDevice for M5pm1 {
 
     fn read(&mut self) -> u8 {
         let state = self.state.lock().expect("M5PM1 state mutex poisoned");
-        self.registers.regs[0x12] = (self.registers.regs[0x12] & !4) | (u8::from(!state.charging) << 2);
+        let r = &mut self.registers.regs;
+        let mut pulled_high = 0;
+        for pin in 0..5 {
+            let pull = if pin < 4 { (r[0x14] >> (pin * 2)) & 3 } else { r[0x15] & 3 };
+            if pull == 1 { pulled_high |= 1 << pin; }
+        }
+        let charging_bit = 1 << self.charging_pin;
+        let input = (pulled_high & !self.external) | (self.gpio_inputs & self.external);
+        let pins = (input & !r[0x10]) | (r[0x11] & r[0x10]);
+        r[0x12] = (pins & !charging_bit) | if state.charging { 0 } else { charging_bit };
+        r[0x04] = if state.charging { 0 } else { 2 };
         [self.registers.regs[0x22], self.registers.regs[0x23]] = state.battery_mv.to_le_bytes();
         self.registers.read()
     }
@@ -70,6 +162,10 @@ pub struct M5ioe1State {
     pub oled_rail: bool,
     pub oled_reset_high: bool,
     pub touch_reset_high: bool,
+    pub audio_rail: bool,
+    pub amp_enabled: bool,
+    pub vibration_duty: u16,
+    pub vibration_hz: u16,
 }
 
 pub struct M5ioe1 {
@@ -108,6 +204,12 @@ impl I2cDevice for M5ioe1 {
             oled_rail: high & 0x80 != 0,
             oled_reset_high: high & 0x10 != 0,
             touch_reset_high: high & 0x08 != 0,
+            audio_rail: high & 0x04 != 0,
+            amp_enabled: regs[0x04] & regs[0x06] & !regs[0x14] & 2 != 0,
+            vibration_duty: if regs[0x04] & !regs[0x14] & 1 != 0 && regs[0x1c] & 0x80 != 0 {
+                u16::from_le_bytes([regs[0x1b], regs[0x1c] & 15])
+            } else { 0 },
+            vibration_hz: u16::from_le_bytes([regs[0x25], regs[0x26]]),
         };
         ack
     }

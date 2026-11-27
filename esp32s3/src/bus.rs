@@ -1018,8 +1018,8 @@ impl SocBus {
     fn tick_impl(&mut self, cycles: u32) -> u32 {
         // Board time advances before peripheral callbacks; inputs are delivered after them.
         if self.board_edges { self.board.advance_to(self.cycles); }
+        if self.board_power.is_some() { self.sync_board_power(); }
         if self.board_power_off() || self.power_on_reset {
-            self.sync_board_power();
             return u32::from(self.irq_dirty);
         }
         let board_i2c = self.board_power.is_some() && self.periph.i2c.iter().any(|i2c| i2c.is_active());
@@ -1104,7 +1104,18 @@ impl SocBus {
     #[inline(never)]
     fn deliver_rmt_frames(&mut self) {
         for (ch, bits) in std::mem::take(&mut self.periph.rmt.done) {
-            for pin in esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux).output_pins(RMT_SIG_OUT0 + ch as u32) { self.board.rmt_frame(pin, &bits); }
+            let rmt = &self.periph.rmt;
+            let channel = &rmt.ch[ch];
+            let raw = if channel.conf0 & ((1 << 3) | (1 << 25)) == 0
+                && channel.rd <= esp_periph::rmt::RMT_MEM_WORDS && channel.rd == bits.len() {
+                let start = ch * esp_periph::rmt::RMT_MEM_WORDS;
+                let tick_hz = 80_000_000 / ((channel.conf0 >> 8) & 0xff).max(1);
+                Some((tick_hz, &rmt.mem[start..start + channel.rd]))
+            } else { None };
+            for pin in esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux).output_pins(RMT_SIG_OUT0 + ch as u32) {
+                self.board.rmt_frame(pin, &bits);
+                if let Some((tick_hz, symbols)) = raw { self.board.rmt_symbols(pin, tick_hz, symbols); }
+            }
         }
         self.irq_dirty = true;
     }

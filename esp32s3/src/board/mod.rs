@@ -13,11 +13,19 @@
 pub use esp_soc::board::{Board, BoardEdge, BoardModel, NoBoard, VirtualCycle};
 
 pub mod atech14;
+mod cardputer;
+mod cardputer_keys;
 pub mod cardputer_adv;
 mod cardputer_adv_ir;
 mod cardputer_adv_cap;
 pub mod cores3;
+mod dial;
+mod i2c_wiring;
+mod pm1_wiring;
+mod sticks3;
 use esp_soc::devices::soft_i2c;
+mod spi_lcd;
+
 pub mod stopwatch;
 pub mod waveshare_amoled18;
 pub mod waveshare_cam;
@@ -36,8 +44,11 @@ pub fn make_board(name: &str) -> Option<Board> {
     match name {
         "atech14" | "atech" => Some(Box::new(Atech14::new())),
         "none" | "bare" => Some(Box::new(NoBoard)),
+        "sticks3" | "m5stack-sticks3" => Some(Box::new(sticks3::StickS3::new())),
         "stopwatch" | "m5stack-stopwatch" => Some(Box::new(StopWatch::new())),
+        "cardputer" | "m5stack-cardputer" => Some(Box::new(cardputer::Cardputer::new())),
         "cardputer-adv" | "m5stack-cardputer-adv" => Some(Box::new(CardputerAdv::new())),
+        "dial" | "m5stack-dial" => Some(Box::new(dial::Dial::new())),
         "cores3" | "m5stack-cores3" => Some(Box::new(Cores3::new())),
         "waveshare-cam" | "waveshare" => Some(Box::new(WaveshareCam::new())),
         "waveshare-lcd4b" | "lcd4b" => Some(Box::new(WaveshareLcd4b::new())),

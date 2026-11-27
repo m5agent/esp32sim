@@ -72,6 +72,8 @@ impl I2s {
     pub fn set_v2_rx_clock(&mut self, ctrl0: u32, div: u32) { self.v2_rx_clock = (ctrl0, div); }
     fn tx_mono(&self) -> bool { self.tx_conf & (1 << if self.v2 { 6 } else { 5 }) != 0 }
     /// ESP-IDF v5.4.3 esp32s3 i2s_reg.h: RX_SLAVE_MOD and TX_SLAVE_MOD are bit 3.
+    // ESP-IDF v5.4.2: I2S_RX_PDM_EN (I2S_RX_CONF bit 20).
+    pub fn rx_pdm(&self) -> bool { self.rx_conf & (1 << 20) != 0 }
     pub fn rx_slave(&self) -> bool { self.rx_conf & 8 != 0 }
     pub fn tx_slave(&self) -> bool { self.tx_conf & 8 != 0 }
     pub fn tx_running(&self) -> bool { self.tx_conf & (1 << 2) != 0 }

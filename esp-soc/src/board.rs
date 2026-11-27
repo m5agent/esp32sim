@@ -214,6 +214,12 @@ pub trait BoardModel {
     /// Observe routed LEDC PWM frequency and duty after the peripheral advances.
     fn observes_ledc(&self) -> bool { false }
     fn ledc_output_at(&mut self, _cycle: VirtualCycle, _pwm: &dyn Fn(u8) -> Option<(f64, u32)>) {}
+    /// Board mic clocked through the WS route in PDM RX mode.
+    fn pdm_mic(&self) -> bool { false }
+    /// Single-bit delta-sigma speaker on I2S data out.
+    fn i2s_buzzer_pin(&self) -> Option<u8> { None }
+    /// Observe a short, non-wrapping RMT transfer routed to this pin.
+    fn rmt_symbols(&mut self, _pin: u8, _tick_hz: u32, _symbols: &[u32]) {}
 }
 
 pub type Board = Box<dyn BoardModel>;

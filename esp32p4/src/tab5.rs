@@ -1,5 +1,6 @@
 //! M5Stack Tab5 display/touch and internal I²C wiring (M5GFX 0.3.0, board_detect/m5/esp32p4*).
-use crate::tab5_aux::{Ina226, Rx8130};
+use crate::tab5_aux::Ina226;
+use esp_soc::devices::rx8130::Rx8130;
 use esp_periph::i2c::{I2cDevice, Reg8Device};
 use esp_soc::board::{BoardEdge, I2sCodecs, SpiPins, VirtualCycle};
 use esp_soc::devices::es7210::Es7210;
@@ -109,7 +110,7 @@ impl Tab5 {
         let rails = Rc::new(RefCell::new(pi4io()));
         let charger = Rc::new(RefCell::new(pi4io()));
         charger.borrow_mut().regs[0x0f] = 1 << 6;
-        let rtc = Rc::new(RefCell::new(Rx8130::new()));
+        let rtc = Rc::new(RefCell::new(Rx8130::new(crate::periph::CPU_HZ)));
         let battery = Rc::new(RefCell::new(Ina226::new()));
         let mic = Rc::new(RefCell::new(Es7210::new()));
         // ES8388 control registers used by M5Unified 0.3.0's Tab5 speaker callback.

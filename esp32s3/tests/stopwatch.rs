@@ -72,11 +72,12 @@ fn factory_devices_and_active_low_button_inputs() {
         assert_eq!(board.name(), "stopwatch");
         let devices = board.i2c_devices();
         assert_eq!(devices.iter().map(|(bus, addr, _)| (*bus, *addr)).collect::<Vec<_>>(),
-            [(0, 0x6e), (0, 0x4f), (0, 0x15)]);
+            [(0, 0x6e), (0, 0x4f), (0, 0x15), (0, 0x32), (0, 0x68), (0, 0x18),
+             (1, 0x6e), (1, 0x4f), (1, 0x15), (1, 0x32), (1, 0x68), (1, 0x18)]);
         assert_eq!(board.named_pin("a"), Some(2));
         assert_eq!(board.named_pin("btn_b"), Some(1));
         assert_eq!(board.named_pin("missing"), None);
-        assert_eq!(board.input_levels(), [(38, false), (2, true), (1, true)]);
+        assert_eq!(board.input_levels(), [(38, false), (2, true), (1, true), (12, true), (13, true), (47, true), (48, true)]);
         assert_eq!(board.display().map(|(w, h, _, _)| (w, h)), Some((468, 466)));
     }
 }
@@ -135,7 +136,7 @@ fn reset_pulse_between_board_callbacks_clears_pixels_and_tear_state() {
 }
 
 #[test]
-fn rail_off_and_latched_pmic_shutdown_disable_panel_without_halting_cpu() {
+fn rail_off_and_latched_pmic_shutdown_disable_panel() {
     let mut board = StopWatch::new();
     let mut devices = board.i2c_devices();
     power_up(&mut devices);
@@ -154,7 +155,8 @@ fn rail_off_and_latched_pmic_shutdown_disable_panel_without_halting_cpu() {
     board.advance_to(10_000_000);
     assert_eq!(board.next_deadline(), None);
     assert!(board.display().unwrap().2.iter().all(|&p| p == 0));
-    assert_eq!(board.report(), "[stopwatch] power_off_requested=true");
+    assert!(board.report().starts_with("[stopwatch] power_off_requested=true"));
+    assert_eq!(board.soc_powered(), Some(false));
     assert_eq!(read(&mut devices, 0x6e, 0, 2), [0x50, 0x20]);
 }
 
