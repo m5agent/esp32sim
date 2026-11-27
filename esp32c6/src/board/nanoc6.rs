@@ -42,13 +42,11 @@ impl BoardModel for NanoC6 {
     fn observes_ledc(&self) -> bool { true }
 
     fn ledc_output_at(&mut self, cycle: u64, pwm: &dyn Fn(u8) -> Option<(f64, u32)>) {
-        if let Some((hz, duty)) = pwm(3) {
-            self.ir.drive(cycle, (30_000.0..=60_000.0).contains(&hz) && duty != 0);
-        }
+        self.ir.drive(cycle, pwm(3).is_some_and(|(hz, duty)|
+            (30_000.0..=60_000.0).contains(&hz) && duty != 0));
     }
 
-    fn gpio_waveform_at(&mut self, cycle: u64, routes: PinRoutes<'_>) {
-        if let Some(level) = routes.software_output(3) { self.ir.drive(cycle, level); }
+    fn gpio_waveform_at(&mut self, _cycle: u64, routes: PinRoutes<'_>) {
         self.powered = routes.software_output(19) == Some(true);
         if !self.powered {
             self.rgb = None;

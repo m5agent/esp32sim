@@ -459,7 +459,17 @@ impl SocBus {
     fn spi2_dma_tx(&mut self) {
         let Some(bits) = self.periph.spi2.dma_tx_pending else { return };
         let want = (bits as usize).div_ceil(8);
-        let Some(ch) = self.periph.gdma.gdma.out_channel_for(0) else { return };   // not started yet: the round's end retries
+        let gdma = &self.periph.gdma.gdma;
+        let Some(ch) = gdma.out_channel_for(0) else {
+            // A stopped channel with a descriptor can still be restarted.
+            // With no linked channel, signal the same failure as a bad descriptor
+            // so a subsequent FIFO transfer can start.
+            if !gdma.out.iter().any(|c| c.peri_sel == 0 && c.desc != 0) {
+                self.periph.spi2.fail_dma_tx();
+                self.irq_dirty = true;
+            }
+            return;
+        };
         // A malformed chain still completes the transfer with the bytes gathered before the
         // fault, as before the shared gather; GDMA additionally reports OUT_DSCR_ERR.
         let mut data = Vec::with_capacity(want);
@@ -776,6 +786,10 @@ impl SocBus {
         // optional devices. Preserve write/board/DMA invalidations and refresh only
         // when a source can have moved; time still advances on every round.
         self.irq_dirty |= esp_periph::Dispatch::tick(&mut self.periph, cycles as u64);
+        if self.board_ledc {
+            let p = &self.periph;
+            self.board.ledc_output_at(self.cycles, &|pin| p.ledc.output(&p.gpio, pin));
+        }
         if self.uart_busy { self.pace_uart_input(cycles); }
         if !self.periph.gpio.input_changes.is_empty() { self.pcnt_edges(); }
         if self.board_edges { self.irq_dirty |= esp_soc::gpio::drain_board_inputs(&mut *self.board, &mut self.periph.gpio, &mut self.gpio_events, self.cycles); }
@@ -944,6 +958,25 @@ mod parlio_dma_tests {
         assert!(frames.lock().unwrap().is_empty());
         bus.write32(0x6001_5008, (24 << 2) | (1 << 19) | (3 << 27)).unwrap();
         assert_eq!(*frames.lock().unwrap(), [(4, vec![false; 24])]);
+    }
+
+    #[test]
+    fn unbound_spi_dma_releases_usr_for_following_fifo_transfer() {
+        let mut bus = SocBus::new(1024, [0; 6]);
+        let spi = &mut bus.periph.spi2;
+        spi.write(0x30, 1 << 28);
+        spi.write(0x10, 1 << 27);
+        spi.write(0x1c, 7);
+        spi.write(0, 1 << 24);
+        bus.spi2_dma_tx();
+
+        let spi = &mut bus.periph.spi2;
+        assert_eq!(spi.read(0) & (1 << 24), 0);
+        assert_ne!(spi.int_raw & (1 << 12), 0);
+        spi.write(0x30, 0);
+        spi.write(0x98, 0x5a);
+        spi.write(0, 1 << 24);
+        assert_eq!(spi.take_transfer().unwrap().tx, [0x5a]);
     }
 
     #[test]

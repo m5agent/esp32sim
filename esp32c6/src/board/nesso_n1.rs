@@ -1,7 +1,7 @@
 //! Arduino Nesso N1 DK001 (TPX00227 schematic), M5GFX 0.3.0 C6 board data,
 //! and the M5Unified Nesso N1 power, GPIO expander, and IMU setup.
 
-use std::{cell::RefCell, net::UdpSocket, rc::Rc, sync::{Arc, atomic::Ordering}};
+use std::{cell::{Cell, RefCell}, net::UdpSocket, rc::Rc, sync::{Arc, atomic::Ordering}};
 use esp_periph::i2c::I2cDevice;
 use esp_soc::{BoardModel, board::{BoardEdge, SpiPins}, pins::PinRoutes};
 use esp_soc::devices::{
@@ -32,14 +32,23 @@ const H: usize = 240;
 type Shared<T> = Rc<RefCell<T>>;
 type Device = Shared<dyn I2cDevice>;
 
-struct I2cProxy(Device);
+struct I2cProxy {
+    device: Device,
+    expander_changed: Option<Rc<Cell<bool>>>,
+}
+
+impl I2cProxy {
+    fn changed(&self) {
+        if let Some(flag) = &self.expander_changed { flag.set(true); }
+    }
+}
 
 impl I2cDevice for I2cProxy {
     fn pins(&self) -> Option<(u8, u8)> { Some((SDA, SCL)) }
-    fn start(&mut self, read: bool) -> bool { self.0.borrow_mut().start(read) }
-    fn write(&mut self, byte: u8) -> bool { self.0.borrow_mut().write(byte) }
-    fn read(&mut self) -> u8 { self.0.borrow_mut().read() }
-    fn stop(&mut self) { self.0.borrow_mut().stop(); }
+    fn start(&mut self, read: bool) -> bool { self.device.borrow_mut().start(read) }
+    fn write(&mut self, byte: u8) -> bool { self.changed(); self.device.borrow_mut().write(byte) }
+    fn read(&mut self) -> u8 { self.changed(); self.device.borrow_mut().read() }
+    fn stop(&mut self) { self.device.borrow_mut().stop(); }
 }
 
 pub struct NessoN1 {
@@ -53,9 +62,11 @@ pub struct NessoN1 {
     soft: SoftI2c,
     i2c: Vec<(u8, Device)>,
     ioe: [Shared<Pi4ioe5v6408>; 2],
+    ioe_changed: Rc<Cell<bool>>,
     gauge: Shared<Bq27220>,
     charger: Shared<Aw32001>,
     touch: Ft5x06Points,
+    touch_down: bool,
     imu: Arc<ImuMotion>,
     cycle: u64,
     edges: Vec<BoardEdge>,
@@ -102,7 +113,7 @@ impl NessoN1 {
         Self {
             panel: DcsPanel::st7789(), panel_cmd: 0, panel_read: 0, panel_resets: 0,
             lcd_ready: false, backlight: false, version: 0, soft: SoftI2c::idle(),
-            i2c, ioe, gauge, charger, touch, imu, cycle: 0, edges: Vec::new(),
+            i2c, ioe, ioe_changed: Rc::new(Cell::new(true)), gauge, charger, touch, touch_down: false, imu, cycle: 0, edges: Vec::new(),
             levels: 1 << SYS_IRQ | 1 << SDA | 1 << SCL, leds: [[0; 3]], led_changes: 0,
             grove_power: false, grove_changes: 0, received_touches: 0,
             radio: Sx1262::default(), radio_ready: false, radio_selected: false,
@@ -126,7 +137,8 @@ impl NessoN1 {
         }
     }
 
-    fn sync(&mut self) {
+    fn sync_expanders(&mut self) {
+        self.ioe_changed.set(false);
         let (lcd_ready, backlight, led, grove) = {
             let ioe = self.ioe[1].borrow();
             let high = ioe.driven_high();
@@ -154,24 +166,27 @@ impl NessoN1 {
             let ioe = self.ioe[0].borrow();
             (ioe.irq(), ioe.driven_high() & (1 << 7) != 0)
         };
-        let touch = self.touch.lock().unwrap()[0].is_some();
-        self.drive(SYS_IRQ, !(irq || touch));
+        self.drive(SYS_IRQ, !(irq || self.touch_down));
         if self.radio_ready != radio_ready {
             self.radio.reset(self.cycle);
             self.radio_ready = radio_ready;
         }
-        self.drive(LORA_BUSY, !radio_ready || self.radio.busy(self.cycle));
-        self.drive(LORA_IRQ, radio_ready && self.radio.dio1());
+        self.sync_radio_pins();
+    }
+
+    fn sync_radio_pins(&mut self) {
+        self.drive(LORA_BUSY, !self.radio_ready || self.radio.busy(self.cycle));
+        self.drive(LORA_IRQ, self.radio_ready && self.radio.dio1());
     }
 
     fn poll_radio(&mut self) {
         // Same packet contract as the Cardputer ADV LoRa CAP, with no RF claims.
-        let mut header = [1; 11];
-        header[1..].copy_from_slice(&self.radio.channel());
         if let Some(payload) = self.radio.advance(self.cycle) {
             self.tx += 1;
             if let Some(peer) = &self.peer {
-                let mut packet = header.to_vec();
+                let mut packet = Vec::with_capacity(11 + payload.len());
+                packet.push(1);
+                packet.extend(self.radio.channel());
                 packet.extend(payload);
                 let _ = peer.send(&packet);
             }
@@ -179,10 +194,11 @@ impl NessoN1 {
         let Some(peer) = &self.peer else { return };
         if self.cycle < self.poll_at { return; }
         self.poll_at = self.cycle + 2_000 * US;
+        let channel = self.radio.channel();
         let mut data = [0; 267];
         for _ in 0..16 {
             let Ok(n) = peer.recv(&mut data) else { break };
-            if self.radio_ready && (11..267).contains(&n) && data[..11] == header
+            if self.radio_ready && (11..267).contains(&n) && data[0] == 1 && data[1..11] == channel
                 && self.radio.receive(&data[11..n]) {
                 self.rx += 1;
             }
@@ -204,7 +220,9 @@ impl BoardModel for NessoN1 {
     fn i2c_devices(&mut self) -> Vec<(u8, u8, Box<dyn I2cDevice>)> {
         // Bridge both controllers to the same external register state.
         self.i2c.iter().map(|(addr, device)| {
-            (0, *addr, Box::new(I2cProxy(device.clone())) as Box<dyn I2cDevice>)
+            let expander_changed = matches!(addr, 0x43 | 0x44).then(|| self.ioe_changed.clone());
+            let proxy = I2cProxy { device: device.clone(), expander_changed };
+            (0, *addr, Box::new(proxy) as Box<dyn I2cDevice>)
         }).collect()
     }
 
@@ -212,14 +230,12 @@ impl BoardModel for NessoN1 {
     fn observes_ledc(&self) -> bool { true }
 
     fn ledc_output_at(&mut self, cycle: u64, pwm: &dyn Fn(u8) -> Option<(f64, u32)>) {
-        if let Some((hz, duty)) = pwm(9) {
-            self.ir.drive(cycle, (30_000.0..=60_000.0).contains(&hz) && duty != 0);
-        }
+        self.ir.drive(cycle, pwm(9).is_some_and(|(hz, duty)|
+            (30_000.0..=60_000.0).contains(&hz) && duty != 0));
     }
 
     fn gpio_waveform_at(&mut self, cycle: u64, routes: PinRoutes<'_>) {
         self.cycle = cycle;
-        if let Some(level) = routes.software_output(9) { self.ir.drive(cycle, level); }
         self.panel.dc = routes.software_output(LCD_DC) == Some(true);
         let selected = routes.software_output(LORA_CS_PIN) == Some(false);
         if self.radio_selected && !selected { self.radio.deselect(cycle, US); }
@@ -233,6 +249,9 @@ impl BoardModel for NessoN1 {
                 SoftOp::Sync => return 0,
             };
             let Some((_, device)) = self.i2c.iter().find(|(a, _)| *a == addr) else { return 0; };
+            if matches!(addr, 0x43 | 0x44) && matches!(op, SoftOp::Write(..) | SoftOp::Read(_)) {
+                self.ioe_changed.set(true);
+            }
             let mut device = device.borrow_mut();
             match op {
                 SoftOp::Start(_, read) => u8::from(device.start(read)),
@@ -244,14 +263,15 @@ impl BoardModel for NessoN1 {
         });
         self.drive(SDA, sda && !self.soft.pull_low);
         self.drive(SCL, scl);
-        self.sync();
+        if self.ioe_changed.get() { self.sync_expanders(); }
     }
 
     fn advance_to(&mut self, cycle: u64) {
         self.cycle = cycle;
         self.imu.cycle.store(cycle, Ordering::Relaxed);
         self.poll_radio();
-        self.sync();
+        if self.ioe_changed.get() { self.sync_expanders(); }
+        self.sync_radio_pins();
     }
 
     fn next_deadline(&self) -> Option<u64> {
@@ -265,7 +285,7 @@ impl BoardModel for NessoN1 {
 
     fn spi_transfer_pins(&mut self, host: u8, pins: SpiPins, tx: &[u8], rx_len: usize) -> Vec<u8> {
         let mut rx = vec![0xff; rx_len];
-        self.sync();
+        if self.ioe_changed.get() { self.sync_expanders(); }
         if host != 2 || pins.sclk & SPI_SCK == 0 { return rx; }
         match pins.cs & (LCD_CS | LORA_CS) {
             LCD_CS if self.lcd_ready => {
@@ -303,8 +323,9 @@ impl BoardModel for NessoN1 {
     fn touch_at(&mut self, cycle: u64, x: u16, y: u16, down: bool) {
         self.cycle = cycle;
         self.touch.lock().unwrap()[0] = down.then_some((x.min(W as u16 - 1), y.min(H as u16 - 1)));
+        self.touch_down = down;
         self.received_touches += u64::from(down);
-        self.sync();
+        self.sync_expanders();
     }
 
     fn touch(&mut self, x: u16, y: u16, down: bool) { self.touch_at(self.cycle, x, y, down); }
@@ -331,7 +352,7 @@ impl BoardModel for NessoN1 {
             }
             _ => return false,
         }
-        self.sync();
+        self.sync_expanders();
         true
     }
 
