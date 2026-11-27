@@ -23,6 +23,7 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!("  --rom F               the chip's mask ROM ELF; default: $ESP32SIM_ROM_DIR, then ~/.espressif/tools/esp-rom-elfs/*/");
     eprintln!("                        (Espressif's, not in the tarball: tools/fetch-rom-elfs.sh DIR downloads all of them)");
     eprintln!("  --board NAME          board model (S3: atech14, waveshare-lcd4b, waveshare-amoled18-v2, waveshare-cam, stopwatch, m5stack-cores3, m5stack-cardputer-adv, none;");
+    eprintln!("                        m5stack-atoms3[-lite|-gc9107], m5stack-atoms3u, m5stack-atoms3r[-gc9107|-cam|-m12], m5stack-atom-echos3r;");
     eprintln!("                        C6: waveshare-c6-lcd147, xiao-esp32c6, m5stack-nanoc6, arduino-nesso-n1, none; P4: waveshare-p4-lcd35, m5stack-tab5, m5stack-tab5-st7123, none; S31: mosaico, none;");
     eprintln!("                        classic: ttgo-tdisplay, cyd, ulanzi-tc001, ai-thinker-cam, esp32dev, none)");
     eprintln!("  --flash-mb N, --psram-mb N   memory sizes (S3 default 8 / 2, Cardputer-ADV 8 / 0, C3, C6 and classic 4 / 0, P4 16 / 0, S31 2, mosaico 16 / 16)");
@@ -544,7 +545,7 @@ fn setup_s3(o: &Opts) -> esp32s3::Machine {
     m.bus.board = if let Some(cap) = &o.cap {
         Box::new(esp32s3::board::CardputerAdv::new().with_cap(cap, o.cap_peer).unwrap_or_else(|e| usage_error(&e)))
     } else {
-        esp32s3::board::make_board(&o.board).unwrap_or_else(|| { eprintln!("unknown board '{}' (atech14, waveshare-cam, waveshare-lcd4b, waveshare-amoled18-v2, stopwatch, m5stack-cores3, m5stack-cardputer-adv, none)", o.board); std::process::exit(2) })
+        esp32s3::board::make_board(&o.board).unwrap_or_else(|| { eprintln!("unknown board '{}' (atech14, waveshare-cam, waveshare-lcd4b, waveshare-amoled18-v2, stopwatch, m5stack-cores3, m5stack-cardputer-adv, m5stack-atoms3[-lite|-gc9107], m5stack-atoms3u, m5stack-atoms3r[-gc9107|-cam|-m12], m5stack-atom-echos3r, none)", o.board); std::process::exit(2) })
     };
     if o.measured_te {
         assert_eq!(m.bus.board.name(), "waveshare-amoled18-v2", "--measured-te requires the AMOLED V2 board");
@@ -564,7 +565,19 @@ fn setup_s3(o: &Opts) -> esp32s3::Machine {
     m.bus.periph.lcd_cam.frame_cycles = (esp32s3::periph::CPU_HZ as f64 / o.cam_fps) as u64;
     let stopwatch = matches!(m.bus.board.name(), "stopwatch" | "m5stack-cores3");
     let flash_mb = o.flash_mb.unwrap_or(if stopwatch { 16 } else { 8 });
-    let psram_mb = o.psram_mb.unwrap_or(match m.bus.board.name() { "m5stack-cardputer-adv" => 0, _ if stopwatch => 8, _ => 2 });
+    let atom_pico = matches!(m.bus.board.name(), "m5stack-atoms3r" | "m5stack-atoms3r-gc9107" |
+        "m5stack-atoms3r-cam" | "m5stack-atoms3r-m12" | "m5stack-atom-echos3r");
+    if atom_pico {
+        // ESP32-S3-PICO-1 is LGA56. ESP-IDF v5.4.2 esp32s3/efuse_reg.h:
+        // EFUSE_PKG_VERSION is RD_MAC_SPI_SYS_3[23:21].
+        let reg = m.bus.periph.efuse.ram.read(0x50);
+        m.bus.periph.efuse.ram.write(0x50, (reg & !(7 << 21)) | (1 << 21));
+    }
+    let psram_mb = o.psram_mb.unwrap_or(match m.bus.board.name() {
+        "m5stack-cardputer-adv" | "m5stack-atoms3" | "m5stack-atoms3-gc9107" | "m5stack-atoms3-lite" | "m5stack-atoms3u" => 0,
+        _ if stopwatch || atom_pico => 8,
+        _ => 2,
+    });
     if flash_mb != 8 { m.bus.set_flash_size(flash_mb << 20); }
     if psram_mb != 2 { m.bus.set_psram_size(psram_mb << 20).unwrap(); }
     if o.flash_octal { m.bus.set_flash_octal(true); }

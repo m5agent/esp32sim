@@ -205,6 +205,10 @@ One action per line, `<seconds> <cmd> [args]`; buttons/encoder are active low.
 real-time keep-up (push gaps, lag, audio delivered); `hw/wsaudio.py [port] [seconds]` listens to the
 UI's audio stream and reports sample counts/peak (how to check sound without listening).
 
+### AtomS3 board inputs
+
+See [AtomS3 family profiles](atom-s3.md) for board variants, input scripts and the documentation runner.
+
 ### CoreS3 power inputs
 
 On `m5stack-cores3`, `pwrkey <ms>` holds the AXP2101 power key for the specified
