@@ -200,7 +200,7 @@ impl I2c<$n> {
     // S3 i2c_reg.h:16-26, 932-1006 gives 9-bit periods and 7-bit wait-high.
     fn schedule(&mut self) {
         if usize::from(self.command_index) >= $n { self.remaining = None; return; }
-        // Classic uses APB directly and has 14-bit SCL and setup/hold periods.
+        // Classic uses APB directly and has 14-bit SCL periods.
         let mask = if $n == 16 { 0x3fff } else { 0x1ff };
         let cycles = match self.op() {
             1 | 3 if self.program.cmd[usize::from(self.command_index)] & 255 != 0 => {
@@ -210,7 +210,10 @@ impl I2c<$n> {
             }
             op @ (6 | 2) => {
                 let off = if op == 6 { 0x40 } else { 0x48 };
-                (self.regs.read(off) & mask) + (self.regs.read(off + 4) & mask) + 2
+                // Classic ESP32 i2c_reg.h:625–655. Only STOP_HOLD is 14 bits.
+                let setup_mask = if $n == 16 { 0x3ff } else { mask };
+                let hold_mask = if op == 2 { mask } else { setup_mask };
+                (self.regs.read(off) & hold_mask) + (self.regs.read(off + 4) & setup_mask) + 2
             }
             _ => 0,
         };
