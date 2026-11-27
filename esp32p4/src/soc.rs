@@ -329,6 +329,11 @@ impl esp_soc::SocBus for SocBus {
     fn service_stereo_audio(&self) -> Option<(&[i16], u32)> {
         Some((self.periph.i2s1.stereo_pcm.as_deref()?, self.periph.i2s1.sample_rate))
     }
+    fn restart_service_stereo_audio(&mut self) -> bool {
+        let Some(samples) = self.periph.i2s1.stereo_pcm.as_mut() else { return false };
+        samples.clear();
+        true
+    }
     /// `line` is the CPU interrupt line, CLIC ID - 16.
     fn irq_sources_of(&self, core: usize, line: u32) -> Vec<usize> { self.periph.sources_of(core, line + CLIC_EXT_OFFSET) }
     /// The card goes in the reference board's socket, on slot 0's IO MUX pins; firmware reaches

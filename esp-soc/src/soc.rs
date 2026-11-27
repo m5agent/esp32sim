@@ -254,6 +254,7 @@ pub trait SocBus: Bus {
     /// Captured audio so far (left channel) and its sample rate.
     fn audio(&self) -> (&[i16], u32);
     fn service_stereo_audio(&self) -> Option<(&[i16], u32)> { None }
+    fn restart_service_stereo_audio(&mut self) -> bool { false }
     fn camera_frames(&self) -> u64 { 0 }
     /// Peripheral source numbers routed to CPU interrupt `line` of `core` (for the end-of-run report).
     fn irq_sources_of(&self, core: usize, line: u32) -> Vec<usize>;

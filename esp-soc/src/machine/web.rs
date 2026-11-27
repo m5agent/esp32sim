@@ -228,6 +228,10 @@ impl<S: Soc> Machine<S> {
                 false
             }
             ("reset", []) => {
+                if self.bus.restart_service_stereo_audio() {
+                    self.ws.audio_sent = 0;
+                    w.send_text(r#"{"t":"stereo-reset"}"#);
+                }
                 self.button_reset = true;
                 self.bus.request_reset(esp_periph::RST_POWERON);
                 true

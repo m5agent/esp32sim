@@ -181,12 +181,20 @@ impl BoardModel for Tab5 {
     fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
         use esp_soc::json::Json;
         let rtc = self.rtc.borrow();
+        let contact = self.contacts.lock().unwrap()[0];
         vec![
             ("pi4ioe-43", self.rails.borrow().service_state()),
             ("pi4ioe-44", self.charger.borrow().service_state()),
             ("ina226", self.battery.borrow().service_state()),
             ("rtc", Json::object([("registers", Json::register_bytes(rtc.registers().iter().copied())), ("irq", Json::Bool(rtc.irq()))])),
             ("imu", self.imu.borrow().service_state()),
+            ("touch", Json::object([
+                ("controller", Json::Str(if self.panel == Panel::Ili9881c { "gt911" } else { "st7123" }.into())),
+                ("x", Json::Int(contact.x.into())),
+                ("y", Json::Int(contact.y.into())),
+                ("press_seen", Json::Bool(contact.seen)),
+                ("release_seen", Json::Bool(contact.seen_release)),
+            ])),
             ("panel/controller", Json::object([
                 ("scans", Json::counter(self.scans)), ("reads", Json::counter(self.reads)),
                 ("sleeping", Json::Bool(self.sleeping)), ("on", Json::Bool(self.on)),

@@ -4,11 +4,11 @@ use std::{cell::Cell, rc::Rc, sync::{Arc, Mutex}};
 
 /// Touch state shared between a board (UI) and its touch controller.
 #[derive(Default, Debug, Clone, Copy)]
-pub struct TouchState { pub down: bool, pub x: u16, pub y: u16, pub seen: bool, pub release_pending: bool }
+pub struct TouchState { pub down: bool, pub x: u16, pub y: u16, pub seen: bool, pub release_pending: bool, pub seen_release: bool }
 impl TouchState {
     pub fn update(&mut self, x: u16, y: u16, down: bool) {
         self.x = x; self.y = y;
-        if down { self.down = true; self.seen = false; self.release_pending = false; }
+        if down { self.down = true; self.seen = false; self.release_pending = false; self.seen_release = false; }
         else if self.seen { self.down = false; }
         else { self.release_pending = true; }
     }
@@ -16,6 +16,7 @@ impl TouchState {
     pub fn observe(&mut self) {
         if self.release_pending && self.seen { self.down = false; self.release_pending = false; }
         if self.down { self.seen = true; }
+        else if self.seen { self.seen_release = true; }
     }
 }
 
