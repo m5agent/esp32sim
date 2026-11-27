@@ -270,7 +270,7 @@ impl BoardModel for PaperSpi {
         self.display_deadline().into_iter()
             .chain(self.nfc.borrow().deadline())
             .chain(self.radio.as_ref().and_then(|r| r.chip.deadline(self.now.get())))
-            .chain(self.radio.as_ref().filter(|r| r.peer.is_some()).map(|r| r.next_poll))
+            .chain(self.radio.as_ref().filter(|r| r.active && r.peer.is_some()).map(|r| r.next_poll))
             .min()
     }
     fn set_imu_motion(&mut self, mode: u32) -> bool {
