@@ -217,6 +217,7 @@ impl esp_soc::SocBus for SocBus {
         p.efuse = old.efuse;
         p.misc.log_unknown = old.misc.log_unknown;
         p.usb.connected = old.usb.connected;
+        p.usb_otg.keep_msc_image(&mut old.usb_otg);
         if !cold { p.lp = old.lp; }
         p.lp.sw_reset = false;
         p.lp.reset_cause = cause;

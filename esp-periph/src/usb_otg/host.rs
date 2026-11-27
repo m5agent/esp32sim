@@ -41,8 +41,8 @@ impl Host {
     pub(super) fn attach(&mut self, gamepad: bool) {
         self.connect(UsbDevice { gamepad, ..UsbDevice::default() });
     }
-    pub(super) fn attach_msc(&mut self, full_speed: bool) {
-        self.connect(UsbDevice { msc: Some(Msc::default()), full_speed, ..UsbDevice::default() });
+    pub(super) fn attach_msc(&mut self, full_speed: bool, image: Option<std::sync::Arc<[u8]>>) {
+        self.connect(UsbDevice { msc: Some(Msc::new(image)), full_speed, ..UsbDevice::default() });
     }
     fn connect(&mut self, device: UsbDevice) {
         self.device = Some(device);
@@ -209,7 +209,8 @@ struct UsbDevice {
 impl UsbDevice {
     fn report_len(&self) -> usize { if self.gamepad { 3 } else { 8 } }
     fn bus_reset(&mut self) {
-        let msc = self.msc.is_some().then(Msc::default);
+        let mut msc = self.msc.take();
+        if let Some(device) = &mut msc { device.reset(); }
         *self = Self { msc, gamepad: self.gamepad, full_speed: self.full_speed, ..Self::default() };
     }
     fn input(&mut self, ep: u8, len: usize) -> Result<Vec<u8>, u32> {
@@ -255,7 +256,7 @@ impl UsbDevice {
             (0x80, 8, 0) => self.response.push(self.configuration),
             (0x80..=0x82, 0, 0) => self.response.extend([0,0]),
             (0xa1, 0xfe, 0) if self.msc.is_some() => self.response.push(0), // GET_MAX_LUN
-            (0x21, 0xff, 0) if self.msc.is_some() => self.msc = Some(Msc::default()),
+            (0x21, 0xff, 0) if self.msc.is_some() => self.msc.as_mut().unwrap().reset(),
             (0x02, 1, 0) | (0x21, 10 | 11, _) => {}
             _ => return Err(1 << 3),
         }
