@@ -23,7 +23,7 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!("  --rom F               the chip's mask ROM ELF; default: $ESP32SIM_ROM_DIR, then ~/.espressif/tools/esp-rom-elfs/*/");
     eprintln!("                        (Espressif's, not in the tarball: tools/fetch-rom-elfs.sh DIR downloads all of them)");
     eprintln!("  --board NAME          board model (S3: atech14, waveshare-lcd4b, waveshare-amoled18-v2, waveshare-cam, stopwatch, m5stack-cores3, m5stack-cardputer-adv, none;");
-    eprintln!("                        C6: waveshare-c6-lcd147, xiao-esp32c6, none; P4: waveshare-p4-lcd35, m5stack-tab5, m5stack-tab5-st7123, none; S31: mosaico, none;");
+    eprintln!("                        C6: waveshare-c6-lcd147, xiao-esp32c6, m5stack-nanoc6, arduino-nesso-n1, none; P4: waveshare-p4-lcd35, m5stack-tab5, m5stack-tab5-st7123, none; S31: mosaico, none;");
     eprintln!("                        classic: ttgo-tdisplay, cyd, ulanzi-tc001, ai-thinker-cam, esp32dev, none)");
     eprintln!("  --flash-mb N, --psram-mb N   memory sizes (S3 default 8 / 2, Cardputer-ADV 8 / 0, C3, C6 and classic 4 / 0, P4 16 / 0, S31 2, mosaico 16 / 16)");
     eprintln!("  --max-seconds S       stop after S emulated seconds (always give one: the run returns)");
@@ -360,7 +360,7 @@ pub fn run_cli(default_chip: &str) {
     let mut o = parse(&args, default_chip);
     if o.cam_stream.is_some() != o.cam_size.is_some() { usage_error("--cam-stream and --cam-size must be supplied together"); }
     validate_timing(&o).unwrap_or_else(|e| usage_error(&e));
-    if o.cap_peer.is_some() && o.cap.is_none() { usage_error("--cap-peer requires --cap"); }
+    if o.cap_peer.is_some() && o.cap.is_none() && !matches!(o.chip.as_str(), "c6" | "esp32c6") { usage_error("--cap-peer requires --cap"); }
     if o.cap.is_some() && (!matches!(o.chip.as_str(), "s3" | "esp32s3") ||
         !matches!(o.board.as_str(), "cardputer-adv" | "m5stack-cardputer-adv") || o.cooja || o.coproc.is_some()) {
         usage_error("--cap requires a standalone Cardputer-ADV session");
@@ -722,11 +722,28 @@ fn setup_esp32(o: &Opts) -> esp32::Machine {
 }
 
 fn setup_c6(o: &Opts) -> esp32c6::Machine {
-    let mut m = esp32c6::machine(o.mac.unwrap_or([0xdc, 0x1e, 0xd5, 0x6e, 0x8c, 0xdc]), o.flash_mb.unwrap_or(4) << 20);
-    m.bus.set_flash_size(o.flash_mb.unwrap_or(4) << 20);   // the JEDEC capacity follows the size
+    let name = if o.board == "atech14" { "none" } else { o.board.as_str() };
+    let flash_mb = o.flash_mb.unwrap_or(if name == "arduino-nesso-n1" { 16 } else { 4 });
+    let mac = o.mac.unwrap_or([0xdc, 0x1e, 0xd5, 0x6e, 0x8c, 0xdc]);
+    let mut m = esp32c6::machine(mac, flash_mb << 20);
+    if name == "arduino-nesso-n1" {
+        // Nesso uses the QFN40 C6 and an external SPI flash (M5GFX package gate).
+        let mut efuse = esp32c6::periph::efuse_c6(mac, 0, 1, 0, 0, 3);
+        efuse.write(0x54, 0);
+        m.bus.periph.efuse = efuse;
+    }
+    m.bus.set_flash_size(flash_mb << 20);   // the JEDEC capacity follows the size
     if !o.debug.is_empty() { let mut f = esp_soc::DebugFlags::from_env(); for d in &o.debug { f.parse(d); } m.set_debug(&f); }
-    let name = if o.board == "atech14" { "none" } else { o.board.as_str() };   // the S3 default means "bare module" here
-    match esp32c6::board::make_board(name) { Some(b) => m.bus.board = b, None => { eprintln!("--board {}: none, waveshare-c6-lcd147 or xiao-esp32c6 on the C6", name); std::process::exit(2) } }
+    m.bus.board = if let Some((local, remote)) = o.cap_peer {
+        if name != "arduino-nesso-n1" || o.cap.is_some() { usage_error("C6 --cap-peer needs arduino-nesso-n1 and its built-in LoRa radio"); }
+        let mut board = esp32c6::board::nesso_n1::NessoN1::new();
+        board.connect_lora(local, remote).unwrap_or_else(|e| usage_error(&format!("LoRa peer: {e}")));
+        Box::new(board)
+    } else {
+        esp32c6::board::make_board(name).unwrap_or_else(|| usage_error(&format!(
+            "--board {name}: none, waveshare-c6-lcd147, xiao-esp32c6, m5stack-nanoc6 or arduino-nesso-n1 on the C6")))
+    };
+    set_imu_motion(m.bus.board.as_mut(), o);
     m.bus.attach_board_devices();
     if !o.wifi.is_empty() {
         let net_log = m.bus.debug.has("net");

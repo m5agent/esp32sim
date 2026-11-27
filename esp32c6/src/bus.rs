@@ -91,16 +91,18 @@ pub struct SocBus {
     pub gpio_events: Option<Vec<(u64, u8, bool)>>,
     pub debug: esp_soc::DebugFlags,
     board_edges: bool,
+    board_ledc: bool,
 }
 
 impl SocBus {
     /// Attach controller devices and restore inputs driven by the persistent board.
     pub fn attach_board_devices(&mut self) {
-        if self.board.uses_gpio_waveform() {
+        if self.board.observes_gpio_pads() {
             self.board.gpio_waveform_at(self.cycles, esp_soc::pins::ChipPins::C6.routes(&self.periph.gpio, &self.periph.io_mux));
         }
         self.uart_pins = self.board.uses_uart_pins();
         self.board_edges = self.board.uses_gpio_edges();
+        self.board_ledc = self.board.observes_ledc();
         for (bus, address, device) in self.board.i2c_devices() {
             if bus == 0 { self.periph.i2c.attach(address, device); }
         }
@@ -119,7 +121,7 @@ impl SocBus {
             flash: vec![0xff; flash_size],
             mmu: [0; MMU_ENTRIES], mmu_index: 0, mmu_power_ctrl: 0,
             periph: Peripherals::new(mac), code_ver: vec![CODE_EPOCH.fetch_add(1 << 20, std::sync::atomic::Ordering::Relaxed); CODE_PAGES], board: Box::new(esp_soc::NoBoard), uart_pins: false,
-            cycles: 0, last_fault: None, irq_dirty: true, ena_latency: Default::default(), uart_busy: false, gpio_events: None, debug: Default::default(), board_edges: false,
+            cycles: 0, last_fault: None, irq_dirty: true, ena_latency: Default::default(), uart_busy: false, gpio_events: None, debug: Default::default(), board_edges: false, board_ledc: false,
         }
     }
 
@@ -260,9 +262,17 @@ impl SocBus {
         let old_ena = ena_port.map_or(0, |i| self.periph.uart[i].int_ena);
         let old_drive = (self.periph.gpio.enable, self.periph.gpio.out);
         self.periph.write32(a, v);
-        if matches!(a & !0xfff, 0x6009_0000 | 0x6009_1000) && self.board.uses_gpio_waveform() {
+        if matches!(a & !0xfff, 0x6009_0000 | 0x6009_1000) && self.board.observes_gpio_pads() {
             self.board.gpio_waveform_at(self.cycles, esp_soc::pins::ChipPins::C6.routes(&self.periph.gpio, &self.periph.io_mux));
+            if self.board_edges {
+                self.irq_dirty |= esp_soc::gpio::drain_board_inputs(&mut *self.board, &mut self.periph.gpio, &mut self.gpio_events, self.cycles);
+            }
         }
+        if self.board_ledc && matches!(a & !0xfff, 0x6000_7000 | 0x6009_0000 | 0x6009_1000 | 0x6009_6000) {
+            let p = &self.periph;
+            self.board.ledc_output_at(self.cycles, &|pin| p.ledc.output(&p.gpio, pin));
+        }
+        if matches!(a, 0x6009_6070 | 0x6009_6074) { self.i2s_tx_clock(); }
         if self.periph.sha.dma_pending { self.sha_dma_write(a); }
         if matches!(a >> 12, 0x60015 | 0x60080) || a == PERIPH_BASE + 0x960ac { self.parlio_dma_write(a); }
         if a >> 12 == 0x60017 { self.sdio_slc_write(); }
@@ -626,6 +636,88 @@ impl SocBus {
         self.periph.gdma.gdma.inp[ch] = channel;
     }
 
+    /// ESP-IDF v5.4.2 C6 pcr_reg.h: I2S TX clock words 0x70/0x74.
+    /// gdma_channel.h: I2S0 is AHB-GDMA trigger 3. The Nesso piezo is
+    /// wired to I2SO_SD (gpio_sig_map.h signal 15) on GPIO11.
+    pub(crate) fn i2s_tx_clock(&mut self) {
+        let conf = self.periph.pcr.read(0x70);
+        let div = self.periph.pcr.read(0x74);
+        let i2s = &mut self.periph.optional.i2s0;
+        i2s.write(0x3c, div);
+        i2s.write(0x34, ((conf >> 12) & 0xff) | (((conf >> 20) & 3) << 27)
+                  | (((conf >> 22) & 1) << 26));
+    }
+
+    fn i2s_tx_step(&mut self, cycles: u64) {
+        let Some(index) = self.periph.gdma.gdma.out_channel_for(3) else { return; };
+        let i2s = &mut self.periph.optional.i2s0;
+        if i2s.derive_rate().is_none() { return; }
+        let width = i2s.bytes_per_frame as usize;
+        let frames = i2s.frames_due(cycles) as usize;
+        if width == 0 || frames == 0 { return; }
+
+        let connected = self.board.name() == "arduino-nesso-n1"
+            && esp_soc::pins::ChipPins::C6.routes(&self.periph.gpio, &self.periph.io_mux)
+                .matrix_output(11, 15);
+        let old = self.periph.gdma.gdma.out[index];
+        let mut channel = old;
+        let mut bytes = Vec::new();
+        let mut walk = esp_periph::gdma::DescriptorWalk::new(esp_periph::gdma::GDMA_DESCRIPTOR_STEP_BUDGET);
+        let limit = frames * width;
+        while channel.desc != 0 && bytes.len() < limit {
+            let desc = channel.desc;
+            let read = walk.read_with(desc, |addr| self.sram_bytes(addr, 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).ok_or(Fault::Unmapped));
+            let Ok((control, d)) = read else {
+                if !matches!(read, Err(esp_periph::gdma::DmaDescriptorFault::StepBudgetExceeded { .. })) {
+                    channel.running = false;
+                    channel.int_raw |= 1 << 2;
+                }
+                break;
+            };
+            if d.length > d.size || (channel.conf1 & (1 << 12) != 0 && !d.owner_dma) {
+                channel.running = false;
+                channel.int_raw |= 1 << 2;
+                break;
+            }
+            let take = (d.length.saturating_sub(channel.buf_pos) as usize).min(limit - bytes.len());
+            if take != 0 {
+                let Some(data) = self.sram_bytes(d.buf.wrapping_add(channel.buf_pos), take) else {
+                    channel.running = false;
+                    channel.int_raw |= 1 << 2;
+                    break;
+                };
+                bytes.extend_from_slice(data);
+                channel.buf_pos += take as u32;
+            }
+            if channel.buf_pos == d.length {
+                if channel.conf0 & (1 << 2) != 0 {
+                    self.sram_store(desc, &(control & !(1 << 31)).to_le_bytes());
+                }
+                channel.int_raw |= 1;
+                if d.eof {
+                    channel.int_raw |= 1 << 1;
+                    channel.eof_desc = desc;
+                    if d.next == 0 { channel.int_raw |= 1 << 3; }
+                }
+                channel.running = d.next != 0;
+                channel.desc = d.next;
+                channel.buf_pos = 0;
+            }
+        }
+        self.periph.gdma.gdma.out[index] = channel;
+        self.irq_dirty |= channel.int_raw != old.int_raw;
+        if connected {
+            // M5Unified drives the piezo with one stereo frame of sigma-delta
+            // bits per sample. Recover baseband from the bit density.
+            let i2s = &mut self.periph.optional.i2s0;
+            i2s.frames_out += (bytes.len() / width) as u64;
+            i2s.pcm.extend(bytes.chunks_exact(width).map(|frame| {
+                let ones = frame.iter().map(|byte| byte.count_ones()).sum::<u32>() as i32;
+                (ones * 65534 / (width as i32 * 8) - 32767) as i16
+            }));
+        }
+    }
+
     /// PCM for one RX interval: pin-routed sources when a bank is attached, else controller input.
     /// Kept out of line so the RX DMA pump keeps the EX214 call shape.
     #[inline(never)]
@@ -641,6 +733,7 @@ impl SocBus {
     fn pending_work(&mut self, cycles: u32) {
         if self.periph.spi_exec { self.run_spi(); }
         if self.periph.optional.i2s0.rx_running() { self.i2s_rx_step(u64::from(cycles)); }
+        if self.periph.optional.i2s0.tx_running() { self.i2s_tx_step(u64::from(cycles)); }
     }
 
     /// Each UART's configured baud rate, for pacing queued host input.

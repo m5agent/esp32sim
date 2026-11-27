@@ -76,8 +76,8 @@ impl esp_soc::SocBus for SocBus {
         let deadline = timer.into_iter().chain(board).min();
         // Only while UART input is queued or an INT_ENA latency is pending (one flag test otherwise).
         let deadline = if self.uart_busy { deadline.into_iter().chain(self.uart_deadline()).min() } else { deadline };
-        // work_pending is false on idle rounds; it covers both SPI and RX.
-        if self.periph.work_pending && self.periph.optional.i2s0.rx_running() { Some(deadline.unwrap_or(u64::MAX).min(256)) } else { deadline }
+        // work_pending is false on idle rounds; it covers SPI and I2S.
+        if self.periph.work_pending && self.periph.optional.i2s0.active() { Some(deadline.unwrap_or(u64::MAX).min(256)) } else { deadline }
     }
     fn irq_dirty(&mut self) -> &mut bool { &mut self.irq_dirty }
     fn refresh_irq(&mut self) -> bool { self.periph.refresh_lines(); true }
@@ -224,7 +224,10 @@ impl esp_soc::SocBus for SocBus {
         self.flush_ticks();
         Some(esp_soc::soc::attach_pcm_sources(self.periph.optional.i2s0.pcm_bank(), self.cycles, periph::CPU_HZ))
     }
-    fn audio(&self) -> (&[i16], u32) { (&[], 44100) }
+    fn audio(&self) -> (&[i16], u32) {
+        let i2s = &self.periph.optional.i2s0;
+        (&i2s.pcm, i2s.sample_rate)
+    }
     fn irq_sources_of(&self, _core: usize, line: u32) -> Vec<usize> { (0..src::COUNT).filter(|&s| self.periph.intmtx.map[s] == line).collect() }
     fn report(&self) -> String {
         let mut r = Vec::new();

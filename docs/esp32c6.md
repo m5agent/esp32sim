@@ -35,6 +35,42 @@ The mask ROM ELF is picked up from `~/.espressif/tools/esp-rom-elfs/*/esp32c6_re
 (shipped with ESP-IDF); override with `--rom`. Flags mirror the C3 binary — see `--help`;
 `esp32sim --chip c6` is the same thing.
 
+## M5Stack C6 boards
+
+`--board m5stack-nanoc6` defaults to 4 MiB flash. The active-low input names
+`btnA`, `button` and `boot` map to GPIO9. The status LED is GPIO7 and the
+SK6812-compatible pixel takes RMT data from GPIO20 when GPIO19 enables its rail.
+Use `--console usb` for Arduino USB CDC and UIFlow2 and `--console uart0` for
+the boot console or UART0 applications.
+
+`--board arduino-nesso-n1` defaults to 16 MiB flash with the C6 QFN40 package
+identity. The built-in ST7789, FT6336-family touch, BMI270, expanders and power
+devices use the board's SPI and I²C routes. For scripted input, use
+`<seconds> key A down` and `<seconds> key A up` (or `B`), and
+`<seconds> touch X Y 1` for a touch in the 135×240 glass coordinates.
+`--imu-motion 1` selects scripted motion. A board script line
+`<seconds> battery MV MA SOC VIN` sets gauge inputs in millivolts, signed
+milliamps and integer percent, and sets VIN present (`1`) or absent (`0`).
+`--cap-peer IN:OUT` connects the built-in SX1262 to another process via
+loopback UDP using the Cardputer-ADV CAP packet format.
+
+The docs runners take prebuilt merged images arranged as
+`<firmware-dir>/<case>/sketch.merged.bin` and emit a hash-bound receipt.
+Use a fresh output directory for each run.
+
+```sh
+python3 tools/run-nanoc6-docs.py BINARY C6_ROM NANO_FIRMWARE_DIR OUT --commit COMMIT
+python3 tools/check-nanoc6.py OUT PEER_EVIDENCE_ROOT
+python3 tools/run-nesso-n1-docs.py BINARY C6_ROM NESSO_FIRMWARE_DIR OUT --commit COMMIT
+python3 tools/check-nesso-n1.py OUT PEER_EVIDENCE_ROOT
+```
+
+`run-nanoc6-peers.py` drives the existing `--cooja` endpoint and writes
+timed console and MAC frame traces. The checker reads evidence subdirectories
+`thread-peer`, `thread-scan`, `zigbee-peer`, `zigbee-temp` and `zigbee-scan`.
+`run-nesso-n1-lora.py` drives the two RadioLib sketches and accepts
+`--isolated` for the disconnected control. These are virtual-device checks.
+
 ## Verified against real silicon
 
 The Waveshare board (chip rev v0.1, efuse block v0.3, MAC `dc:1e:d5:6e:8c:dc`; its efuse summary

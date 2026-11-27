@@ -10,6 +10,9 @@
 //! - `NoBoard` — a bare module: nothing on the pins (any ESP32-C6 firmware, console only)
 pub use esp_soc::board::{Board, BoardEdge, BoardModel, NoBoard, VirtualCycle};
 
+mod ir;
+mod nanoc6;
+pub mod nesso_n1;
 pub mod waveshare_lcd147;
 pub mod xiao;
 
@@ -22,6 +25,8 @@ pub use xiao::XiaoEsp32C6;
 /// Board by name: `none` (a bare module), `waveshare-c6-lcd147` or `xiao-esp32c6`.
 pub fn make_board(name: &str) -> Option<Board> {
     match name {
+        "m5stack-nanoc6" => Some(Box::new(nanoc6::NanoC6::default())),
+        "arduino-nesso-n1" => Some(Box::new(nesso_n1::NessoN1::new())),
         "none" | "bare" => Some(Box::new(NoBoard)),
         "waveshare-c6-lcd147" | "c6-lcd147" | "lcd147" => Some(Box::new(WaveshareC6Lcd147::new())),
         "xiao-esp32c6" | "xiao-c6" | "xiao" => Some(Box::new(XiaoEsp32C6::new())),
@@ -33,7 +38,7 @@ pub fn make_board(name: &str) -> Option<Board> {
 mod tests {
     #[test]
     fn the_c6_boards_are_named_and_the_others_are_not() {
-        for name in ["none", "bare", "waveshare-c6-lcd147", "c6-lcd147", "lcd147", "xiao-esp32c6", "xiao-c6", "xiao"] {
+        for name in ["m5stack-nanoc6", "arduino-nesso-n1", "none", "bare", "waveshare-c6-lcd147", "c6-lcd147", "lcd147", "xiao-esp32c6", "xiao-c6", "xiao"] {
             assert!(super::make_board(name).is_some(), "{name}");
         }
         for name in ["atech14", "waveshare-lcd4b", "ttgo-tdisplay", "waveshare-cam"] {
