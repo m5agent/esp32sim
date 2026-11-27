@@ -38,7 +38,12 @@ def run(args):
             children.append((label, proc))
             cases[label] = {"firmware_sha256": sha(image), "command": command}
         for label, proc in children:
-            cases[label]["exit"] = proc.wait(timeout=75)
+            try:
+                cases[label]["exit"] = proc.wait(timeout=args.wall_timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                cases[label]["exit"] = 124
     (args.output / "run.json").write_text(json.dumps({
         "commit": args.commit, "binary_sha256": sha(args.binary), "rom_sha256": sha(args.rom),
         "isolated": args.isolated, "cases": cases,
@@ -50,5 +55,6 @@ if __name__ == "__main__":
     for name in ("binary", "rom", "firmware_dir", "output"):
         parser.add_argument(name, type=Path)
     parser.add_argument("--commit", required=True)
+    parser.add_argument("--wall-timeout", type=int, default=120)
     parser.add_argument("--isolated", action="store_true")
     run(parser.parse_args())

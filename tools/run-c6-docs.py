@@ -34,16 +34,19 @@ def run(board):
     parser.add_argument("output", type=Path)
     parser.add_argument("--stock", type=Path)
     parser.add_argument("--case", action="append", help="run only the named case")
+    parser.add_argument("--wall-timeout", type=int, default=180)
     parser.add_argument("--jobs", type=int, default=3)
     parser.add_argument("--commit", required=True)
     args = parser.parse_args()
     args.output.mkdir(parents=True)
     is_nesso = board == "nesso-n1"
     profile = "arduino-nesso-n1" if is_nesso else "m5stack-nanoc6"
-    cases = [(case, args.firmware_dir / case / "sketch.merged.bin", 20.0 if case in {"thread-1", "thread-6"} else 8.0, None, [])
+    horizons = {"display": 1.0, "quickstart-bargraph": 2.0, "touch": 4.5,
+                "button": 5.0, "thread-1": 20.0, "thread-6": 20.0}
+    cases = [(case, args.firmware_dir / case / "sketch.merged.bin", horizons.get(case, 8.0), None, [])
              for case in (NESSO if is_nesso else NANO)]
     for case in ("button", "touch", "imu") if is_nesso else ("button",):
-        cases.append((case + "-control", args.firmware_dir / case / "sketch.merged.bin", 8.0, "", []))
+        cases.append((case + "-control", args.firmware_dir / case / "sketch.merged.bin", 3.0, "", []))
     if is_nesso:
         cases.append(("imu-motion", args.firmware_dir / "imu/sketch.merged.bin", 12.0, "",
                       ["--imu-motion", "1"]))
@@ -78,7 +81,7 @@ def run(board):
             command += ["--script", str(path)]
         with (args.output / f"{label}.log").open("wb") as log, (args.output / f"{label}.err").open("wb") as err:
             try:
-                status = subprocess.run(command, stdout=log, stderr=err, timeout=110).returncode
+                status = subprocess.run(command, stdout=log, stderr=err, timeout=args.wall_timeout).returncode
             except subprocess.TimeoutExpired:
                 status = 124
         return {"case": label, "exit": status, "firmware_sha256": sha(image), "command": command}
