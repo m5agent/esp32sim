@@ -102,6 +102,9 @@ pub(crate) struct Core {
     ports: Vec<(u8, Port)>,
     sd: Option<SpiSdCard>,
     sd_transactions: u64,
+    sd_bit: u8,
+    sd_shift: u8,
+    sd_clock: bool,
     panel: DcsPanel,
     spi: SpiBitBang,
     cs: bool,
@@ -133,7 +136,7 @@ impl Core {
         let rtc = (!kind.basic()).then(|| Rc::new(RefCell::new(Bm8563::new(CPU_HZ))));
         let imu: Option<Shared<Mpu6886>> = (!kind.basic()).then(Rc::default);
         let points = Ft5x06Points::default();
-        let touch = (!kind.basic()).then(|| Rc::new(RefCell::new(Ft5x06::new(points.clone()))));
+        let touch = (!kind.basic()).then(|| Rc::new(RefCell::new(Ft5x06::ft6336u(points.clone()))));
         let ina: Option<Shared<Ina3221>> = (kind == CoreKind::Core2).then(Rc::default);
         let mut ports = vec![power.port()];
         if let Some(dev) = &ina { ports.push((ina3221::ADDRESS, Port(dev.clone()))); }
@@ -142,7 +145,7 @@ impl Core {
         if let Some(dev) = &rtc { ports.push((BM8563_ADDRESS, Port(dev.clone()))); }
         let rails = power.rails();
         Self { kind, power, rtc, ina, imu, points, touch, wire: SoftI2c::idle(), ports,
-               sd: None, sd_transactions: 0, panel: DcsPanel::new(320, 240), spi: SpiBitBang::new(CLK, DATA, kind.cs()),
+               sd: None, sd_transactions: 0, sd_bit: 0, sd_shift: 0, sd_clock: false, panel: DcsPanel::new(320, 240), spi: SpiBitBang::new(CLK, DATA, kind.cs()),
                cs: true, clk: false, command: 0, read_at: 0, hardware_read_bits: 0, id_probe: 0, lcd_reset: rails.reset,
                display_version: 0, light: false, motor_changes: 0, motor_min: 0, motor_max: 0, rgb: Ws2812Chain::new(10),
                cycle: 0, signals: [None; 40], edges: Vec::new(), release: Vec::new(), rails }
@@ -211,6 +214,40 @@ impl Core {
         self.clk = clk;
     }
 
+    fn nanoseconds(&self) -> u64 { self.cycle.saturating_mul(1000) / (CPU_HZ / 1_000_000) }
+
+    fn soft_sd(&mut self, routes: &PinRoutes<'_>) {
+        let now_ns = self.nanoseconds();
+        let Some(card) = &mut self.sd else { return; };
+        let clock = routes.software_pad_output(CLK);
+        let cs = routes.software_pad_output(SD_CS);
+        let mut reply = Some(true);
+        if cs != Some(false) {
+            card.deselect();
+            self.sd_bit = 0;
+            self.sd_shift = 0;
+        } else if self.rails.logic {
+            // Toggling the same pads from GPIO performs the power-up SPI
+            // commands in M5GFX prepare.inl before the hardware host is set up.
+            if clock == Some(true) && !self.sd_clock {
+                let mosi = routes.software_pad_output(DATA) != Some(false);
+                self.sd_shift = (self.sd_shift << 1) | u8::from(mosi);
+                self.sd_bit += 1;
+                if self.sd_bit == 8 {
+                    card.exchange(self.sd_shift, now_ns);
+                    self.sd_transactions += 1;
+                    self.sd_bit = 0;
+                    self.sd_shift = 0;
+                }
+            }
+            if clock.is_some() {
+                reply = Some(card.pending_miso(now_ns) & (0x80 >> self.sd_bit) != 0);
+            }
+        }
+        self.sd_clock = clock == Some(true);
+        self.drive(self.kind.miso(), reply);
+    }
+
     fn soft_i2c(&mut self, routes: &PinRoutes<'_>) {
         let (sda, scl) = (routes.software_pad_output(SDA), routes.software_pad_output(SCL));
         let scl_high = scl != Some(false);
@@ -261,9 +298,7 @@ impl BoardModel for Core {
         self.cycle = cycle;
         self.soft_spi(&routes);
         self.soft_i2c(&routes);
-        if routes.software_pad_output(SD_CS) != Some(false) {
-            if let Some(sd) = &mut self.sd { sd.deselect(); }
-        }
+        self.soft_sd(&routes);
         if self.kind.basic() && routes.software_pad_output(32) == Some(true) && !self.light {
             self.light = true;
             self.display_version += 1;
@@ -314,12 +349,13 @@ impl BoardModel for Core {
         if pins.sclk & socket.sclk == 0 { return vec![0xff; len]; }
         let lcd = pins.cs & (1 << self.kind.cs()) != 0;
         let mut sd_reply = None;
+        let now_ns = self.nanoseconds();
         if let Some(sd) = &mut self.sd {
             if self.rails.logic {
                 if pins.cs & socket.cs != 0 { self.sd_transactions += 1; }
                 // Clock both selected devices, but model MISO contention as no valid data.
                 let sd_pins = if lcd { SpiPins { miso: None, ..pins } } else { pins };
-                sd_reply = sd_pins.transfer_sd(socket, sd, tx, len, self.cycle.saturating_mul(1000) / (CPU_HZ / 1_000_000));
+                sd_reply = sd_pins.transfer_sd(socket, sd, tx, len, now_ns);
             }
         }
         if !lcd { return sd_reply.unwrap_or_else(|| vec![0xff; len]); }
