@@ -9,7 +9,10 @@ impl<S: Soc> Machine<S> {
                      "state-get" | "state-set" | "checkpoint" | "controller-report" | "sd-media" | "network-fault") { return false; }
         let Some(id) = field("id").and_then(|value| value.parse::<u32>().ok()) else { return true };
         let args = field("args").unwrap_or_default();
-        let args: Vec<_> = args.split_ascii_whitespace().collect();
+        let mut args: Vec<_> = args.split_ascii_whitespace().collect();
+        if matches!(op.as_str(), "state-get" | "state-set") && args.first() == Some(&"/machine/m5-lcd-cam") {
+            args[0] = "/board/camera";
+        }
         self.bus.flush_ticks();
         let value = match (op.as_str(), args.as_slice()) {
             ("flash-snapshot" | "flash-stop", []) => self.service_flash_snapshot().ok().map(|bytes| {
@@ -36,6 +39,9 @@ impl<S: Soc> Machine<S> {
             }
             ("state-set", [path, "input_drive", level]) => {
                 self.service_gpio_drive(path, level).then_some(Json::Null)
+            }
+            ("state-set", ["/board/camera", "auto-increment", enabled @ ("true" | "false")]) => {
+                self.bus.board().set_camera_auto_increment(*enabled == "true").then_some(Json::Null)
             }
             ("state-set", ["/board/imu", "sample", sample @ ..]) if sample.len() == 6 => {
                 self.bus.board_command("imu", sample).then_some(Json::Null)

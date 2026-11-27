@@ -51,6 +51,7 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!("  --trace-fn PREFIX, --break PC, --watch ADDR, --peek ADDR,N, --profile, --vcd F, --debug AREAS, --no-jit");
     eprintln!("                        debugging; --no-jit is the oracle when a result looks wrong");
     eprintln!("  --adc PIN, --adc-raw PIN=N   last ADC sample at exit / a 12-bit count into that pad");
+    eprintln!("  --grove tmp105       attach the 0x48 test sensor on Atom Echo or Basic v2.7");
     eprintln!("  --sd IMG, --sd-rw IMG an SD card, copy-on-write / write-through;");
     eprintln!("                        --sd-prg-us N, --sd-serial HEX for its programming time and serial");
     eprintln!("  --usb-host F          (P4, S3, S31) a USB host on the USB-OTG port running F; --sd-timing (P4) for timed SD");
@@ -167,6 +168,7 @@ pub struct Opts {
     pub lora_peer: Option<(u16, u16)>,
     pub cap: Option<String>, pub cap_peer: Option<(u16, u16)>,
     pub board: String, pub wifi: Vec<String>, pub wifi_nearby: Vec<String>, pub ble_nearby: Vec<String>, pub ble: bool, pub ble_full: bool, pub ble_observe: bool, pub ble_scan: bool, pub net: String, pub hostfwd: Vec<String>, pub cam_image: Option<String>, pub cam_stream: Option<String>, pub cam_size: Option<String>, pub cam_fps: f64,
+    pub grove_tmp105: bool,
     pub spi2_timing: bool, pub measured_te: bool,
     /// `--imu-motion N`: scripted IMU motion mode for boards with an IMU model (0 at rest, 1 the 30 s handling script)
     pub imu_motion: Option<u32>,
@@ -251,6 +253,10 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
                 if full { i += 1; o.ble_full = true; } else { o.ble = true; }
             },
             "--net" => { o.net = next(); o.net_given = true; }
+            "--grove" => {
+                if next() != "tmp105" { usage_error("--grove expects tmp105"); }
+                o.grove_tmp105 = true;
+            }
             "--cam-image" => o.cam_image = Some(next()),
             "--cam-stream" => o.cam_stream = Some(next()),
             "--cam-size" => o.cam_size = Some(next()),
@@ -322,6 +328,10 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
             _ => { eprintln!("unknown arg {}", a); usage(default_chip) }
         }
         i += 1;
+    }
+    if o.grove_tmp105 && (!matches!(o.chip.as_str(), "esp32" | "lx6") ||
+        !matches!(o.board.as_str(), "m5stack-atom-echo" | "m5stack-basic-v27")) {
+        usage_error("--grove tmp105 requires a classic ESP32 Atom Echo or Basic v2.7");
     }
     if o.sd_ejected && o.sd.is_none() { usage_error("--sd-ejected requires --sd or --sd-rw"); }
     if !o.hostfwd.is_empty() && o.wifi.is_empty() { usage_error("--hostfwd requires --wifi"); }
@@ -745,6 +755,9 @@ fn setup_esp32(o: &Opts) -> esp32::Machine {
     let board = if o.board == "atech14" { "none" } else { &o.board };
     m.bus.board = esp32::board::make_board(board).unwrap_or_else(|| usage_error(&format!("unknown classic ESP32 board '{board}' (none, bare, esp32dev, ttgo-tdisplay, cyd, ai-thinker-cam, ulanzi-tc001, m5stack-atom-lite, m5stack-atom-matrix, m5stack-atom-matrix-v11, m5stack-atomu, m5stack-atom-echo, m5stack-basic-v27, m5stack-core2, m5stack-core2-axp192, m5stack-stickc, m5stack-stickc-plus, m5stack-stickc-plus-se, m5stack-stickc-plus2, m5stack-m5stick, m5stack-stickt2)")));
     m.bus.attach_board_devices();
+    if o.grove_tmp105 && !m.bus.attach_grove_tmp105() {
+        usage_error("--grove tmp105: board does not expose a modeled Grove port");
+    }
     set_camera_image(&mut m.bus.board, o.cam_image.as_deref());
     if !o.wifi.is_empty() {
         let net_log = m.bus.debug.has("net");

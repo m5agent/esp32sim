@@ -20,6 +20,7 @@ boundary.
 | `state-get` | `PATH [PROPERTY]` | The node or one of its properties, with the same shape and names as the snapshot. |
 | `state-set` | `/soc/gpio/PIN input_drive true\|false\|null` | Drive a modeled GPIO input or release the host drive. The resolved input is readable under `level`. |
 | `state-set` | `/board/imu sample AX AY AZ GX GY GZ` | Place a sample on a board that implements the six-axis input. Acceleration is in g and angular velocity is in degrees per second. |
+| `state-set` | `/board/camera auto-increment true\|false` | Advance or freeze the synthetic RGB565 camera pattern. AtomS3R-CAM and M12 also accept `/machine/m5-lcd-cam` for both reads and writes. |
 | `state-set` | `/board/sd present true\|false` | Change physical media presence and return card state. |
 | `controller-report` | empty | `checkpoint` plus the existing `soc` and `board` diagnostic report strings. CLI checker counters can be sampled before stop. Report strings retain the existing model-specific diagnostic format. |
 | `sd-media` | `insert\|eject` | Reinsert or remove the same launch-time card. Identical requests are idempotent. SPI/SDMMC transactions use the new presence state and the card protocol resets on either transition. The media store and its writes survive. |
@@ -93,3 +94,32 @@ report count.
 
 - [PaperColor specifications](https://docs.m5stack.com/en/core/PaperColor)
 - [PaperMono specifications](https://docs.m5stack.com/en/core/PaperMono)
+
+## Classic and camera compatibility fixtures
+
+On AtomS3R-CAM and M12, `/board/camera` exposes `auto-increment`,
+`frame-seed`, `powered` and the source `frames` count. Without an uploaded
+image the RGB565 source starts at a static seed of zero. Enabling
+auto-increment selects the advancing pattern even when a raw picture is
+loaded. Disabling it returns to that picture or holds the current seed.
+The raw synthetic source preserves the guest-selected output dimensions.
+Encoded JPEG input continues to use the sensor's existing JPEG path.
+The guest must drive GPIO18 low before probing SCCB, as on the board.
+[M5Stack camera power and wiring](https://docs.m5stack.com/en/core/AtomS3R-CAM)
+
+Use `--grove tmp105` to provide the classic QEMU test fixture at address
+`0x48` for a single launch. Atom Echo routes it through SDA26/SCL32 and
+Basic v2.7 through SDA21/SCL22. Either ESP32 controller may select that
+pin pair. Basic's IP5306 remains on the shared bus at `0x75`. The TMP105
+models the temperature, configuration and two threshold registers with
+a fixed zero-degree test input. The option is for compatibility runs,
+and the standard board remains available with an empty Grove port.
+[TI TMP105 register reference](https://www.ti.com/lit/ds/symlink/tmp105.pdf)
+
+Basic's IP5306 preserves reserved bits in the SYS_CTL0 and CHG_DIG_CTL0
+registers. After the stock UIFlow2 initialization, these read `0xb9`
+and `0x01`. Its disconnected-cell fixture shows `READ0=0x00` and
+`READ4=0xff`. Classic QEMU returns `READ0=0x08` in that setup because
+it treats the charger as active even with its battery-absent sentinel.
+The IP5306 defines bit 3 as charge in progress.
+[Injoinic register manual](https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/docs/datasheet/core/IIC_IP5306_REG_V1.4_cn.pdf)

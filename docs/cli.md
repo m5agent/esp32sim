@@ -103,6 +103,7 @@ with `ESP32SIM_ROM_DIR`, and a FAT32 image with `CORE_SD_SEED`.
 | `--console usb\|uart0\|both\|all\|none`, `--console-prefix` | which consoles to print |
 | `--realtime` | pace to wall time without the UI |
 | `--web PORT [--web-dir DIR]` | browser UI (implies real time). With `--wifi` the page gets a Network panel: the station's Ethernet frames live (time, ↑ sent / ↓ received, a dissection summary from [dpkt-js](https://www.npmjs.com/package/dpkt-js) 0.1.0, vendored under web/vendor/dpkt-js and loaded when the panel is first opened or a row clicked; until then, length and hex), a filter, pause, clear, the dissection tree of a clicked frame and a pcap download of the frames the page received. They arrive as binary WebSocket messages `[5][dir: 0 sent, 1 received][emulated µs, u64 LE][frame]`, only while a page is connected; at most 512 frames or 1 MiB wait between pushes, the rest are dropped |
+| `--grove tmp105` | attach the legacy QEMU TMP105 at I2C address 0x48 on Atom Echo or Basic v2.7 |
 | `--cam-image F`, `--cam-fps N` | camera source for boards with a camera |
 | `--service-fd FD` | Unix Device Service integration. Uses an inherited stream socket and enables real-time execution. Cannot be used with `--web`. |
 | `--cap NAME` | Cardputer-ADV radio accessory, one of `lora1262`, `lora868` or `cc1101` |
