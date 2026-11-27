@@ -9,7 +9,7 @@ const LINE_BYTES: usize = COLUMNS / 4;
 
 // Quality and text signatures, chronological symbols packed MSB first. Trailing
 // no-drive frames are trimmed before matching. Derived from M5GFX's v0.3.0 LUTs.
-const GRAY_SIGNATURES: [[u32; 16]; 2] = [
+const GRAY_SIGNATURES: [[u64; 16]; 2] = [
     [0x1a555f5, 0x6955695, 0x6959e95, 0x6959a95, 0x6955ab5, 0x69566a5, 0x6955aa5, 0xa959aa5, 0x6966aa5, 0xa95aaa5, 0xa955aad, 0x6956aad, 0x1a555aa6, 0x1a559aa6, 0x1a55aaa6, 0x1a57aaa],
     [0xaa95d5, 0xaaaf55, 0xaaafd5, 0xaa95a5, 0xaa56a5, 0xaa96a5, 0xaa9569, 0xaa9d69, 0xaabd69, 0xaab5a9, 0xaa96a9, 0x2a555a, 0x2aad5a, 0x2aaf5a, 0x2aa56a, 0x556aea],
 ];
@@ -19,7 +19,7 @@ pub struct Et047tc1 {
     pending: Vec<u16>,
     scan: Vec<u8>,
     line: Option<[u8; LINE_BYTES]>,
-    wave: Vec<u32>,
+    wave: Vec<u64>,
     endpoint: Vec<u8>,
     scanning: bool,
     pub scans: u64,
@@ -66,7 +66,7 @@ impl Et047tc1 {
                     if symbol == 0 {
                         self.finish_pixel(pixel);
                     } else if symbol != 3 || self.wave[pixel] != 0 {
-                        self.wave[pixel] = (self.wave[pixel] << 2) | u32::from(symbol);
+                        self.wave[pixel] = (self.wave[pixel] << 2) | u64::from(symbol);
                         if symbol != 3 { self.endpoint[pixel] = symbol; }
                     }
                 }
@@ -121,4 +121,14 @@ mod tests {
         assert_eq!(panel.version, 1);
         assert_eq!(panel.frame[0], 0);
     }
+    #[test]
+    fn gray_signature_survives_sixteen_trailing_idle_scans() {
+        let mut panel = Et047tc1::default();
+        let signature = GRAY_SIGNATURES[0][11];
+        panel.wave[0] = (signature << 32) | u64::from(u32::MAX);
+        panel.endpoint[0] = 1;
+        panel.power_off();
+        assert_eq!(panel.frame[539], 0xbdd7);
+    }
+
 }

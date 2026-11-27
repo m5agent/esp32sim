@@ -23,6 +23,13 @@ const MS: u64 = US * 1000;
 const COLOR_SD: SpiPins = SpiPins { sclk: 1 << 15, mosi: 1 << 13, miso: Some(14), cs: 1 << 47 };
 const LORA_CS: u64 = 1 << 41;
 
+struct Microphone(Rc<RefCell<Es7210>>);
+impl I2cDevice for Microphone {
+    fn start(&mut self, read: bool) -> bool { self.0.borrow_mut().start(read) }
+    fn write(&mut self, byte: u8) -> bool { self.0.borrow_mut().write(byte) }
+    fn read(&mut self) -> u8 { self.0.borrow_mut().read() }
+}
+
 struct NfcI2c {
     chip: Rc<RefCell<St25r3916>>,
     time: Rc<Cell<u64>>,
@@ -101,6 +108,7 @@ pub struct PaperSpi {
     nfc: Rc<RefCell<St25r3916>>,
     radio: Option<RadioLink>,
     dac: Es8311,
+    adc: Rc<RefCell<Es7210>>,
     leds: Ws2812Chain,
     sd: Option<Box<SpiSdCard>>,
     output: u64,
@@ -126,7 +134,8 @@ impl PaperSpi {
             pmic: Default::default(), expander: Default::default(),
             touch: Default::default(), imu: Default::default(),
             env: Rc::new(Cell::new([23.0, 45.0])), measurements: Default::default(), now: Default::default(),
-            nfc: Default::default(), radio: None, dac: Es8311::new(), leds: Ws2812Chain::new(2),
+            nfc: Default::default(), radio: None, dac: Es8311::new(),
+            adc: Rc::new(RefCell::new(Es7210::new())), leds: Ws2812Chain::new(2),
             sd: None, output: 0, sd_selected: false, busy_level, nfc_level: false,
             radio_levels: [false; 2], edges: Vec::new(),
         }
@@ -178,14 +187,16 @@ impl BoardModel for PaperSpi {
         } else {
             self.i2c.attach(0x44, Sht40::new(self.env.clone(), self.now.clone(), MS, self.measurements.clone()));
             self.i2c.attach(0x18, self.dac.i2c_port());
-            self.i2c.attach(0x40, Es7210::new());
+            self.i2c.attach(0x40, Microphone(self.adc.clone()));
         }
         self.i2c.controller_devices()
     }
 
     fn input_levels(&self) -> Vec<(u8, bool)> {
         let mut pins = self.i2c.levels().to_vec();
-        if self.mono_board() { pins.extend([(2, true), (3, true), (4, true), (5, false), (6, false), (18, self.busy_level), (21, false), (12, false), (13, false)]); }
+        // G12/G13 are the SDMMC command/clock lines. With no powered card
+        // they follow the SoC's pad pulls, including the driver's board probe.
+        if self.mono_board() { pins.extend([(2, true), (3, true), (4, true), (5, false), (6, false), (18, self.busy_level), (21, false)]); }
         else { pins.extend([(1, true), (9, true), (10, true), (11, self.busy_level)]); }
         pins
     }
@@ -258,8 +269,14 @@ impl BoardModel for PaperSpi {
             .chain(self.radio.as_ref().filter(|r| r.peer.is_some()).map(|r| r.next_poll))
             .min()
     }
+    fn set_imu_motion(&mut self, mode: u32) -> bool {
+        if !self.mono_board() { return false; }
+        self.imu.mode.store(mode, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
     fn advance_to(&mut self, cycle: VirtualCycle) {
         self.now.set(cycle);
+        if self.mono_board() { self.imu.cycle.store(cycle, std::sync::atomic::Ordering::Relaxed); }
         match &mut self.display { Display::Mono(p) => p.advance_to(cycle), Display::Color(p) => p.advance_to(cycle) }
         self.nfc.borrow_mut().advance(cycle);
         if let Some(radio) = &mut self.radio {
@@ -295,7 +312,8 @@ impl BoardModel for PaperSpi {
         if self.mono_board() { return None; }
         let mut codecs = self.dac.i2s_codecs(0, 1, 40, 41, 38, 39);
         codecs.mck = Some(42);
-        codecs.mic_lanes = [true, false];
+        codecs.mic_lanes = self.adc.borrow().lanes();
+        if self.output & (3u64 << 45) != 3u64 << 45 { codecs.speaker_gain = 0.0; }
         Some(codecs)
     }
     fn named_pin(&self, name: &str) -> Option<u8> {

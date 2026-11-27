@@ -161,10 +161,16 @@ impl BoardModel for PaperParallel {
         }
     }
     fn touch_irq(&self) -> Option<(u8, bool)> { (!self.diy).then_some((48, self.touch_high)) }
+    fn set_imu_motion(&mut self, mode: u32) -> bool {
+        if self.diy { return false; }
+        self.imu.mode.store(mode, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
     fn take_edges(&mut self) -> Vec<BoardEdge> { std::mem::take(&mut self.edges) }
     fn advance_to(&mut self, cycle: VirtualCycle) {
         self.cycle = cycle;
         if !self.diy {
+            self.imu.cycle.store(cycle, std::sync::atomic::Ordering::Relaxed);
             self.rtc.borrow_mut().advance_to(cycle);
             self.sync_touch_irq();
         }
