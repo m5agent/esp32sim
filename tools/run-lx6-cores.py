@@ -77,23 +77,37 @@ def plan(device):
     add("microsd", 2.8, "microsd-first", card=True)
     add("wav", 8.5 if device == "basic-v27" else 16, card=True, audio=True,
         extra=("--exit-on", "playback completed!") if device == "core2" else ())
-    add("wakeup", 7.8, actions=key(device, 1.15, 0, 160))
-    add("stock", 2.7, "stock-home")
-    navigation = key(device, 2.55, 2, 200) if device == "basic-v27" else touch(2.55, 34, 48)
-    add("stock", 3.0, "stock-navigation", navigation)
-    buttons = "print('LX6'+'-INPUT',M5.BtnA.isPressed(),M5.BtnB.isPressed(),M5.BtnC.isPressed())"
-    actions = "3.1 uart0-cr import M5; print('LX6'+'-BOARD',M5.getBoard())\n"
-    actions += f"3.25 uart0-cr M5.update(); {buttons}\n"
+    wake_press = 0.60 if device == "basic-v27" else 1.15
+    add("wakeup", wake_press + 5.9, actions=key(device, wake_press, 0, 160),
+        extra=("--exit-on", "DEEPSLEEP_RESET"))
+    # The catalog Basic image is the 4 MiB build. At a higher JEDEC
+    # capacity its res.py selects /system assets absent from that image.
+    stock_memory = ("--flash-mb", "4") if device == "basic-v27" else ()
+    add("stock", 2.7, "stock-home", extra=stock_memory)
+    navigation = key(device, 2.52, 0, 280) if device == "basic-v27" else touch(2.52, 34, 48)
+    add("stock", 3.25, "stock-navigation", navigation, extra=stock_memory)
+    if device == "basic-v27":
+        # A selects APP RUN from DEVELOP, and B opens the friendly REPL.
+        actions = navigation + key(device, 3.0, 1, 350)
+    else:
+        actions = "2.9 uart0-cr \x03\n"
+    actions += (
+        "3.65 uart0-cr import M5,time; print('LX6-BOARD',M5.getBoard())\n"
+        "3.9 uart0-cr a,b,c=M5.BtnA,M5.BtnB,M5.BtnC\n"
+        "4.1 uart0-cr u=M5.update; sl=time.sleep_ms\n"
+        "4.3 uart0-cr p=lambda:(u(),sl(30),u(),a.isPressed(),b.isPressed(),c.isPressed())[3:]\n"
+        "4.5 uart0-cr print('LX6-INPUT',p())\n"
+    )
     for i in range(3):
-        t = 3.4 + i * 0.45
-        actions += key(device, t, i, 260)
-        actions += f"{t + 0.13} uart0-cr M5.update(); {buttons}\n"
-    actions += f"4.85 uart0-cr M5.update(); {buttons}\n"
+        t = 4.65 + i * 0.58
+        actions += key(device, t, i, 390)
+        actions += f"{t + 0.16:.3f} uart0-cr print('LX6-INPUT',p())\n"
+    actions += "6.4 uart0-cr print('LX6-INPUT',p())\n"
     if device == "core2":
-        actions += "5.0 touch 88 110 1\n"
-        actions += "5.15 uart0-cr M5.update(); print('LX6'+'-TOUCH',M5.Touch.getCount(),M5.Touch.getX(),M5.Touch.getY())\n"
-        actions += "5.3 touch 88 110 0\n"
-    add("stock", 5.5, "stock-input", actions)
+        actions += "6.55 touch 88 110 1\n"
+        actions += "6.7 uart0-cr M5.update(); print('LX6-TOUCH',M5.Touch.getCount(),M5.Touch.getX(),M5.Touch.getY())\n"
+        actions += "6.95 touch 88 110 0\n"
+    add("stock", 7.1, "stock-input", actions, extra=stock_memory)
     return jobs
 
 

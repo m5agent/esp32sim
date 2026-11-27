@@ -233,9 +233,11 @@ def checks(device, run):
         run.ran("stock-input")
         serial = run.read("stock-input")
         require(f"LX6-BOARD {1 if basic else 2}" in serial, "UART0 did not report the expected M5Unified board")
-        states = re.findall(r"^LX6-INPUT (.+?)\s*$", serial, flags=re.MULTILINE)
-        require(states == ["False False False", "True False False", "False True False",
-                           "False False True", "False False False"], "missing A/B/C pressed and released readbacks")
+        states = re.findall(r"^LX6-INPUT \((True|False), (True|False), (True|False)\)\s*$",
+                            serial, flags=re.MULTILINE)
+        require(states == [("False", "False", "False"), ("True", "False", "False"),
+                           ("False", "True", "False"), ("False", "False", "True"),
+                           ("False", "False", "False")], "missing A/B/C pressed and released readbacks")
         if not basic:
             require("LX6-TOUCH 1 88 110" in serial, "stock touch readback did not match the injected point")
         return "Stock UIFlow2 home screen and UART0 input round-trip"
