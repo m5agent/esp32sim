@@ -24,6 +24,7 @@ pub struct StickS3 {
     ir_edges: Vec<BoardEdge>,
     edges: Vec<BoardEdge>,
     ir_frames: u64,
+    ir_active_low_frames: u64,
     last_nec: Option<(u16, u8)>,
 }
 
@@ -43,7 +44,7 @@ impl StickS3 {
         ]);
         Self { lcd: SpiLcd::new(LCD, DcsPanel::st7789(), [0x85, 0x85, 0x52]), bus,
             power, codec, motion, imu, lcd_powered: false, irq_high: true, cycle: 0,
-            ir_edges: Vec::new(), edges: Vec::new(), ir_frames: 0, last_nec: None }
+            ir_edges: Vec::new(), edges: Vec::new(), ir_frames: 0, ir_active_low_frames: 0, last_nec: None }
     }
     fn sync_lcd(&mut self) {
         let enabled = self.power.powered() && self.power.pmic.borrow().driven_high() & 4 != 0;
@@ -117,8 +118,9 @@ impl BoardModel for StickS3 {
     }
     fn rmt_symbols(&mut self, pin: u8, hz: u32, symbols: &[u32]) {
         if pin != 46 { return; }
-        if let Some(frame) = decode_nec(hz, symbols) {
+        if let Some((frame, active_low)) = decode_nec(hz, symbols) {
             self.ir_frames += 1;
+            self.ir_active_low_frames += u64::from(active_low);
             self.last_nec = Some(frame);
         }
     }
@@ -154,24 +156,28 @@ impl BoardModel for StickS3 {
     fn display_version(&self) -> u64 { self.lcd.version() }
     fn display_frames(&self) -> u64 { self.lcd.lcd.frames }
     fn report(&self) -> String {
-        format!("[sticks3] RAMWR={} pixels={} lcd_rail={} powered={} timer_wakes={} RMT46_frames={} last_nec={:?} gpio_i2c={}",
+        format!("[sticks3] RAMWR={} pixels={} lcd_rail={} powered={} timer_wakes={} RMT46_frames={} RMT46_active_low={} last_nec={:?} gpio_i2c={}",
             self.display_frames(), self.lcd.lcd.pixels_written, self.lcd_powered, self.power.powered(),
-            self.power.pmic.borrow().timer_wakes(), self.ir_frames, self.last_nec, self.bus.transactions())
+            self.power.pmic.borrow().timer_wakes(), self.ir_frames, self.ir_active_low_frames, self.last_nec, self.bus.transactions())
     }
 }
 
 /// Decode the envelope seen by the IR LED. Carrier phase and optical travel are omitted.
-fn decode_nec(hz: u32, symbols: &[u32]) -> Option<(u16, u8)> {
+fn decode_nec(hz: u32, symbols: &[u32]) -> Option<((u16, u8), bool)> {
     let [header, data @ .., trailer] = symbols else { return None };
     if data.len() != 32 { return None; }
     let durations = |word: u32| {
         let micros = |ticks| u64::from(ticks) * 1_000_000 / u64::from(hz);
         (micros(word & 0x7fff), micros(word >> 16 & 0x7fff))
     };
-    let envelope = |word: u32| word & 0x8000_8000 == 0x0000_8000;
+    // The raw echo example sends the demodulator's active-low samples verbatim.
+    // Preserve their polarity in the report, while reading the durations of both forms.
+    let levels = *header & 0x8000_8000;
+    if levels != 0x0000_8000 && levels != 0x8000_0000 { return None; }
+    let envelope = |word: u32| word & 0x8000_8000 == levels;
     let (mark, space) = durations(*header);
-    if !envelope(*header) || !(8_000..=10_000).contains(&mark) || !(4_000..=5_000).contains(&space)
-        || !envelope(*trailer) || !(350..=800).contains(&durations(*trailer).0) { return None; }
+    if !(8_000..=10_000).contains(&mark) || !(4_000..=5_000).contains(&space)
+        || *trailer & 0x8000 != levels & 0x8000 || !(350..=800).contains(&durations(*trailer).0) { return None; }
     let mut raw = 0u32;
     for (bit, &word) in data.iter().enumerate() {
         let (mark, space) = durations(word);
@@ -185,5 +191,5 @@ fn decode_nec(hz: u32, symbols: &[u32]) -> Option<(u16, u8)> {
     let [lo, hi, command, complement] = raw.to_le_bytes();
     if complement != !command { return None; }
     let address = if hi == !lo { u16::from(lo) } else { u16::from_le_bytes([lo, hi]) };
-    Some((address, command))
+    Some(((address, command), levels == 0x8000_0000))
 }

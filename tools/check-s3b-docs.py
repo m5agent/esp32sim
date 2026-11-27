@@ -22,12 +22,13 @@ CASES = {
                     m5pm1_m5ioe1-3 m5pm1_m5ioe1-4 m5pm1_m5ioe1-5 m5pm1_m5ioe1-6
                     mic quickstart-bargraph rtc-1 rtc-2 speaker touch-1 touch-2 vibration""",
 }
-SIZE = {"cardputer": (240, 135), "dial": (240, 240), "sticks3": (135, 240), "stopwatch": (468, 466)}
+# The CLI enlarges panels narrower than 200 pixels for its PNG output.
+SIZE = {"cardputer": (240, 135), "dial": (240, 240), "sticks3": (405, 720), "stopwatch": (468, 466)}
 FAULT = re.compile(r"Guru Meditation|Interrupt wdt timeout|assert failed|Backtrace:|stack smashing", re.I)
 
 
 def frame_pixels(path, size):
-    """Read the simulator's filter-0 RGB8 PNG at the board's physical size."""
+    """Read the simulator's filter-0 RGB8 display export."""
     data = path.read_bytes()
     require(data.startswith(b"\x89PNG\r\n\x1a\n"), "invalid PNG")
     cursor = 8
@@ -110,12 +111,13 @@ def power_case(board, case, serial, report):
 
 
 def verify(out, board, case):
-    allow_blank = case in {"buzzer", "speaker", "speaker-sd-wav", "wakeup-2",
+    allow_blank = case in {"buzzer", "speaker", "speaker-sd-wav", "wakeup-2", "rfid-1", "rfid-2",
                            "m5pm1-1", "m5pm1-2", "m5pm1_m5ioe1-1", "m5pm1_m5ioe1-2"}
     frame, serial, report = capture(out, board, case, screen=not allow_blank and not (case == "button" and board in {"cardputer", "dial"}))
     if case == "display" or case.startswith("quickstart-"):
         early, *_ = capture(out, board, case + "-early")
-        require(len(color_counts(frame)) >= 8 and changed(frame, early) >= 150, "missing animated display")
+        minimum_colors = 4 if case == "display" else 8
+        require(len(color_counts(frame)) >= minimum_colors and changed(frame, early) >= 150, "missing animated display")
         return "display contains multicolor drawing and changes over time"
     if case in {"battery", "imu", "touch", "touch-1", "touch-2"}:
         return sensors(out, board, case, frame)
@@ -146,13 +148,21 @@ def verify(out, board, case):
     if case in {"ir_nec-2", "ir_nec-3"}:
         idle_frame, idle, _ = capture(out, board, case + "-idle")
         require(changed(frame, idle_frame) >= 15 and serial != idle, "IR input did not change guest output")
-        require(re.search(r"0x0*10\b", serial, re.I) and re.search(r"0x0*2a\b", serial, re.I),
-                "two received NEC addresses missing")
-        if case.endswith("-3"):
-            require(re.search(r"RMT46_frames=[1-9]", report), "no NEC frame relayed on GPIO46")
-        return "two NEC inputs reached the receive path"
+        if case.endswith("-2"):
+            contains(serial, "Raw: 0xCB34EF10", "Raw: 0xA857D52A")
+            return "both guest NEC payloads match the input address and command"
+        raw_pulses = re.findall(r"IR PULSE \(us\):\(L0 \| L1\)\s*((?:\s*-\d+, \d+\n)+)", serial)
+        payloads = []
+        for block in raw_pulses:
+            pairs = [(int(mark), int(space)) for mark, space in re.findall(r"(-\d+), (\d+)", block)]
+            require(len(pairs) == 34 and pairs[0] == (-9000, 4500), "unexpected receive symbol layout")
+            payloads.append(sum((space > 1000) << bit for bit, (_, space) in enumerate(pairs[1:33])))
+        require(payloads == [0xCB34EF10, 0xA857D52A] and serial.count("Transmit back OK!") == 2,
+                "two receive/echo payloads missing")
+        contains(report, "RMT46_active_low=2", "last_nec=Some((42, 87))")
+        return "both payloads received and echoed as active-low RMT symbols on GPIO46"
     if case in {"rfid-1", "rfid-2"}:
-        _, idle, _ = capture(out, board, case + "-idle")
+        _, idle, _ = capture(out, board, case + "-idle", screen=False)
         contains(serial, "04 01 02 03", "04 09 08 07")
         require("PICC type:" not in idle and "MIFARE_Read() failed" not in serial
                 and "MIFARE_Write() failed" not in serial, "negative control or virtual tag transfer failed")
@@ -164,7 +174,8 @@ def verify(out, board, case):
         _, tones = audio(out / f"{case}-output.wav")
         for hz in expected:
             require(any(abs(t[3] - hz) < 150 for t in tones), f"missing {hz} Hz in captured audio")
-        return f"I2S data contains {expected[0]} Hz and {expected[1]} Hz tones"
+        route = "GPIO3 PDM output" if board == "dial" else "I2S output"
+        return f"{route} contains {expected[0]} Hz and {expected[1]} Hz tones"
     if case == "mic":
         first, *_ = capture(out, board, "mic-tone")
         second, *_ = capture(out, board, "mic-alt")

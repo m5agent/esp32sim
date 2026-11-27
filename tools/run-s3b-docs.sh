@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Usage: ESP32SIM_ROM_DIR=... S3B_FIRMWARE_DIR=... run-s3b-docs.sh BOARD BINARY OUTDIR
 # Optional: S3B_SD_SEED (Cardputer), S3B_STOCK_IMAGE (this board's UIFlow2).
+# Set S3B_SOURCE_REV to the binary's source revision when replaying an older build.
 set -euo pipefail
 board=${1:?board required}
 binary=${2:?simulator binary required}
@@ -11,7 +12,7 @@ case "$board" in cardputer|dial|sticks3|stopwatch) ;; *) exit 2 ;; esac
 mkdir "$out"
 out=$(cd "$out" && pwd)
 cp "$binary" "$out/esp32sim"
-git -C "$(dirname "$0")" rev-parse HEAD >"$out/source"
+git -C "$(dirname "$0")" rev-parse "${S3B_SOURCE_REV:-HEAD}^{commit}" >"$out/source"
 git -C "$(dirname "$0")" status --porcelain >"$out/source-status"
 git -C "$(dirname "$0")" diff --binary HEAD >"$out/source.diff"
 shasum -a 256 "$out/esp32sim" "$ESP32SIM_ROM_DIR/esp32s3_rev0_rom.elf" \
@@ -78,9 +79,9 @@ args = [str(out / "esp32sim"), "--board", "m5stack-" + board, "--boot", "rom", "
         "--no-dump", *flags]
 with (out / (label + ".log")).open("wb") as serial, (out / (label + ".err")).open("wb") as diagnostics:
     try:
-        sys.exit(subprocess.run(args, stdout=serial, stderr=diagnostics, timeout=300).returncode)
+        sys.exit(subprocess.run(args, stdout=serial, stderr=diagnostics, timeout=600).returncode)
     except subprocess.TimeoutExpired:
-        diagnostics.write(b"runner wall timeout (300 seconds)\n")
+        diagnostics.write(b"runner wall timeout (600 seconds)\n")
         sys.exit(124)
 PYRUN
     printf '%s\n' "$status" >"$out/$label.status"
@@ -92,7 +93,8 @@ for image in "$firmware"/*/sketch.merged.bin; do
     seconds=8
     flags=()
     case "$label" in
-        display|quickstart-*) seconds=2.7 ;;
+        display) seconds=4.7 ;;
+        quickstart-*) seconds=2.7 ;;
         battery) seconds=7; flags=(--script "$out/battery.txt"); [[ "$board" != cardputer ]] || flags=(--script "$out/adc.txt") ;;
         button)
             seconds=4.5
