@@ -196,6 +196,7 @@ impl I2cDevice for M5pm1 {
         let defaults = (pulled_high & !4) | (u8::from(!state.charging) << 2);
         let inputs = (defaults & !state.gpio.external) | (state.gpio.inputs & state.gpio.external);
         r[0x12] = (inputs & !r[0x10]) | (r[0x11] & r[0x10]);
+        r[0x04] = (r[0x04] & !1) | u8::from(state.vbus_mv > 1000);
         r[0x40] = state.gpio.status;
         [self.registers.regs[0x22], self.registers.regs[0x23]] = state.battery_mv.to_le_bytes();
         [self.registers.regs[0x24], self.registers.regs[0x25]] = state.vbus_mv.to_le_bytes();

@@ -28,6 +28,7 @@ const LORA_RESET: u16 = 1 << 9;
 const LORA_ANTENNA_TX: u16 = 1 << 1;
 // The e-paper docs set M5IOE1 GPIO4 (zero-based latch bit 3) to enable NFC.
 const NFC_POWER: u16 = 1 << 3;
+const CHARGER_I2C: u16 = 1 << 10;
 
 struct Microphone(Rc<RefCell<Es7210>>);
 impl I2cDevice for Microphone {
@@ -48,6 +49,23 @@ impl I2cDevice for InertialSensor {
     fn start(&mut self, read: bool) -> bool { self.0.borrow_mut().start(read) }
     fn write(&mut self, byte: u8) -> bool { self.0.borrow_mut().write(byte) }
     fn read(&mut self) -> u8 { self.0.borrow_mut().read() }
+}
+
+struct MonoCharger {
+    outputs: Rc<Cell<u16>>,
+    power: Arc<Mutex<M5pm1State>>,
+    registers: Reg8Device,
+}
+impl I2cDevice for MonoCharger {
+    fn start(&mut self, read: bool) -> bool {
+        let power = self.power.lock().unwrap();
+        if self.outputs.get() & CHARGER_I2C == 0 || power.vbus_mv <= 1000 { return false; }
+        // M5Unified 0.3.0 reads bit 7 in 0xc7 to distinguish active charging.
+        self.registers.regs[0xc7] = if power.charging { 0x82 } else { 0x45 };
+        self.registers.start(read)
+    }
+    fn write(&mut self, byte: u8) -> bool { self.registers.write(byte) }
+    fn read(&mut self) -> u8 { self.registers.read() }
 }
 
 struct NfcI2c {
@@ -216,7 +234,9 @@ impl BoardModel for PaperSpi {
                 .with_revision(b'W').with_outputs(self.expander.clone()));
             self.i2c.attach(0x68, InertialSensor(self.imu_chip.clone()));
             self.i2c.attach(0x38, Ft5x06::new(self.touch.clone()));
-            self.i2c.attach(0x75, Reg8Device::new("IP2315", &[]));
+            self.i2c.attach(0x75, MonoCharger {
+                outputs: self.expander.clone(), power: self.pmic.clone(), registers: Reg8Device::new("IP2315", &[]),
+            });
             self.i2c.attach(0x50, NfcI2c { chip: self.nfc.clone(), time: self.now.clone(), outputs: self.expander.clone() });
         } else {
             self.i2c.attach(0x44, Sht40::new(self.env.clone(), self.now.clone(), MS, self.measurements.clone()));
