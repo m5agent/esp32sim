@@ -49,7 +49,8 @@ def scenarios(device, case):
             base = [("", end, pulse, []), ("-idle", end, [], []), ("-held", 0.8, pulse[:1], [])]
     elif case == "imu-5":
         inputs = ["0.3 imu-temp-raw -1634", "1.3 imu-temp-raw 3268"]
-        base = [("", 2.2, inputs, []), ("-idle", 2.2, [], []), ("-first", 1.1, inputs[:1], [])]
+        base = [("", 2.2, inputs, []), ("-idle", 2.2, [], []), ("-first", 2.2, inputs[:1], []),
+                ("-gyro", 2.2, ["0.3 imu 0 0 1 0 0 125"], [])]
     elif case.startswith("imu") and case != "imu-1":
         inputs = ["0.8 imu 0.5 -0.25 1 125 -50 25", "2.0 imu -0.75 0.375 0.25 -100 80 -30"]
         base = [("", 3.45, inputs, []), ("-idle", 3.45, [], []), ("-first", 1.9, inputs[:1], [])]
@@ -78,7 +79,10 @@ def scenarios(device, case):
                 ("-idle", 3.8, inputs, []),
                 ("-second", 3.8, inputs, ["--mic-wav", "@mic1234.wav"])]
     elif case in {"ir_nec", "led", "speaker", "buzzer"}:
-        base = [("", 5.5, [], ["--vcd", f"@{case}.vcd", "--wav", f"@{case}.wav"])]
+        options = ["--vcd", f"@{case}.vcd", "--wav", f"@{case}.wav"]
+        if device == "stickc-plus" and case == "buzzer":
+            options += ["--trace-fn", "ledcAttach", "--trace-fn", "ledcWriteTone", "--trace-fn", "ledc_timer_config"]
+        base = [("", 5.5, [], options)]
     elif case == "wakeup":
         base = [("", 9.0, ["1.3 press a 150"], ["--vcd", f"@{case}.vcd"]),
                 ("-idle", 9.0, [], [])]
@@ -151,12 +155,25 @@ def main():
         image = args.plan / "firmware" / device / case / "sketch.merged.bin"
         if image.is_file():
             for suffix, seconds, script, options in scenarios(device, case):
+                if device == "stickc-plus" and case == "buzzer":
+                    options += ["--elf", str(image.with_name("sketch.elf"))]
                 schedule(case + suffix, image, seconds, script, options)
 
     stock_label = "factory" if device in FACTORY else "stock"
     if not args.case or stock_label in args.case:
-        schedule(stock_label, args.stock, 5.0, [], [])
-        if device not in FACTORY:
+        if device == "m5stick":
+            press = ["3.0 press a 800"]
+            schedule("factory", args.stock, 3.65, press, ["--debug", "i2c", "--vcd", "@factory.vcd"])
+            schedule("factory-idle", args.stock, 3.65, [], [])
+            schedule("factory-release", args.stock, 4.5, press, ["--vcd", "@factory-release.vcd"])
+        elif device == "stickt2":
+            first = ["3.7 thermal 8000 11000"]
+            schedule("factory", args.stock, 8.5, first, ["--debug", "i2c"])
+            schedule("factory-splash", args.stock, 5.0, [], [])
+            schedule("factory-second", args.stock, 8.5, ["3.7 thermal 6500 9200"], ["--debug", "i2c"])
+            schedule("factory-button", args.stock, 8.5, first + ["7.0 press a 400"], ["--debug", "i2c"])
+        else:
+            schedule("stock", args.stock, 5.0, [], [])
             key = "b" if device == "stickc-plus2" else "a"
             schedule("stock-button", args.stock, 5.0, [f"4.1 press {key} 200"], ["--vcd", "@stock-button.vcd"])
             script = [
@@ -208,7 +225,7 @@ def main():
     results = check(device, out)
     (out / "verdicts.json").write_text(json.dumps(results, indent=2) + "\n")
     selected = [v for name, v in results.items() if not args.case or name in args.case]
-    return 0 if all(v["status"] in {"PASS", "DOCS-DEFECT"} for v in selected) else 1
+    return 0 if all(v["status"] in {"PASS", "DOCS-DEFECT", "LIBRARY-DEFECT"} for v in selected) else 1
 
 
 if __name__ == "__main__":

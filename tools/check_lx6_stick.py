@@ -85,6 +85,10 @@ def tones(path):
             for edges in groups if len(edges) > 10]
 
 
+def gpio_writes(vcd, pin):
+    return sum(line in {f"0s{pin}", f"1s{pin}"} for line in vcd.splitlines())
+
+
 def check(device, out):
     rows = json.loads((out / "cases.json").read_text())
     results = {}
@@ -108,6 +112,10 @@ def check(device, out):
 
     def difference(a, b):
         return a is not None and b is not None and a["crc32"] != b["crc32"]
+
+    def completed(label):
+        status, _, _, fault = capture(label)
+        return status == "0" and not fault
 
     for row in rows:
         case = row["case"]
@@ -233,8 +241,18 @@ def check(device, out):
         elif case in {"buzzer", "speaker"}:
             if case == "buzzer" and device == "stickc-plus":
                 hit = field("buzzer_updates") >= 2
-                reason = ("Legacy M5.Beep routed and released a PWM burst" if hit else
-                          "M5StickCPlus 0.1.1 Speaker.cpp:14,31 attaches GPIO2 at 0 Hz and calls the pin API with channel 0")
+                if hit:
+                    reason = "Legacy M5.Beep routed and released a PWM burst"
+                elif ("ledcAttachChannel(a2=0x2 a3=0x0 a4=0xd)" in diag
+                      and "ledcWriteTone(a2=0x0 a3=0xfa0" in diag
+                      and "--trace-fn ledc_timer_config: 1 functions" in diag
+                      and "ledc_timer_config(a2=" not in diag and "buzzer_updates=0" in diag):
+                    record(case, "LIBRARY-DEFECT",
+                           "GPIO2 attach requested 0 Hz, tone addressed GPIO0, and no LEDC timer was configured",
+                           file="M5StickCPlus 0.1.1 src/utility/Speaker.cpp:14,31,55",
+                           reference="m5stack:esp32 3.2.5 cores/esp32/esp32-hal-ledc.c:186–194,409–439",
+                           frame=screen)
+                    continue
             else:
                 measured = tones(out / f"{case}.wav")
                 expected = [(10000, 100), (4000, 20)] if case == "buzzer" else [(7000, 100), (4000, 200)]
@@ -250,8 +268,18 @@ def check(device, out):
                 reason = "UART reports both injected accelerometer vectors and the idle control ran"
         elif case == "imu-5":
             hit = bool(three_frames())
-            reason = ("The documented temperature display changed for both injected ADC words" if hit else
-                      "M5StickC 0.3.0 MPU6886.cpp:208–212 reads from 0x41 and interprets bytes 6–7 instead of bytes 0–1")
+            idle, first, gyro = (frame(case + suffix) for suffix in ("-idle", "-first", "-gyro"))
+            if hit:
+                reason = "The documented temperature display changed for both injected ADC words"
+            elif (all(completed(case + suffix) for suffix in ("-idle", "-first", "-gyro"))
+                  and all((screen, idle, first, gyro)) and screen["lit"]
+                  and screen["crc32"] == idle["crc32"] == first["crc32"] and difference(gyro, idle)):
+                record(case, "LIBRARY-DEFECT",
+                       "Temperature-only inputs preserve the frame and gyro-Z changes it. The library decodes 0x47–0x48",
+                       file="M5StickC 0.3.0 src/utility/MPU6886.cpp:208–212",
+                       reference="InvenSense DS-000193 rev 1.1 §§7, 8.30, 8.33",
+                       frame=screen, gyro_frame=gyro)
+                continue
         elif case == "imu" or case in {"imu-2", "imu-3", "imu-4"}:
             hit = bool(three_frames())
             if hit:
@@ -307,10 +335,42 @@ def check(device, out):
         record(label, "NOT RUN", "No stock execution in this capture")
     elif label == "factory":
         screen = frame(label)
-        reason = ("Factory app reports MPU9250 probe FF and the visible OLED stays blank" if device == "m5stick" else
-                  "Factory app renders its splash and prints error=2 without a complete VoSPI frame")
-        record(label, "FAIL", fault or reason,
-               frame=screen, guest_boot=bool(re.search(r"mpu9250 addr|M5StickC initializing", text)))
+        if device == "m5stick":
+            idle, released = frame("factory-idle"), frame("factory-release")
+            whoami = bool(re.search(r"(?m)^mpu9250 addr: 71\s*$", text) and
+                          "[i2c]   write 0x75\n[i2c] start addr 0x68 read=true\n[i2c]   read  0x71" in diag)
+            edges = {pin: gpio_writes(read("factory", "vcd"), pin) for pin in (17, 19, 26)}
+            hit = (whoami and completed("factory-idle") and completed("factory-release")
+                   and all((screen, idle, released)) and screen["lit"] == 174
+                   and screen["bounds"] == [17, 1, 59, 30] and idle["lit"] == released["lit"] == 0
+                   and "[script] t=3.800s Gpio(35, true)" in read("factory-release", "err")
+                   and edges[17] >= 4 and edges[19] >= 4 and edges[26] >= 200)
+            reason = ("Original firmware read WHO_AM_I 0x71, drew the test text while G35 was held, "
+                      "cleared it after release and drove G17/G19/G26") if hit else "Factory OLED, GPIO or MPU9250 check failed"
+            detail = {"whoami": whoami, "gpio_writes": edges, "idle_frame": idle, "released_frame": released}
+        else:
+            splash, second, button = (frame("factory-" + name) for name in ("splash", "second", "button"))
+            thermal = {}
+            for suffix in ("", "-second", "-button"):
+                capture_diag = read(label + suffix, "err")
+                count = re.search(r"\bthermal_frames=(\d+)", capture_diag)
+                thermal[suffix or "-first"] = int(count[1]) if count else 0
+            cci = ("[i2c]   write 0x48\n[i2c]   write 0x55" in diag and
+                   "[i2c]   write 0x48\n[i2c]   write 0x59" in diag and
+                   "[i2c] start addr 0x30 read=true" in diag)
+            no_errors = all("error=" not in read(label + suffix, "log") for suffix in ("", "-second", "-button"))
+            hit = (all(completed("factory-" + name) for name in ("splash", "second", "button"))
+                   and "M5StickC initializing...OK" in text and cci and no_errors
+                   and min(thermal.values()) > 1 and all((screen, splash, second, button))
+                   and difference(screen, splash) and difference(screen, second) and difference(screen, button)
+                   and screen["regions"].get("ff0000") == [41, 45, 100, 124]
+                   and sum(int(color[:2], 16) == int(color[2:4], 16) == int(color[4:], 16)
+                           for color, _ in button["palette"][:2]) == 2)
+            reason = ("Original firmware completed CCI and VoSPI, showed two thermal scenes and switched palette after BtnA"
+                      if hit else "Factory Lepton bus, thermal scene or palette response check failed")
+            detail = {"cci": cci, "no_bus_error": no_errors, "thermal_frames": thermal,
+                      "splash_frame": splash, "second_frame": second, "button_frame": button}
+        record(label, "PASS" if status == "0" and not fault and hit else "FAIL", fault or reason, frame=screen, **detail)
     else:
         screen, after = frame("stock"), frame("stock-button")
         repl = read("stock-repl", "log")
