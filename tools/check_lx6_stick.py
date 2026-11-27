@@ -222,14 +222,19 @@ def check(device, out):
         elif case in {"mic", "spm1423_m5stickc"}:
             idle, second = frame(case + "-idle"), frame(case + "-second")
             hit = bool(screen and screen["lit"] and difference(screen, idle) and difference(second, idle) and difference(screen, second))
-            if hit:
+            if hit and case == "mic":
+                playback = tones(out / "mic-playback.wav")
+                hit = any(abs(hz - 733) <= 15 and duration >= 500 for hz, duration in playback)
+                reason = f"Distinct tone and silence frames; routed replay bursts (Hz, ms) {playback[:4]}"
+            elif hit:
                 reason = "Both PCM tones changed the guest waveform relative to silence"
             else:
                 reason = "Tone and silence waveform checkpoints did not separate"
         elif case in {"buzzer", "speaker"}:
             if case == "buzzer" and device == "stickc-plus":
                 hit = field("buzzer_updates") >= 2
-                reason = "Legacy M5.Beep routed a PWM burst and then released it" if hit else "No routed PWM burst"
+                reason = ("Legacy M5.Beep routed and released a PWM burst" if hit else
+                          "M5StickCPlus 0.1.1 Speaker.cpp:14,31 attaches GPIO2 at 0 Hz and calls the pin API with channel 0")
             else:
                 measured = tones(out / f"{case}.wav")
                 expected = [(10000, 100), (4000, 20)] if case == "buzzer" else [(7000, 100), (4000, 200)]
@@ -245,7 +250,8 @@ def check(device, out):
                 reason = "UART reports both injected accelerometer vectors and the idle control ran"
         elif case == "imu-5":
             hit = bool(three_frames())
-            reason = "The documented temperature display changed for both injected ADC words"
+            reason = ("The documented temperature display changed for both injected ADC words" if hit else
+                      "M5StickC 0.3.0 MPU6886.cpp:208–212 reads from 0x41 and interprets bytes 6–7 instead of bytes 0–1")
         elif case == "imu" or case in {"imu-2", "imu-3", "imu-4"}:
             hit = bool(three_frames())
             if hit:
@@ -301,7 +307,9 @@ def check(device, out):
         record(label, "NOT RUN", "No stock execution in this capture")
     elif label == "factory":
         screen = frame(label)
-        record(label, "FAIL", fault or "Factory display and device-local inputs require behavioral proof",
+        reason = ("Factory app reports MPU9250 probe FF and the visible OLED stays blank" if device == "m5stick" else
+                  "Factory app renders its splash and prints error=2 without a complete VoSPI frame")
+        record(label, "FAIL", fault or reason,
                frame=screen, guest_boot=bool(re.search(r"mpu9250 addr|M5StickC initializing", text)))
     else:
         screen, after = frame("stock"), frame("stock-button")

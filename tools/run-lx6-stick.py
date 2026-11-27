@@ -107,6 +107,7 @@ def main():
     parser.add_argument("rom", type=Path)
     parser.add_argument("out", type=Path)
     parser.add_argument("--jobs", type=int, default=4)
+    parser.add_argument("--runtime-source", help="source revision of a previously built simulator binary")
     parser.add_argument("--case", action="append", default=[], help="only replay specified case(s)")
     parser.add_argument("--probe-stock", type=Path, help="generic Atom Lite MicroPython for factory-board controller probe")
     args = parser.parse_args()
@@ -124,8 +125,14 @@ def main():
     inventory = json.loads((args.plan / "arduino-inventory.json").read_text())
     source = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     dirty = subprocess.check_output(["git", "status", "--porcelain"], cwd=repo, text=True)
+    runtime_source = source
+    if args.runtime_source is not None:
+        runtime_source = subprocess.check_output(
+            ["git", "rev-parse", "--verify", "--end-of-options", args.runtime_source + "^{commit}"],
+            cwd=repo, text=True).strip()
     (out / "identity.json").write_text(json.dumps({
-        "source": source, "dirty": bool(dirty), "binary_sha256": digest(binary),
+        "source": source, "dirty": bool(dirty), "runtime_source": runtime_source,
+        "binary_sha256": digest(binary),
         "rom_sha256": digest(args.rom), "docs_revision": inventory["docs_revision"],
     }, indent=2) + "\n")
     jobs = []
