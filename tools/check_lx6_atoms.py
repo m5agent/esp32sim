@@ -9,8 +9,8 @@ import wave
 import zlib
 
 
-def nec_frames(path):
-    """Decode GPIO12 NEC envelopes. Microsecond-scale carrier gaps stay inside marks."""
+def nec_frames(path, pin=12):
+    """Decode one GPIO’s NEC envelopes. Microsecond-scale carrier gaps stay inside marks."""
     if not path.exists():
         return []
     rises = []
@@ -19,7 +19,7 @@ def nec_frames(path):
     for line in path.read_text().splitlines():
         if line.startswith("#"):
             ts = int(line[1:]) / 1_000_000
-        elif line in {"1s12", "0s12"}:
+        elif line in {f"1s{pin}", f"0s{pin}"}:
             current = line.startswith("1")
             if previous is False and current:
                 rises.append(ts)

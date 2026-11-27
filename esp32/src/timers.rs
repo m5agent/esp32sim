@@ -199,3 +199,88 @@ mod tests {
         }
     }
 }
+
+// ESP-IDF v3.3.6 components/soc/esp32/include/soc/frc_timer_reg.h and
+// components/esp32/esp_timer_esp32.c. The legacy esp_timer uses FRC2 as
+// a free-running, 32-bit APB up-counter with an equality alarm.
+#[derive(Default)]
+pub struct Frc2 {
+    count: u32,
+    load: u32,
+    alarm: u32,
+    control: u32,
+    phase: u64,
+    pending: bool,
+}
+
+impl Frc2 {
+    fn divider(&self) -> u64 {
+        match (self.control >> 1) & 7 { 2 => 16, 4 => 256, _ => 1 }
+    }
+    pub fn active(&self) -> bool { self.control & (1 << 7) != 0 }
+    fn distance(&self) -> u64 {
+        let delta = self.alarm.wrapping_sub(self.count);
+        if delta == 0 { 1 << 32 } else { u64::from(delta) }
+    }
+}
+
+impl Device for Frc2 {
+    fn read(&mut self, off: u32) -> u32 {
+        match off {
+            0x20 => self.load,
+            0x24 => self.count,
+            0x28 => self.control | u32::from(self.pending) << 8,
+            0x30 => self.alarm,
+            _ => 0,
+        }
+    }
+    fn write(&mut self, off: u32, value: u32) -> WriteEffect {
+        match off {
+            0x20 => { self.load = value; self.count = value; self.phase = 0; }
+            0x28 => { self.control = value & 0xff; self.phase = 0; }
+            0x2c if value & 1 != 0 => self.pending = false,
+            0x30 => self.alarm = value,
+            _ => {}
+        }
+        WriteEffect::NONE
+    }
+    fn irq_sources(&self) -> u64 { u64::from(self.pending) }
+    fn next_deadline(&self) -> Option<u64> {
+        (self.active() && !self.pending).then(|| self.distance() * self.divider() - self.phase)
+    }
+    fn tick(&mut self, ticks: u64) {
+        if !self.active() { return; }
+        let div = self.divider();
+        let elapsed = self.phase + ticks;
+        self.phase = elapsed % div;
+        let increment = elapsed / div;
+        self.pending |= increment >= self.distance();
+        self.count = self.count.wrapping_add(increment as u32);
+    }
+}
+
+#[cfg(test)]
+mod frc_tests {
+    use super::*;
+
+    #[test]
+    fn frc2_prescale_wrap_and_alarm_clear() {
+        let mut timer = Frc2::default();
+        timer.write(0x20, u32::MAX - 2);
+        timer.tick(1_000_000);
+        assert_eq!(timer.read(0x24), u32::MAX - 2);
+        timer.write(0x30, 1);
+        timer.write(0x28, 0x85);
+        assert_eq!(timer.next_deadline(), Some(64));
+        timer.tick(63);
+        assert_eq!(timer.read(0x24), 0);
+        assert_eq!(timer.irq_sources(), 0);
+        timer.tick(1);
+        assert_eq!(timer.read(0x24), 1);
+        assert_eq!(timer.irq_sources(), 1);
+        assert_eq!(timer.read(0x28), 0x185);
+        timer.write(0x2c, 1);
+        assert_eq!(timer.irq_sources(), 0);
+        assert_eq!(timer.read(0x28), 0x85);
+    }
+}

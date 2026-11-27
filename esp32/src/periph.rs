@@ -5,7 +5,7 @@
 //! Adapter completion behavior is inferred;
 //! no hardware timing validation is claimed.
 pub use crate::crypto::{ClassicAes, ClassicRsa, ClassicSha};
-use crate::{timers::ClassicTimer, rmt::ClassicRmt, spi::ClassicGpSpi, ledc::ClassicLedc};
+use crate::{timers::{ClassicTimer, Frc2}, rmt::ClassicRmt, spi::ClassicGpSpi, ledc::ClassicLedc};
 use crate::adc::ClassicAdc;
 use emu_core::{ClockDomain, ClockTree};
 use esp_periph::{
@@ -52,6 +52,7 @@ const SRC_UART1: usize = 35;
 const SRC_UART2: usize = 36;
 const SRC_RTC_CORE: usize = 46;
 // IDF v5.5.4 interrupts.h:75,79: edge sources 58/62; source 57 is ETS_TIMER2.
+const SRC_FRC2: usize = 57;
 const SRC_TG0_T0_EDGE: usize = 58;
 const SRC_TG1_T0_EDGE: usize = 62;
 
@@ -843,6 +844,7 @@ pub struct Peripherals {
     pub slc: ClassicSlc,
     pub sha: ClassicSha,
     pub timg: [ClassicTimer; 2],
+    pub frc2: Frc2,
     pub i2c: [esp_periph::i2c::I2c<16>; 2],
     pub misc: Misc,
     pub spi_exec: bool,
@@ -877,6 +879,7 @@ device_set! { Peripherals; clock: (clock) CPU_HZ, [(ClockDomain::RtcSlow, 1600)]
     0x73 "WIFI_MAC" (wifi) => [SRC_WIFI_MAC];
     0x74 "WIFI_MAC" alias (wifi) delta 0x1000 => [];
     0x75 "WIFI_MAC" alias (wifi) delta 0x2000 => [];
+    0x47 "FRC2" optional (frc2) => [SRC_FRC2];
     0x48 "RTC_IO" alias (adc.rtc_io) delta -0x400 @ 0x400..=0x4ff => [];
     0x48 "SENS" alias (adc) delta -0x800 @ 0x800..=0x8ff => [];
     0x48 "RTCCNTL" (rtc) => [SRC_RTC_CORE];
@@ -945,6 +948,7 @@ impl Peripherals {
             slc: ClassicSlc::new(),
             sha: ClassicSha::new(),
             timg: [ClassicTimer::new(0), ClassicTimer::new(1)],
+            frc2: Frc2::default(),
             i2c: [esp_periph::i2c::I2c::new_classic(), esp_periph::i2c::I2c::new_classic()],
             misc: Misc::new(),
             spi_exec: false, mcpwm_on: false,
@@ -1135,6 +1139,14 @@ impl Peripherals {
             timer.tick(ticks);
             irq_changed |= before != timer.irq_sources();
         }
+        if self.frc2.active() {
+            let before = self.frc2.irq_sources();
+            self.frc2.tick(ticks);
+            if before != self.frc2.irq_sources() {
+                self.refresh_optional(0x47);
+                irq_changed = true;
+            }
+        }
         // Pace queued host bytes. Only when some UART has any (off the hot path); cpu_scale_half() is half reference
         // ticks per CPU clock (12/6/3/2 = 40/80/160/240 MHz), so this is the current CPU clock.
         if self.uart.iter().any(|u| u.has_queued()) {
@@ -1220,7 +1232,7 @@ impl Peripherals {
                 best = best.min(t.saturating_sub(1).saturating_mul(self.apb_divider()));
             }
         }
-        for device in [&self.ledc as &dyn Device, &self.rmt as &dyn Device] {
+        for device in [&self.ledc as &dyn Device, &self.rmt, &self.frc2] {
             if let Some(t) = device.next_deadline() {
                 best = best.min(t.saturating_sub(1).saturating_mul(self.apb_divider()));
             }
