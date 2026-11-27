@@ -171,6 +171,7 @@ pub struct Opts {
     pub exit_on: Option<String>, pub timeout: Option<std::time::Duration>, pub injects: Vec<String>, pub inject_ons: Vec<String>,
     /// `--uart-tcp HOST:PORT`, `--uart1-tcp HOST:PORT`: UART0 / UART1 bytes over a TCP socket (esptool's `socket://`)
     pub uart_tcp: Option<String>, pub uart1_tcp: Option<String>,
+    pub service_fd: Option<i32>,
     pub console: Option<String>, pub console_prefix: bool, pub realtime: bool, pub web_port: Option<u16>, pub web_dir: Option<String>, pub no_reboot: bool,
     pub i2s_tone: Vec<String>,
     pub mic_wav: Vec<String>,
@@ -260,6 +261,7 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
             "--console" => o.console = Some(next()),
             "--console-prefix" => o.console_prefix = true,
             "--realtime" => o.realtime = true,
+            "--service-fd" => o.service_fd = Some(next().parse().expect("service socket descriptor")),
             "--web" => o.web_port = Some(next().parse().expect("port")),
             "--web-dir" => o.web_dir = Some(next()),
             "--pcap" => o.pcap = Some(next()),
@@ -1060,6 +1062,25 @@ fn prepare<S: Soc>(m: &mut Machine<S>, o: &Opts) -> String {
         if uart == 0 { m.console.mask &= !2; }
     }
     if let Some(p) = &o.regtrace { m.add_observer(Box::new(RegTrace::new(std::fs::File::create(p).expect("regtrace file"), o.regtrace_max, o.regtrace_from_pc))); }
+    if let Some(fd) = o.service_fd {
+        #[cfg(unix)]
+        {
+            use std::os::fd::FromRawFd;
+            if fd < 3 || o.web_port.is_some() {
+                usage_error("--service-fd requires a dedicated descriptor and cannot be combined with --web");
+            }
+            // SAFETY: this private option takes ownership of the descriptor inherited
+            // from the calling service, which must be an open Unix stream socket.
+            let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+            m.web = Some(esp_soc::web::WebServer::service(socket).expect("service socket"));
+            m.rt.enabled = true;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fd;
+            usage_error("--service-fd requires Unix sockets");
+        }
+    }
     if let Some(port) = o.web_port {
         let dir = o.web_dir.clone().unwrap_or_else(|| { let exe = std::env::current_exe().unwrap(); let mut d = exe.parent().unwrap().to_path_buf(); for _ in 0..3 { if d.join("web").exists() { break; } d = d.parent().unwrap().to_path_buf(); } d.join("web").to_string_lossy().to_string() });
         let w = esp_soc::web::WebServer::start(port, dir.clone()).expect("web server");

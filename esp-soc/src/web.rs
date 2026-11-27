@@ -8,11 +8,12 @@ use std::sync::{Arc, Mutex};
 
 /// One connected browser: frames are queued and written by a dedicated thread so a slow or
 /// frozen tab can never block the emulator. When the queue is full, new frames are dropped.
-pub struct Client { tx: std::sync::mpsc::SyncSender<Vec<u8>>, pub peer: Option<std::net::SocketAddr> }
+pub struct Client { reliable: bool, tx: std::sync::mpsc::SyncSender<Vec<u8>>, pub peer: Option<std::net::SocketAddr> }
 impl Client {
     fn send(&self, f: Vec<u8>) -> bool {
         match self.tx.try_send(f) {
             Ok(()) => true,
+            Err(std::sync::mpsc::TrySendError::Full(_)) if self.reliable => std::process::exit(1),
             Err(std::sync::mpsc::TrySendError::Full(_)) => true,          // drop this frame, keep the client
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => false, // writer thread gone: client closed
         }
@@ -31,7 +32,7 @@ pub struct Shared {
 }
 
 #[derive(Clone)]
-pub struct WebServer { pub shared: Arc<Mutex<Shared>>, pub port: u16 }
+pub struct WebServer { pub shared: Arc<Mutex<Shared>>, pub port: u16, pub(crate) service: bool }
 
 fn sha1(msg: &[u8]) -> [u8; 20] {
     let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
@@ -87,12 +88,43 @@ impl WebServer {
                 std::thread::spawn(move || handle_client(stream, s3));
             }
         });
-        Ok(WebServer { shared, port })
+        Ok(WebServer { shared, port, service: false })
+    }
+    /// Private, single-owner transport. Incoming messages are length-prefixed JSON;
+    /// outgoing messages reuse the server-side WebSocket framing.
+    #[cfg(unix)]
+    pub fn service(mut socket: std::os::unix::net::UnixStream) -> std::io::Result<Self> {
+        let mut server = Self::queued();
+        server.service = true;
+        let mut writer = socket.try_clone()?;
+        writer.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(128);
+        {
+            let mut shared = server.shared.lock().unwrap();
+            shared.queue = false;
+            shared.clients.push(Client { reliable: true, tx, peer: None });
+        }
+        std::thread::spawn(move || {
+            for message in rx {
+                if writer.write_all(&message).is_err() { std::process::exit(1); }
+            }
+        });
+        let server_reader = server.clone();
+        std::thread::spawn(move || {
+            while let Ok(message) = read_service_request(&mut socket) {
+                let mut shared = server_reader.shared.lock().unwrap();
+                if shared.incoming.len() >= 128 { std::process::exit(1); }
+                shared.incoming.push_back(message);
+            }
+            // The emulator has no independent owner once the service socket closes.
+            std::process::exit(0);
+        });
+        Ok(server)
     }
     /// A server with no sockets: everything sent is queued for whoever drains `take_outbox`
     /// (the wasm glue), and input arrives through `push_incoming*`. Same protocol, no transport.
     pub fn queued() -> WebServer {
-        WebServer { shared: Arc::new(Mutex::new(Shared { queue: true, outbox: VecDeque::new(), clients: Vec::new(), incoming: VecDeque::new(), incoming_bin: VecDeque::new(), web_dir: String::new(), hello: Vec::new() })), port: 0 }
+        WebServer { shared: Arc::new(Mutex::new(Shared { queue: true, outbox: VecDeque::new(), clients: Vec::new(), incoming: VecDeque::new(), incoming_bin: VecDeque::new(), web_dir: String::new(), hello: Vec::new() })), port: 0, service: false }
     }
     pub fn send_text(&self, s: &str) { self.emit(1, s.as_bytes()); }
     pub fn send_binary(&self, d: &[u8]) { self.emit(2, d); }
@@ -115,10 +147,24 @@ impl WebServer {
     }
     pub fn set_hello(&self, frames: Vec<Vec<u8>>) { self.shared.lock().unwrap().hello = frames; }
     /// Only socket clients replay a late-join snapshot; queued consumers use the live outbox.
-    pub fn needs_hello(&self) -> bool { !self.shared.lock().unwrap().queue }
+    pub fn needs_hello(&self) -> bool { !self.service && !self.shared.lock().unwrap().queue }
     pub fn poll_incoming(&self) -> Vec<String> { let mut sh = self.shared.lock().unwrap(); sh.incoming.drain(..).collect() }
     pub fn poll_incoming_bin(&self) -> Vec<Vec<u8>> { let mut sh = self.shared.lock().unwrap(); sh.incoming_bin.drain(..).collect() }
     pub fn clients(&self) -> usize { self.shared.lock().unwrap().clients.len() }
+}
+
+#[cfg(unix)]
+fn read_service_request(socket: &mut impl Read) -> std::io::Result<String> {
+    use std::io::{Error, ErrorKind};
+    let mut header = [0_u8; 4];
+    socket.read_exact(&mut header)?;
+    let len = u32::from_be_bytes(header) as usize;
+    if !(1..=128 * 1024).contains(&len) {
+        return Err(Error::new(ErrorKind::InvalidData, "invalid service message length"));
+    }
+    let mut body = vec![0; len];
+    socket.read_exact(&mut body)?;
+    String::from_utf8(body).map_err(|error| Error::new(ErrorKind::InvalidData, error))
 }
 
 /// The value of HTTP header `name` in a request head. Header names are case-insensitive
@@ -205,7 +251,7 @@ fn handle_client(mut stream: TcpStream, shared: Arc<Mutex<Shared>>) {
     let hello = {
         let mut sh = shared.lock().unwrap();
         let hello = sh.hello.clone();
-        sh.clients.push(Client { tx: tx.clone(), peer: stream.peer_addr().ok() });
+        sh.clients.push(Client { reliable: false, tx: tx.clone(), peer: stream.peer_addr().ok() });
         hello
     };
     // Register and snapshot atomically, then write without the emulator's mutex.
