@@ -201,10 +201,12 @@ def stack(root, case, serial, log, frame):
                 "Received: protocol=NEC, addr=0x0001, cmd=0x56" in serial, "missing two decoded IR transmissions")
         return "GPIO carrier delivered two valid NEC frames"
     if case == "nfc-1":
-        _, baseline, _ = capture(root, case + "-control", (320, 240))
+        control, baseline, _ = capture(root, case + "-control", (320, 240))
         require(field(log, "nfc-selections") >= 2 and field(baseline, "nfc-selections") == 0 and
-                "Failed to begin" not in serial, "missing tag selection or no-tag control")
-        return "guest completes NFC-A UID selection with tag present and silent no-tag control"
+                all(f"==== Dump {uid} " in serial for uid in ("04A1B2C3D4E5F6", "0456ABCD123456")) and
+                "PICC NOT exists" in control and "==== Dump" not in control,
+                "guest did not identify and reactivate both NFC-A tags with the no-tag control")
+        return "guest identifies and reactivates two Type 2 tags, with a no-tag control"
     if case in ("sdcard", "pic"):
         disk = root / f"sd-{case}.img"
         stem = "cores3_test_picture" if case == "sdcard" else "TestPicture"

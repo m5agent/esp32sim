@@ -2,6 +2,15 @@
 //! ST DS12484, sections 4.2 and 4.4–4.5 (SPI modes, commands and registers).
 use std::collections::VecDeque;
 
+fn append_crc_a(frame: &mut Vec<u8>) {
+    let crc = frame.iter().fold(0x6363u16, |crc, &byte| {
+        let low = (crc as u8) ^ byte;
+        let data = u16::from(low ^ (low << 4));
+        (crc >> 8) ^ (data << 8) ^ (data << 3) ^ (data >> 4)
+    });
+    frame.extend(crc.to_le_bytes());
+}
+
 #[derive(Default)]
 enum Phase {
     #[default]
@@ -107,7 +116,11 @@ impl St25r3916 {
                     _ => None,
                 };
                 self.pending = Some(match response {
-                    Some(data) => (now.saturating_add(250 * cycles_per_us), data),
+                    Some(mut data) => {
+                        // DS12484 §2.2.13: the decoder keeps received CRC bytes in the FIFO.
+                        if command == 0xc4 { append_crc_a(&mut data); }
+                        (now.saturating_add(250 * cycles_per_us), data)
+                    }
                     None => (now.saturating_add(2500 * cycles_per_us), Vec::new()),
                 });
             }
@@ -181,7 +194,9 @@ mod tests {
             spi(&mut chip, &[0x80, select, 0x70, uid[0], uid[1], uid[2], uid[3], bcc]);
             spi(&mut chip, &[0xc4]);
             chip.advance(250);
-            assert_eq!(spi(&mut chip, &[0x9f, 0])[1], sak);
+            assert_eq!(spi(&mut chip, &[0x5e, 0])[1], 3);
+            let expected = if sak == 4 { [4, 0xda, 0x17] } else { [0, 0xfe, 0x51] };
+            assert_eq!(spi(&mut chip, &[0x9f, 0, 0, 0])[1..], expected);
         }
         assert_eq!(chip.uid_reads, 1);
         spi(&mut chip, &[0x80, 0x50, 0]);
