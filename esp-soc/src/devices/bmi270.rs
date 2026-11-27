@@ -100,9 +100,11 @@ impl Bmi270 {
     /// Override the next conversion in sensor axes (g, dps, and optionally uT).
     pub fn set_sample(&mut self, accel: [f64; 3], gyro: [f64; 3], mag: Option<[f64; 3]>) {
         self.sample = Some((accel, gyro));
-        if let Some(aux) = &mut self.aux {
-            if let Some(field) = mag { aux.mag.field = field; }
-        }
+        if let Some(field) = mag { self.set_mag_field(field); }
+    }
+    /// Override the field at the magnetometer on the auxiliary bus.
+    pub fn set_mag_field(&mut self, field: [f64; 3]) {
+        if let Some(aux) = &mut self.aux { aux.mag.field = field; }
     }
     /// Reset values, datasheet section 5.2.
     fn reset(&mut self) {
