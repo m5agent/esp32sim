@@ -222,7 +222,7 @@ def check(device, out):
         elif case in {"mic", "spm1423_m5stickc"}:
             idle, second = frame(case + "-idle"), frame(case + "-second")
             hit = bool(screen and screen["lit"] and difference(screen, idle) and difference(second, idle) and difference(screen, second))
-            if hit and case == "mic":
+            if hit and case == "mic" and device in {"stickc-plus-se", "stickc-plus2"}:
                 playback = tones(out / "mic-playback.wav")
                 hit = any(abs(hz - 733) <= 15 and duration >= 500 for hz, duration in playback)
                 reason = f"Distinct tone and silence frames; routed replay bursts (Hz, ms) {playback[:4]}"

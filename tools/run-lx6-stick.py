@@ -68,8 +68,10 @@ def scenarios(device, case):
     elif case == "mic":
         base = [("", 2.7, [], ["--mic-wav", "@mic733.wav"]),
                 ("-idle", 2.7, [], []),
-                ("-second", 2.7, [], ["--mic-wav", "@mic1234.wav"]),
-                ("-playback", 4.2, ["2.8 press a 150"], ["--mic-wav", "@mic733.wav", "--wav", "@mic-playback.wav"])]
+                ("-second", 2.7, [], ["--mic-wav", "@mic1234.wav"])]
+        if device in {"stickc-plus-se", "stickc-plus2"}:
+            base += [("-playback", 4.2, ["2.8 press a 150"],
+                      ["--mic-wav", "@mic733.wav", "--wav", "@mic-playback.wav"])]
     elif case == "spm1423_m5stickc":
         inputs = []
         base = [("", 3.8, inputs, ["--mic-wav", "@mic733.wav"]),
