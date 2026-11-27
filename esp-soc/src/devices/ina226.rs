@@ -30,6 +30,20 @@ impl Ina226 {
     }
     pub fn supply(&mut self, mv: u16, ma: i16) { self.mv = mv; self.ma = ma; }
 
+    pub fn set_service_property(&mut self, property: &str, value: &str) -> bool {
+        match property {
+            "bus-voltage-mv" => match value.parse() { Ok(mv) => self.mv = mv, Err(_) => return false },
+            "current-ma" => match value.parse() { Ok(ma) => self.ma = ma, Err(_) => return false },
+            "shunt-ohms" => {
+                let Ok(ohms) = value.parse::<f64>() else { return false };
+                if !(0.000_001..=1.0).contains(&ohms) { return false; }
+                self.shunt_microohms = (ohms * 1_000_000.0).round() as u32;
+            }
+            _ => return false,
+        }
+        true
+    }
+
     pub fn service_state(&self) -> crate::json::Json {
         use crate::json::Json;
         Json::object([

@@ -340,7 +340,11 @@ impl BoardModel for Stick {
     }
 
     fn set_service_property(&mut self, path: &str, property: &str, value: &str) -> bool {
-        path == "/board/imu" && self.imu.as_ref().is_some_and(|imu| imu.borrow_mut().set_service_axis(property, value))
+        match (path, property) {
+            ("/board/imu", _) => self.imu.as_ref().is_some_and(|imu| imu.borrow_mut().set_service_axis(property, value)),
+            ("/board/rtc", "unix-time") => self.rtc.borrow_mut().set_unix_time(value),
+            _ => false,
+        }
     }
 
     fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {

@@ -57,6 +57,18 @@ impl Axp2101 {
         self.charging = charging;
     }
     pub fn set_vbus_mv(&mut self, mv: u16) { self.vbus_mv = mv.min(0x3fff); }
+    pub fn set_supply_property(&mut self, property: &str, value: &str) -> bool {
+        match property {
+            "charging" => match value.parse() { Ok(value) => self.charging = value, Err(_) => return false },
+            "vbat-mv" | "vin-mv" => {
+                let Ok(value @ 0..=16383) = value.parse::<u16>() else { return false };
+                if property == "vbat-mv" { self.battery_mv = value; } else { self.set_vbus_mv(value); }
+            }
+            _ => return false,
+        }
+        true
+    }
+
     pub fn supply_state(&self) -> [(&'static str, crate::json::Json); 3] {
         use crate::json::Json;
         [("vbat-mv", Json::Int(self.battery_mv.into())), ("vin-mv", Json::Int(self.vbus_mv.into())),

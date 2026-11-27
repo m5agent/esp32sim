@@ -256,6 +256,18 @@ impl StackChan {
         let positions = self.servo.positions();
         std::array::from_fn(|i| (f64::from(positions[i]) - f64::from(SERVO_ZERO[i])) * 0.3125)
     }
+    pub fn set_service_property(&mut self, path: &str, property: &str, value: &str) -> bool {
+        let mut hw = self.hw.borrow_mut();
+        match (path, property) {
+            ("/board/ina226", _) => hw.ina.set_service_property(property, value),
+            ("/board/si12t", "touch-bits") => match value.parse::<u8>() {
+                Ok(bits @ 0..=63) => { hw.touch[0x10] = bits; true }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     pub fn service_state(&self) -> [(&'static str, esp_soc::json::Json); 2] {
         use esp_soc::json::Json;
         let hw = self.hw.borrow();

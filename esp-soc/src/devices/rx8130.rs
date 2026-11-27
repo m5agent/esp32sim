@@ -46,6 +46,14 @@ impl Rx8130 {
         }
     }
     /// RX8130CE ETM50E-10: AF/AIE at bit 3, TF/TIE at bit 4 drive the active-low IRQ.
+    pub fn set_unix_time(&mut self, value: &str) -> bool {
+        let Some((_, [s, m, h, day, week, month, year])) = super::bm8563::timestamp_calendar(value, 2000)
+            else { return false };
+        self.regs[0x10..0x17].copy_from_slice(&[s, m, h, 1 << week, day, month, year]);
+        self.anchor = self.cycle;
+        true
+    }
+
     pub fn unix_time(&self) -> i64 {
         let [sec, min, hour, _, day, month, year] = self.regs[0x10..0x17].try_into().unwrap();
         super::bm8563::calendar_unix_time(2000 + i64::from(decimal(year)), month, day, hour, min, sec & 0x7f)

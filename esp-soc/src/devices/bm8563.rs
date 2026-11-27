@@ -42,6 +42,37 @@ pub(super) fn calendar_unix_time(year: i64, month: u8, day: u8, hour: u8, min: u
         + i64::from(from_bcd(min).min(59)) * 60 + i64::from(from_bcd(sec).min(59))
 }
 
+/// Convert a bounded host fixture to the RTC calendar without touching its alarm registers.
+pub(super) fn timestamp_calendar(value: &str, min_year: i64) -> Option<(i64, [u8; 7])> {
+    let timestamp: i64 = value.parse().ok()?;
+    let first = calendar_unix_time(min_year, 1, 1, 0, 0, 0);
+    let end = calendar_unix_time(2100, 1, 1, 0, 0, 0);
+    if !(first..end).contains(&timestamp) { return None; }
+    let mut seconds = timestamp - first;
+    let mut year = min_year;
+    while year < 2100 && seconds >= 365 * 86400 {
+        let year_seconds = (365 + i64::from(year % 4 == 0 && (year % 100 != 0 || year % 400 == 0))) * 86400;
+        if seconds < year_seconds { break; }
+        seconds -= year_seconds;
+        year += 1;
+    }
+    if year >= 2100 { return None; }
+    let months = [31, 28 + i64::from(year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)),
+                  31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 1;
+    for days in months {
+        if seconds < days * 86400 { break; }
+        seconds -= days * 86400;
+        month += 1;
+    }
+    let weekday = (timestamp.div_euclid(86400) + 4).rem_euclid(7) as u8;
+    let calendar = [(seconds % 60) as u8, (seconds / 60 % 60) as u8, (seconds / 3600 % 24) as u8,
+                    (seconds / 86400 + 1) as u8, 0, month, (year % 100) as u8].map(bcd);
+    let mut calendar = calendar;
+    calendar[4] = weekday;
+    Some((year, calendar))
+}
+
 impl Bm8563 {
     pub fn registers(&self) -> &[u8] { &self.regs }
     pub fn new(hz: u64) -> Self {
@@ -143,6 +174,14 @@ impl Bm8563 {
     pub fn calendar_bcd(&self) -> [u8; 7] {
         self.regs[2..9].try_into().expect("fixed register range")
     }
+    pub fn set_unix_time(&mut self, value: &str) -> bool {
+        let Some((year, mut calendar)) = timestamp_calendar(value, 1900) else { return false };
+        if year < 2000 { calendar[5] |= 0x80; }
+        self.regs[2..9].copy_from_slice(&calendar);
+        self.clock_anchor = self.cycle;
+        true
+    }
+
     pub fn unix_time(&self) -> i64 {
         let [sec, min, hour, day, _, month, year] = self.calendar_bcd();
         let base = if month & 0x80 == 0 { 2000 } else { 1900 };

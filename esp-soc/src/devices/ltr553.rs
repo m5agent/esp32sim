@@ -31,6 +31,17 @@ impl Ltr553 {
         self.sample = [ch0, ch1, ps];
         self.mark_ready();
     }
+    pub fn set_service_property(&mut self, property: &str, value: &str) -> bool {
+        let Ok(value) = value.parse::<u16>() else { return false };
+        let [ch0, ch1, ps] = self.sample;
+        match property {
+            "light-level" => self.set_sample(value, value, ps),
+            "proximity-level" if value <= 2047 => self.set_sample(ch0, ch1, value),
+            _ => return false,
+        }
+        true
+    }
+
     pub fn service_state(&self) -> crate::json::Json {
         use crate::json::Json;
         let [ch0, ch1, ps] = self.sample;

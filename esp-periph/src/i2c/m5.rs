@@ -11,6 +11,7 @@ pub struct M5pm1State {
     pub vbus_mv: u16,
     pub vinout_mv: u16,
     pub temperature_c: i16,
+    pub adc_mv: [u16; 2],
     pub charging: bool,
     pub power_off_requested: bool,
     pub driven_high: u8,
@@ -42,7 +43,7 @@ impl Default for M5pm1Gpio {
 
 impl Default for M5pm1State {
     fn default() -> Self {
-        Self { battery_mv: 3900, vbus_mv: 0, vinout_mv: 5000, temperature_c: 25,
+        Self { battery_mv: 3900, vbus_mv: 0, vinout_mv: 5000, temperature_c: 25, adc_mv: [1650, 1200],
             charging: false, power_off_requested: false,
             driven_high: 0, led_enabled: true, timer: None, gpio: M5pm1Gpio::default() }
     }
@@ -70,6 +71,10 @@ impl M5pm1State {
                 Ok(temperature @ -40..=125) => self.temperature_c = temperature,
                 _ => return false,
             },
+            "adc1-mv" | "adc2-mv" => {
+                let Ok(mv @ 0..=3300) = value.parse::<u16>() else { return false };
+                self.adc_mv[usize::from(property == "adc2-mv")] = mv;
+            }
             "gpio-input-bits" => match value.parse::<u8>() {
                 Ok(bits @ 0..=31) => for pin in 0..5 { self.gpio_input(pin, bits & (1 << pin) != 0); },
                 _ => return false,
@@ -194,6 +199,9 @@ impl M5pm1 {
         self.registers.regs[0x42] |= if was_off { 2 } else { 1 };
         if was_off { self.wake(4); }
     }
+    pub fn set_wake_source(&mut self, bits: u8) {
+        self.registers.regs[0x05] = bits & 0x7f;
+    }
     pub fn gpio_events(&self) -> u8 { self.gpio_events }
     pub fn timer_wakes(&self) -> u64 { self.timer_wakes }
     pub fn drives_irq(&self, pin: u8) -> bool {
@@ -257,9 +265,16 @@ impl I2cDevice for M5pm1 {
             // the internal temperature. The 12-bit result is little-endian.
             if reg == 0x2a {
                 let regs = &mut self.registers.regs;
-                if byte & 1 != 0 && (byte >> 1) & 7 == 6 {
+                if byte & 1 != 0 {
                     let state = self.state.lock().expect("M5PM1 state mutex poisoned");
-                    let raw = ((i32::from(state.temperature_c) + 40) * 16).clamp(0, 4095) as u16;
+                    let raw = match (byte >> 1) & 7 {
+                        channel @ (1 | 2) => {
+                            let mv = u32::from(state.adc_mv[usize::from(channel - 1)]);
+                            ((mv * 4095 + 1650) / 3300) as u16
+                        }
+                        6 => ((i32::from(state.temperature_c) + 40) * 16).clamp(0, 4095) as u16,
+                        _ => 0,
+                    };
                     [regs[0x28], regs[0x29]] = raw.to_le_bytes();
                 }
                 return self.registers.write(byte & !1);

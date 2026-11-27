@@ -29,6 +29,9 @@ impl Pm1Wiring {
             ("vin-mv", Json::Int(state.vbus_mv.into())),
             ("vinout-mv", Json::Int(state.vinout_mv.into())),
             ("temperature-c", Json::Int(state.temperature_c.into())),
+            ("adc1-mv", Json::Int(state.adc_mv[0].into())),
+            ("adc2-mv", Json::Int(state.adc_mv[1].into())),
+            ("wake-source", Json::Int(pmic.registers()[0x05].into())),
             ("driven_high", Json::Int(i64::from(state.driven_high))),
             ("registers", Json::register_bytes(pmic.registers().iter().copied())),
             ("gpio-input-bits", Json::Int(gpio_inputs.into())),
@@ -43,6 +46,11 @@ impl Pm1Wiring {
             let Ok(bits @ 0..=31) = value.parse::<u8>() else { return false };
             let mut pmic = self.pmic.borrow_mut();
             for pin in 0..5 { pmic.gpio_input(pin, bits & (1 << pin) != 0); }
+            return true;
+        }
+        if property == "wake-source" {
+            let Ok(bits @ 0..=127) = value.parse::<u8>() else { return false };
+            self.pmic.borrow_mut().set_wake_source(bits);
             return true;
         }
         self.state.lock().unwrap().set_supply_fixture(property, value)

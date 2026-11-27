@@ -224,6 +224,11 @@ fn pmic_and_expander_service_inputs_reach_guest_registers() {
     write(&mut pmic, 0x2a, &[13]);
     assert_eq!(read(&mut pmic, 0x28, 3), [0x10, 5, 12]);
     assert_eq!(read(&mut pmic, 0x26, 2), 4250u16.to_le_bytes());
+    assert!(state.lock().unwrap().set_supply_fixture("adc2-mv", "2200"));
+    write(&mut pmic, 0x2a, &[5]);
+    assert_eq!(read(&mut pmic, 0x28, 2), 2730u16.to_le_bytes());
+    pmic.set_wake_source(4);
+    assert_eq!(read(&mut pmic, 5, 1), [4]);
 
     let mut ioe = M5ioe1::new(Default::default(), 0);
     assert!(ioe.set_fixture("input-bits", "70"));

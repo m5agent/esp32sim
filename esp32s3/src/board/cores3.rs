@@ -487,8 +487,18 @@ impl BoardModel for Cores3 {
     fn camera_dvp_pins(&self) -> Option<[u8; 11]> { Some([39, 40, 41, 42, 15, 16, 48, 47, 45, 38, 46]) }
     fn named_pin(&self, _name: &str) -> Option<u8> { None }
     fn set_service_property(&mut self, path: &str, property: &str, value: &str) -> bool {
-        matches!(path, "/board/imu" | "/board/magnetometer")
-            && self.hw.borrow_mut().bmi270.set_service_axis(property, value)
+        let mut hw = self.hw.borrow_mut();
+        match (path, property) {
+            ("/board/imu" | "/board/magnetometer", _) => hw.bmi270.set_service_axis(property, value),
+            ("/board/pmic", _) => hw.pmic.set_supply_property(property, value),
+            ("/board/rtc", "unix-time") => hw.rtc.set_unix_time(value),
+            ("/board/ltr553", _) => hw.ltr553.set_service_property(property, value),
+            ("/board/aw9523", "input-bits") => match value.parse() {
+                Ok(bits) => { hw.aw9523.external = bits; true }
+                Err(_) => false,
+            },
+            _ => self.stackchan.as_mut().is_some_and(|base| base.set_service_property(path, property, value)),
+        }
     }
 
     fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {

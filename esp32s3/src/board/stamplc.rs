@@ -366,6 +366,26 @@ impl BoardModel for StamPlc {
         self.irq();
         true
     }
+    fn set_service_property(&mut self, path: &str, property: &str, value: &str) -> bool {
+        let mut devices = self.devices.borrow_mut();
+        match (path, property) {
+            ("/board/ina226", _) => devices.ina.set_service_property(property, value),
+            ("/board/rtc", "unix-time") => devices.rtc.set_unix_time(value),
+            ("/board/aw9523", "input-bits") => match value.parse() {
+                Ok(bits) => { devices.plc.external = bits; true }
+                Err(_) => false,
+            },
+            ("/board/pi4ioe", "input-bits") => match value.parse::<u8>() {
+                Ok(bits) => {
+                    for pin in 0..8 { devices.front.set_input(pin, Some(bits & (1 << pin) != 0)); }
+                    true
+                }
+                Err(_) => false,
+            },
+            _ => false,
+        }
+    }
+
     fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
         use esp_soc::json::Json;
         let devices = self.devices.borrow();

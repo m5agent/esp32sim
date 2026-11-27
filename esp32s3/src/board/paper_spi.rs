@@ -509,6 +509,10 @@ impl BoardModel for PaperSpi {
         match path {
             "/board/imu" if self.mono_board() => self.imu_chip.borrow_mut().set_service_axis(property, value),
             "/board/pmic" => self.pmic.lock().unwrap().set_supply_fixture(property, value),
+            "/board/rtc" if property == "unix-time" => self.rtc.borrow_mut().set_unix_time(value),
+            "/board/charger" if self.mono_board() && property == "charging" => {
+                self.pmic.lock().unwrap().set_supply_fixture(property, value)
+            }
             "/board/sht40" if !self.mono_board() => {
                 let [t, h] = self.env.get().map(|value| value.to_string());
                 match property {
