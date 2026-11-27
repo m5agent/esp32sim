@@ -357,7 +357,7 @@ mod tests {
         spi.write(0, USR);
         let tx = spi.take_transfer().unwrap().tx;
         assert_eq!(tx.len(), 256);
-        assert!(tx.chunks_exact(64).all(|chunk| {
+        assert!(tx.as_chunks::<64>().0.iter().all(|chunk| {
             chunk[..4] == [0x98, 0xba, 0xdc, 0xfe] && chunk[60..] == [0x10, 0x32, 0x54, 0x76]
         }));
     }

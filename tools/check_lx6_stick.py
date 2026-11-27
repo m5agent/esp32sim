@@ -154,10 +154,23 @@ def check(device, out):
                     x0, y0, x1, y1 = screen["bounds"]
                     hit = sorted([x1 - x0 + 1, y1 - y0 + 1]) == [48, 77]
                     hit &= (100 <= foreground <= 220) if step == 7 else (1000 <= foreground <= 1200)
-                elif step in {2, 3, 4}:
-                    reason = "Panel produced pixels; text and placement need a reference assertion"
-            if hit:
+                elif step == 2:
+                    # Font 1 uses 6×8 cells. The 22 glyphs occupy 1056 pixels,
+                    # including the red glyph strokes and the white cell backgrounds.
+                    bounds = [0, 0, 77, 15] if device == "stickc" else [0, 0, 131, 7]
+                    hit = (foreground == 1056 and screen["bounds"] == bounds
+                           and dict(rgb).get("ff0000") == 238 and dict(rgb).get("ffffff") == 818)
+                    reason = "The 22-character red-on-white text matches its glyph counts and wrap"
+                elif step in {3, 4}:
+                    count, bounds = {3: (103, [0, 0, 58, 7]), 4: (169, [5, 20, 59, 66])}[step]
+                    hit = dict(rgb).get("ffffff") == count and screen["bounds"] == bounds
+                    reason = "Default-font glyph counts and the documented cursor placement match"
+            if hit and step not in {2, 3, 4}:
                 reason = "Visible pixel count or fill color matches the sketch operation"
+        elif case == "quickstart-helloworld":
+            hit = bool(screen and field("pixels") and screen["colors"] == 2
+                       and 98 <= screen["lit"] <= 135 and screen["bounds"] == [0, 0, 64, 6])
+            reason = "The Hello World glyphs occupy the expected region seen in the product photograph"
         elif case == "display" or (case == "quickstart-display" and device == "stickc-plus2"):
             first = frame(case + "-first")
             if screen and field("pixels") > 135 * 240:
@@ -185,7 +198,7 @@ def check(device, out):
             idle, held = frame(case + "-idle"), frame(case + "-held")
             hit = bool(screen and (difference(screen, idle) or difference(held, idle)))
             if case == "button-7":
-                hit = bool(screen and (difference(screen, idle) or (not screen["lit"] and idle and idle["lit"])))
+                hit = bool(difference(screen, idle))
             if hit:
                 reason = "Scripted GPIO input changed the documented button display versus idle"
         elif case in {"axp192_m5stickc-1", "power-1", "battery"}:
