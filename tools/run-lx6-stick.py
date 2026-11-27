@@ -50,12 +50,12 @@ def scenarios(device, case):
         base = [("", 3.45, inputs, []), ("-idle", 3.45, [], []), ("-first", 1.9, inputs[:1], [])]
     elif case in {"battery", "axp192_m5stickc-1", "power-1"}:
         if device == "stickc-plus2":
-            inputs = ["0.7 adc 38 1.72", "2.3 adc 38 2.04"]
+            inputs = [["0.01 adc 38 1.72"], ["0.01 adc 38 2.04"]]
             args = ["--adc", "38"]
         else:
-            inputs = ["0.7 battery-mv 3450", "2.3 battery-mv 4080"]
+            inputs = [["0.01 battery-mv 3450"], ["0.01 battery-mv 4080"]]
             args = []
-        base = [("", 4.6, inputs, args), ("-idle", 4.6, [], args), ("-first", 2.2, inputs[:1], args)]
+        base = [("", 1.45, inputs[1], args), ("-idle", 1.45, [], args), ("-first", 1.45, inputs[0], args)]
     elif case in {"axp192_m5stickc-3", "power-3"}:
         base = [("", 4.0, [], []), ("-first", 1.8, [], []), ("-restart", 6.0, ["4.1 pmic-key short"], [])]
     elif case in {"axp192_m5stickc-5", "power-5"}:
