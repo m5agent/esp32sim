@@ -4,6 +4,9 @@
 //! each LED of a chain sits physically.
 pub mod aw88298;
 pub mod axp2101;
+pub mod axp192;
+pub mod ip5306;
+
 pub mod bm8563;
 pub mod bmi270;
 pub mod bmm150;
@@ -37,4 +40,3 @@ pub use spi_bitbang::SpiBitBang;
 pub use ws2812::Ws2812Chain;
 
 pub mod lp5562;
-pub mod mpu6886;
