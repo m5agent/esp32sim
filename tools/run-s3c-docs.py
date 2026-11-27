@@ -37,7 +37,7 @@ STACK = {
     "servo-1": ("2.6 servo-pose 588 748\n3 touch 160 55 1\n3.2 touch 160 55 0\n"
                 "3.6 servo-pose 460 620\n3.8 servo-angle\n"
                 "4 touch 160 175 1\n4.2 touch 160 175 0\n4.8 servo-angle\n"),
-    "servo-2": "3 head-touch 0 3\n3.4 head-touch 0 0\n3.8 servo-angle\n4 head-touch 1 2\n4.4 head-touch 1 0\n4.8 servo-angle\n",
+    "servo-2": "3 head-touch 0 3\n3.4 head-touch 0 0\n4.7 servo-angle\n5 head-touch 1 2\n5.4 head-touch 1 0\n6.8 servo-angle\n",
     "touch": "3 touch 30 30 1\n3.2 touch 70 70 1\n3.4 touch 70 70 0\n4 touch 100 120 1\n4.2 touch 100 120 0\n",
     "touchsensor": "3 head-touch 0 2\n3.5 head-touch 0 0\n4 head-touch 2 3\n",
     "wakeup": "6 touch 160 120 1\n6.2 touch 160 120 0\n",
@@ -55,7 +55,7 @@ ALTERNATE = {
     "touch": "3 touch 240 40 1\n3.4 touch 240 40 0\n",
     "touchsensor": "3 head-touch 1 3\n4 head-touch 1 0\n",
 }
-DURATIONS = {"display": 1.5, "servo-1": 5, "servo-2": 5, "imu": 5, "battery": 5,
+DURATIONS = {"display": 1.5, "servo-1": 6, "servo-2": 7, "imu": 5, "battery": 5,
              "camera": 5, "ltr553": 5, "touch": 5, "touchsensor": 5, "can": 5,
              "sensor": 6, "rtc": 8, "pic": 6, "sdcard": 6, "modbus-1": 10,
              "modbus-2": 12, "wakeup": 13, "wav": 16}
@@ -76,10 +76,12 @@ def run_case(config, binary, case, variant, image):
         script = NFC_TOUCH if case == "nfc-1" else ""
     if case == "stock":
         script = ("6 plc-key a 200\n" if config.board == "stamplc" else
-                  "6 touch 155 190 1\n6.3 touch 155 190 0\n")
+                  "3.5 touch 265 110 1\n7.0 touch 265 110 0\n")
         usb_script = out / f"{label}-usb.script"
         usb_script.write_text("idle 8500\nattach 3000\ncdc 200 \x03\ncdc 1000 print('S3C_REPL_OK')\n")
     duration = 14 if case == "stock" else DURATIONS.get(case, 8)
+    if case in ("pic", "sdcard", "sd_card") and variant == "control":
+        duration = min(duration, 4.5)
     if case == "wakeup" and variant == "sleep":
         duration = 8
     args = [str(binary), "--board", f"m5stack-{config.board}", "--boot", "rom", "--flash-image",

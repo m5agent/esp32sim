@@ -12,7 +12,6 @@ impl Servo {
         let mut regs = [0; 71];
         regs[5] = id;
         regs[11..13].copy_from_slice(&1000u16.to_be_bytes());
-        regs[40] = 1;
         regs[42..44].copy_from_slice(&zero.to_be_bytes());
         regs[56..58].copy_from_slice(&zero.to_be_bytes());
         regs[62] = 74;
@@ -47,22 +46,31 @@ impl Servo {
         let Some(target) = self.regs.get_mut(start..end).filter(|_| start >= 5 && end <= 56) else { return false };
         target.copy_from_slice(data);
         let wheel_mode = self.regs[9..13] == [0; 4];
-        if self.regs[40] == 0 || (start < 13 && end > 9) {
+        let torque_disabled = (start <= 40 && end > 40) && self.regs[40] == 0;
+        if torque_disabled || (start < 13 && end > 9) {
             self.movement = None;
             self.rotation = None;
             self.regs[66] = 0;
         }
-        if self.regs[40] == 0 { return true; }
+        if torque_disabled { return true; }
         if wheel_mode && start <= 44 && end >= 46 {
             let raw = u16::from_be_bytes([self.regs[44], self.regs[45]]);
             let effort = (raw & 1023).min(1000) as i16 * if raw & 1024 == 0 { 1 } else { -1 };
+            self.regs[40] = 1;
             self.movement = None;
             self.rotation = (effort != 0).then(|| (cycle, self.position(), effort));
             self.regs[66] = u8::from(effort != 0);
         } else if !wheel_mode && start <= 42 && end >= 44 {
-            let target = u16::from_be_bytes([self.regs[42], self.regs[43]]).min(1000);
-            let time_ms = u16::from_be_bytes([self.regs[44], self.regs[45]]).max(1);
-            let due = cycle.saturating_add(u64::from(time_ms) * (hz / 1000).max(1));
+            // FEETECH SCSCL memory table §4.1: a goal position write enables torque.
+            self.regs[40] = 1;
+            let [min, max, goal, time, speed] = [9, 11, 42, 44, 46].map(|offset| {
+                u16::from_be_bytes([self.regs[offset], self.regs[offset + 1]])
+            });
+            let max = max.min(1023);
+            let target = goal.clamp(min.min(max), max);
+            let time_ms = if speed == 0 { u64::from(time).max(1) }
+                else { (1000 * u64::from(self.position().abs_diff(target))).div_ceil(u64::from(speed)).max(1) };
+            let due = cycle.saturating_add(time_ms * (hz / 1000).max(1));
             if due > cycle {
                 self.movement = Some((cycle, due, self.position(), target));
                 self.regs[66] = 1;
