@@ -59,13 +59,21 @@ def run(board, binary, firmware, out, cases, args):
             limit = 95 if case in {"battery", "button", "microsd", "ir_nec"} else 40
         elif case in {"stock", "quickstart-longtextscroll"}:
             limit = 10
+        elif (board, case) == ("paperdiy", "m5pm1"):
+            limit = 18
         else:
             limit = 13
         if kind == "early":
             limit = 8 if board == "papercolor" else 0.25
+        elif kind == "first":
+            limit = {"button": 5.5, "display-2": 6, "quickstart-longtextscroll": 7}[case]
         command = [str(binary), "--board", f"m5stack-{board}", "--boot", "rom",
                    "--flash-image", str(image), "--console", "both", "--max-seconds", str(limit),
                    "--tft-png", str(png), "--no-dump"]
+        if (board, case) == ("paperdiy", "m5pm1"):
+            elf = image.with_name("sketch.elf")
+            if elf.is_file():
+                command += ["--elf", str(elf), "--trace-fn", "_Z4loopv"]
         lines = list(INPUT.get(case, ()))
         if case == "display-2":
             lines = ["4.0 press a 350", "8.0 press b 400"]
@@ -75,7 +83,7 @@ def run(board, binary, firmware, out, cases, args):
             lines = ["5.0 adc 3 1.75", "10.0 adc 3 2.1"]
         elif case == "battery" and board == "papermono":
             lines = ["5.0 paper-battery 3678 0", "10.0 paper-battery 4200 1"]
-        if kind == "input":
+        if kind in {"input", "first"}:
             if (board, case) in RTC_WIFI:
                 command += ["--wifi", RTC_WIFI[board, case], "--net", "none"]
             if lines:
@@ -107,6 +115,8 @@ def run(board, binary, firmware, out, cases, args):
     jobs += [(case, "control") for case in cases if case in INPUT
              or case in {"display-2", "imu", "sdcard", "mic"} or (board, case) in RTC_WIFI]
     jobs += [(case, "early") for case in cases if case.startswith(("display", "quickstart"))]
+    if board == "paperdiy":
+        jobs += [(case, "first") for case in cases if case in {"button", "display-2", "quickstart-longtextscroll"}]
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         return list(pool.map(lambda job: one(*job), jobs))
 

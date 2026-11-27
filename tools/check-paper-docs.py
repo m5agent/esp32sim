@@ -14,7 +14,7 @@ runner = module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 
-def verify(board, case, log, pixels, control, early):
+def verify(board, case, log, pixels, control, early, control_frame, first_frame):
     def pixel(x, y):
         pos = (y * runner.DIMS[board][0] + x) * 3
         return tuple(pixels[pos:pos + 3])
@@ -26,6 +26,24 @@ def verify(board, case, log, pixels, control, early):
         if len(colors) < 2:
             return "FAIL", "No completed nonuniform stock frame"
         return "NOT RUN", "Stock rendered; use the service probe for input and REPL"
+    if board == "paperdiy" and case in {"button", "display-2"}:
+        if not all((pixels, first_frame, control_frame)):
+            return "NOT RUN", "Two action frames and a no-input frame are required"
+        if len({pixels, first_frame, control_frame}) != 3 or len(colors) < 2:
+            return "FAIL", "The two button actions did not yield distinct completed frames"
+        return "PASS", "Each action changed the frame relative to the no-input control"
+    if (board, case) == ("paperdiy", "m5pm1"):
+        def loop_times(trace):
+            return [float(t) for t in re.findall(r"(?m)^\[fn\].*? t=([\d.]+)s .*? _Z4loopv\(", trace or "")]
+
+        active, idle = loop_times(log), loop_times(control)
+        if not active or not idle:
+            return "NOT RUN", "Guest loop traces are missing"
+        if ("Power-on timer configured" in log and "Power-off timer configured" in log
+            and re.search(r"chip reset at t=8\.\d+s: cause 0x1", log)
+            and 12 < max(active) < 14 and max(idle) > 17 and "chip reset at" not in control):
+            return "PASS", "Timed restart and shutdown observed against a running control"
+        return "FAIL", "Timed reset or stop did not match the guest and control traces"
     if case.startswith(("display", "quickstart")):
         if not colors or len(colors) == 1:
             return "FAIL", "No completed nonuniform application frame"
@@ -33,6 +51,12 @@ def verify(board, case, log, pixels, control, early):
             return "NOT RUN", "Completed early frame capture missing"
         if early != {(255, 255, 255)}:
             return "FAIL", "Early capture did not retain the white frame"
+        if (board, case) == ("paperdiy", "quickstart-longtextscroll"):
+            if first_frame is None:
+                return "NOT RUN", "Earlier scroll frame missing"
+            if pixels != first_frame and len(color_counts(first_frame)) > 1:
+                return "PASS", "Two completed nonuniform frames show the scroll changing"
+            return "FAIL", "The scroll did not move between captures"
         if (board, case) == ("paperdiy", "display-1"):
             shades = [pixel(x, 395)[0] for x in (145, 223, 297, 375)]
             if not shades[0] < shades[1] < shades[2] or shades[3] != shades[0]:
@@ -104,8 +128,14 @@ def main():
                 if (case, "early") in completed:
                     early_colors = set(color_counts(png_rgb(early.read_bytes(), dimensions=runner.DIMS[board])))
                 control_log = control.read_text(errors="replace") if (case, "control") in completed else None
+                def frame_at(kind):
+                    if (case, kind) in completed:
+                        path = out / f"{case}-{kind}.png"
+                        return png_rgb(path.read_bytes(), dimensions=runner.DIMS[board])
+                    return None
+
                 state, reason = verify(board, case, (out / f"{case}.log").read_text(errors="replace"),
-                                       pixels, control_log, early_colors)
+                                       pixels, control_log, early_colors, frame_at("control"), frame_at("first"))
             except (OSError, ValueError) as exc:
                 state, reason = "FAIL", str(exc)
         verdicts.append({"case": case, "verdict": state, "reason": reason})
