@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import struct
 import wave
+import zlib
 
 
 def nec_frames(path):
@@ -50,6 +51,31 @@ def imu_samples(log):
 
 def close(expected, actual):
     return all(abs(a - b) < 0.25 for a, b in zip(actual, expected))
+
+
+def matrix_pixels(path):
+    """Read one RGB8 value per LED from the simulator's scaled matrix PNG."""
+    blob = path.read_bytes() if path.exists() else b""
+    if not blob.startswith(b"\x89PNG\r\n\x1a\n"):
+        return []
+    width, height, depth, color, _, _, interlaced = struct.unpack_from(">IIBBBBB", blob, 16)
+    if not width or width != height or width % 5 or (depth, color, interlaced) != (8, 2, 0):
+        return []
+    compressed = bytearray()
+    at = 8
+    while at + 12 <= len(blob):
+        size, kind = struct.unpack_from(">I4s", blob, at)
+        if kind == b"IDAT":
+            compressed.extend(blob[at + 8:at + 8 + size])
+        at += size + 12
+    pixels = zlib.decompress(compressed)
+    stride = width * 3 + 1
+    if len(pixels) != stride * height or any(pixels[::stride]):
+        return []
+    scale = width // 5
+    row_starts = range(1, len(pixels), stride * scale)
+    return [tuple(pixels[row + x:row + x + 3])
+            for row in row_starts for x in range(0, width * 3, 3 * scale)]
 
 
 def check(device, out):
@@ -116,6 +142,9 @@ def check(device, out):
            and button == ["0", "1", "0"] and bool(rgb),
            {"board": observed, "button": button, "rgb": bool(rgb)})
     record("stock-startup", "MicroPython" in stock and ">>> " in stock and "Traceback" not in stock, "ROM to stock MicroPython prompt")
+    if matrix:
+        lit = {i: rgb for i, rgb in enumerate(matrix_pixels(out / "stock-layout.png")) if any(rgb)}
+        record("stock-layout", ran("stock-layout") and lit == {8: (255, 0, 0), 20: (0, 0, 255)}, lit)
     if device in {"atomu", "atom-echo"}:
         audio = {}
         for suffix in ("silent", "733", "1234"):

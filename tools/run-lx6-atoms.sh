@@ -77,6 +77,14 @@ cat >"$out/stock.script" <<'SCRIPT'
 SCRIPT
 run stock "$stock/$device.bin" 3.5 --script "$out/stock.script" --tft-png "$out/stock.png"
 
+if [[ $device == atom-matrix || $device == atom-matrix-v11 ]]; then
+    cat >"$out/layout.script" <<'LAYOUT'
+1.8 uart0-cr import M5; M5.begin(); from hardware import RGB; rgb=RGB(io=27,n=25,type='WS2812')
+2.1 uart0-cr rgb.set_brightness(100); rgb.fill_color(0); rgb.set_color(8,0xff0000); rgb.set_color(20,0x0000ff)
+LAYOUT
+    run stock-layout "$stock/$device.bin" 2.5 --script "$out/layout.script" --tft-png "$out/stock-layout.png"
+fi
+
 if [[ $device == atomu || $device == atom-echo ]]; then
     cat >"$out/audio.script" <<'SCRIPT'
 1.8 uart0-cr import M5, time; M5.begin(); buf=bytearray(3200); print('LX6'+'-MIC', M5.Mic.begin(), M5.Mic.record(buf,16000,False))
