@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use crate::device::{Device, WriteEffect};
 use crate::regram::RegRam;
 use emu_core::ClockDomain;
+use crate::rmt_rx::RxChannels;
 
 /// The WS2812 bit of one RMT symbol's durations and levels: 1 when its high time exceeds its
 /// low time. A macro so the RMT engine's per-symbol loop keeps exactly this inline code.
@@ -181,9 +182,8 @@ pub struct DmaQueue { symbols: VecDeque<u32>, resume: u32 }
 /// S3 TX3 DMA view of the shared transmitter; compact C3/C6 transmitters never select DMA.
 /// IDF v5.5.4 components/soc/esp32s3/register/soc/rmt_struct.h:117-120 puts
 /// DMA_ACCESS_EN at bit 25 (v4.4.8 calls bits 25..31 reserved).
-/// The queue is allocated only when staged symbols are inserted.
-#[repr(transparent)]
-pub struct RmtDma(Rmt);
+/// DMA queue and non-DMA receive state are allocated only when configured.
+pub struct RmtDma(Rmt, Option<Box<RxChannels>>);
 impl std::ops::Deref for RmtDma {
     type Target = Rmt;
     fn deref(&self) -> &Rmt { &self.0 }
@@ -192,7 +192,7 @@ impl std::ops::DerefMut for RmtDma {
     fn deref_mut(&mut self) -> &mut Rmt { &mut self.0 }
 }
 impl RmtDma {
-    pub fn new(cpu_hz: u64) -> Self { Self(Rmt::new(cpu_hz)) }
+    pub fn new(cpu_hz: u64) -> Self { Self(Rmt::new(cpu_hz), None) }
     pub fn dma_fifo(&mut self) -> &mut VecDeque<u32> { &mut self.0.dma_fifo.get_or_insert_with(Default::default).symbols }
     pub fn dma_fifo_len(&self) -> usize { self.0.dma_fifo.as_ref().map_or(0, |fifo| fifo.symbols.len()) }
     /// The descriptor after the last staged SUC_EOF node of a ring still being fed, or 0.
@@ -203,7 +203,25 @@ impl RmtDma {
     #[cold]
     #[inline(never)]
     pub fn clear_dma_fifo(&mut self) { self.0.dma_fifo = None; }
+    pub fn rx_active(&self) -> bool { self.1.as_deref().is_some_and(RxChannels::active) }
+    pub fn rx_deadline(&self) -> Option<u64> {
+        self.1.as_ref()?.next_deadline(u64::from(self.0.cpu_per_apb))
+    }
+    pub fn sample_rx(&mut self, cycle: u64, level: impl Fn(usize) -> Option<bool>) -> bool {
+        let ratio = u64::from(self.0.cpu_per_apb);
+        self.1.as_mut().is_some_and(|rx| rx.sample(&mut self.0, cycle, ratio, level))
+    }
+    pub fn read(&self, off: u32) -> u32 {
+        if !RxChannels::handles(off) { return self.0.read(off); }
+        self.1.as_ref().map_or_else(|| {
+            if off >= 0x60 { (4 + (off - 0x60) / 4) * RMT_MEM_WORDS as u32 } else { 0 }
+        }, |rx| rx.read(off))
+    }
     pub fn write(&mut self, off: u32, v: u32) {
+        if RxChannels::handles(off) {
+            self.1.get_or_insert_with(Default::default).write(off, v);
+            return;
+        }
         self.0.write(off, v);
         // IDF v5.5.4 components/hal/esp32s3/include/hal/rmt_ll.h:237-240: DMA is TX3 only.
         // components/soc/esp32s3/register/soc/rmt_reg.h:575-581: AFIFO_RST bit 23.
@@ -214,7 +232,7 @@ impl RmtDma {
     pub fn tick(&mut self, cycles: u64) { self.0.tick_tx::<true>(cycles); }
 }
 impl Device for RmtDma {
-    fn read(&mut self, off: u32) -> u32 { self.0.read(off) }
+    fn read(&mut self, off: u32) -> u32 { RmtDma::read(self, off) }
     fn write(&mut self, off: u32, v: u32) -> WriteEffect { RmtDma::write(self, off, v); WriteEffect::NONE }
     fn irq_sources(&self) -> u64 { self.0.irq() as u64 }
     fn clock(&self) -> Option<ClockDomain> { Some(ClockDomain::Cpu) }

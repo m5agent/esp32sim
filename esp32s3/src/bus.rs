@@ -968,7 +968,7 @@ impl SocBus {
             let until = u64::from(self.tick_pending).saturating_add(deadline.saturating_sub(self.cycles));
             budget = budget.min(until.clamp(1, u64::from(MAX_TICK_DEFER)) as u32);
         }
-        if let Some(deadline) = self.board.next_deadline() {
+        if let Some(deadline) = self.board.next_deadline().into_iter().chain(self.periph.rmt.rx_deadline()).min() {
             let until_deadline = u64::from(self.tick_pending)
                 .saturating_add(deadline.saturating_sub(self.cycles))
                 .clamp(1, u64::from(cap));
@@ -1042,6 +1042,13 @@ impl SocBus {
             }
         }
         if self.board_edges { self.irq_dirty |= esp_soc::gpio::drain_board_inputs(&mut *self.board, &mut self.periph.gpio, &mut self.gpio_events, self.cycles); }
+        if self.periph.rmt.rx_active() {
+            let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
+            // ESP-IDF 5.4.2 esp32s3 gpio_sig_map.h: RMT_SIG_IN0..3 are 81..84.
+            self.irq_dirty |= self.periph.rmt.sample_rx(self.cycles, |channel| {
+                routes.matrix_input(81 + channel).map(|pin| self.periph.gpio.level(pin))
+            });
+        }
         self.complete_spi2_dma();
         self.deliver_spi2_transfer();
         self.complete_spi3_dma();
