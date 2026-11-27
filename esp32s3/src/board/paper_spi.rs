@@ -116,6 +116,7 @@ pub struct PaperSpi {
     leds: Ws2812Chain,
     sd: Option<Box<SpiSdCard>>,
     output: u64,
+    soc_was_on: bool,
     sd_selected: bool,
     busy_level: bool,
     nfc_level: bool,
@@ -140,7 +141,7 @@ impl PaperSpi {
             env: Rc::new(Cell::new([23.0, 45.0])), measurements: Default::default(), now: Default::default(),
             nfc: Default::default(), radio: None, dac: Es8311::new(),
             adc: Rc::new(RefCell::new(Es7210::new())), leds: Ws2812Chain::new(2),
-            sd: None, output: 0, sd_selected: false, busy_level, nfc_level: false,
+            sd: None, output: 0, soc_was_on: true, sd_selected: false, busy_level, nfc_level: false,
             radio_levels: [false; 2], edges: Vec::new(),
         }
     }
@@ -180,7 +181,7 @@ impl BoardModel for PaperSpi {
 
     fn i2c_devices(&mut self) -> Vec<(u8, u8, Box<dyn I2cDevice>)> {
         self.i2c.reset();
-        self.i2c.attach(0x6e, M5pm1::new(self.pmic.clone()));
+        self.i2c.attach(0x6e, M5pm1::with_power_timer(self.pmic.clone(), CPU_HZ));
         self.i2c.attach(0x32, Rx8130::new(self.now.clone(), CPU_HZ));
         if self.mono_board() {
             self.i2c.attach(0x4f, M5ioe1::new(Default::default(), 0).with_outputs(self.expander.clone()));
@@ -270,6 +271,7 @@ impl BoardModel for PaperSpi {
 
     fn next_deadline(&self) -> Option<u64> {
         self.display_deadline().into_iter()
+            .chain(self.pmic.lock().unwrap().power_deadline())
             .chain(self.nfc.borrow().deadline())
             .chain(self.radio.as_ref().and_then(|r| r.chip.deadline(self.now.get())))
             .chain(self.radio.as_ref().filter(|r| r.active && r.peer.is_some()).map(|r| r.next_poll))
@@ -282,6 +284,19 @@ impl BoardModel for PaperSpi {
     }
     fn advance_to(&mut self, cycle: VirtualCycle) {
         self.now.set(cycle);
+        let soc_on = {
+            let mut pmic = self.pmic.lock().unwrap();
+            pmic.advance_power_timer(cycle);
+            !pmic.power_off_requested
+        };
+        if self.soc_was_on && !soc_on {
+            match &mut self.display {
+                Display::Mono(panel) => panel.power_loss(),
+                Display::Color(panel) => panel.reset(),
+            }
+            self.nfc.borrow_mut().reset();
+        }
+        self.soc_was_on = soc_on;
         if self.mono_board() { self.imu.cycle.store(cycle, std::sync::atomic::Ordering::Relaxed); }
         match &mut self.display { Display::Mono(p) => p.advance_to(cycle), Display::Color(p) => p.advance_to(cycle) }
         self.nfc.borrow_mut().advance(cycle);
@@ -299,6 +314,7 @@ impl BoardModel for PaperSpi {
         }
         self.update_edges();
     }
+    fn soc_powered(&self) -> Option<bool> { Some(!self.pmic.lock().unwrap().power_off_requested) }
     fn take_edges(&mut self) -> Vec<BoardEdge> { std::mem::take(&mut self.edges) }
 
     fn display(&self) -> Option<(u32, u32, Vec<u16>, u64)> {
