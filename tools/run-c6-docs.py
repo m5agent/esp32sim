@@ -54,7 +54,7 @@ def run(board):
                       ["--imu-motion", "1"]))
         cases.append(("touch-first", args.firmware_dir / "touch/sketch.merged.bin", 2.5,
                       SCRIPTS["nesso-n1", "touch"], []))
-        cases.append(("power-other", args.firmware_dir / "power-2/sketch.merged.bin", 8.5, "", []))
+        cases.append(("power-other", args.firmware_dir / "power-2/sketch.merged.bin", 7.5, "", []))
     else:
         cases.append(("program-other", args.firmware_dir / "program/sketch.merged.bin", 8.1, "", []))
     if args.stock:
