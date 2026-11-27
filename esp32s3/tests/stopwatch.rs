@@ -72,13 +72,43 @@ fn factory_devices_and_active_low_button_inputs() {
         assert_eq!(board.name(), "stopwatch");
         let devices = board.i2c_devices();
         assert_eq!(devices.iter().map(|(bus, addr, _)| (*bus, *addr)).collect::<Vec<_>>(),
-            [(0, 0x6e), (0, 0x4f), (0, 0x15)]);
+            [(0, 0x6e), (0, 0x4f), (0, 0x15), (0, 0x32), (0, 0x68), (0, 0x18),
+             (1, 0x6e), (1, 0x4f), (1, 0x15), (1, 0x32), (1, 0x68), (1, 0x18)]);
         assert_eq!(board.named_pin("a"), Some(2));
         assert_eq!(board.named_pin("btn_b"), Some(1));
         assert_eq!(board.named_pin("missing"), None);
-        assert_eq!(board.input_levels(), [(38, false), (2, true), (1, true)]);
+        assert_eq!(board.input_levels(), [(38, false), (2, true), (1, true), (12, true), (13, true), (47, true), (48, true)]);
         assert_eq!(board.display().map(|(w, h, _, _)| (w, h)), Some((468, 466)));
     }
+}
+
+#[test]
+fn codec_rail_and_amplifier_are_independent_speaker_gates() {
+    let mut board = StopWatch::new();
+    let mut devices = board.i2c_devices();
+    power_up(&mut devices);
+    let gain = |b: &StopWatch| b.i2s_codecs().unwrap().speaker_gain;
+    assert!(!device(&mut devices, 0x18).start(false));
+    update(&mut devices, 0x4f, 0x05, 4, 0);
+    assert_eq!(read(&mut devices, 0x18, 0xfd, 2), [0x83, 0x11]);
+    for (reg, value) in [(0, 0x80), (1, 0xb5), (0x0d, 1), (0x12, 0), (0x13, 0x10), (0x32, 0xbf)] {
+        write(&mut devices, 0x18, reg, value);
+    }
+    update(&mut devices, 0x4f, 0x04, 2, 0);
+    update(&mut devices, 0x4f, 0x14, 0, 2);
+    assert_eq!(gain(&board), 0.0);
+    update(&mut devices, 0x4f, 0x06, 2, 0);
+    assert_eq!(gain(&board), 1.0);
+    update(&mut devices, 0x4f, 0x06, 0, 2);
+    assert_eq!(gain(&board), 0.0);
+    assert_eq!(read(&mut devices, 0x18, 0, 1), [0x80]);
+    update(&mut devices, 0x4f, 0x06, 2, 0);
+    update(&mut devices, 0x4f, 0x05, 0, 4);
+    assert_eq!(gain(&board), 0.0);
+    assert!(!device(&mut devices, 0x18).start(false));
+    update(&mut devices, 0x4f, 0x05, 4, 0);
+    assert_eq!(read(&mut devices, 0x18, 0, 1), [0x1f]);
+    assert_eq!(gain(&board), 0.0);
 }
 
 #[test]
@@ -135,7 +165,7 @@ fn reset_pulse_between_board_callbacks_clears_pixels_and_tear_state() {
 }
 
 #[test]
-fn rail_off_and_latched_pmic_shutdown_disable_panel_without_halting_cpu() {
+fn rail_off_and_latched_pmic_shutdown_disable_panel() {
     let mut board = StopWatch::new();
     let mut devices = board.i2c_devices();
     power_up(&mut devices);
@@ -154,7 +184,8 @@ fn rail_off_and_latched_pmic_shutdown_disable_panel_without_halting_cpu() {
     board.advance_to(10_000_000);
     assert_eq!(board.next_deadline(), None);
     assert!(board.display().unwrap().2.iter().all(|&p| p == 0));
-    assert_eq!(board.report(), "[stopwatch] power_off_requested=true");
+    assert!(board.report().starts_with("[stopwatch] power_off_requested=true"));
+    assert_eq!(board.soc_powered(), Some(false));
     assert_eq!(read(&mut devices, 0x6e, 0, 2), [0x50, 0x20]);
 }
 

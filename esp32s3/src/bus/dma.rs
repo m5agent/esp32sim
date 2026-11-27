@@ -341,7 +341,8 @@ impl SocBus {
             signals.clock = Self::i2s_clock_signals(port as usize, !i2s.rx_slave());
             let [bck, ws] = signals.clock;
             let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
-            if routes.matrix_output(c.bck as usize, bck as u32) && routes.matrix_output(c.ws as usize, ws as u32)
+            if routes.matrix_output(c.bck as usize, bck as u32)
+                && routes.matrix_output(c.ws as usize, ws as u32)
                 && routes.matrix_input(signals.data) == Some(c.din)
                 && c.mck.is_none_or(|pin| routes.matrix_output(pin as usize, if port == 0 { 23 } else { 21 })) {
                 c.mic_lanes
@@ -432,6 +433,12 @@ impl SocBus {
                 && routes.matrix_output(codecs.dout as usize, if which == 0 { 25 } else { 30 }) { codecs.speaker_gain } else { 0.0 };
             if gain == 0.0 { samples.fill(0); }
             else if gain != 1.0 { for sample in &mut samples { *sample = (f32::from(*sample) * gain).round() as i16; } }
+        }
+        if let Some(pin) = self.board.i2s_buzzer_pin() {
+            let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
+            if !routes.matrix_output(pin as usize, if which == 0 { 25 } else { 30 }) { return; }
+            let rate = if which == 0 { self.periph.i2s0.sample_rate } else { self.periph.i2s1.sample_rate };
+            self.board.i2s_buzzer_audio(rate, &mut samples);
         }
         let i2s = if which == 0 { &mut self.periph.i2s0 } else { &mut self.periph.i2s1 };
         i2s.frames_out += samples.len() as u64;

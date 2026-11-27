@@ -31,6 +31,7 @@ pub mod dma2d;
 pub mod ppa;
 pub mod i2s;
 pub mod rmt;
+mod rmt_rx;
 pub mod rmt_compact;
 pub mod gpspi;
 pub mod rng;

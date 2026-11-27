@@ -219,6 +219,11 @@ pub trait BoardModel {
     fn pdm_mic(&self) -> Option<(u8, u8)> { None }
     /// GPIO that receives the camera master clock, if required for parallel capture.
     fn camera_xclk_pin(&self) -> Option<u8> { None }
+    /// Single-bit delta-sigma speaker on I2S data out.
+    fn i2s_buzzer_pin(&self) -> Option<u8> { None }
+    fn i2s_buzzer_audio(&mut self, _rate: u32, _samples: &mut [i16]) {}
+    /// Observe a short, non-wrapping RMT transfer routed to this pin.
+    fn rmt_symbols(&mut self, _pin: u8, _tick_hz: u32, _symbols: &[u32]) {}
 }
 
 pub type Board = Box<dyn BoardModel>;

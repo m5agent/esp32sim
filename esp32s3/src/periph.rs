@@ -513,6 +513,9 @@ impl Peripherals {
             if self.i2c[bus].has_pinned_devices() {
                 let sda = if bus == 0 { 90 } else { 92 };
                 let pins = self.i2c_pin(sda).zip(self.i2c_pin(sda - 1));
+                if self.i2c[bus].log && pins.is_none() {
+                    eprintln!("[i2c{bus}] transfer without a bidirectional pin route");
+                }
                 self.i2c[bus].set_pins(pins);
             }
         }

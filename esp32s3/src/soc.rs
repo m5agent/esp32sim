@@ -119,6 +119,7 @@ impl esp_soc::SocBus for SocBus {
     fn flush_ticks(&mut self) { SocBus::flush_ticks(self) }
     fn touch_input(&mut self, x: u16, y: u16, down: bool) {
         self.board.touch_at(self.cycles, x, y, down);
+        if let Some((pin, level)) = self.board.touch_irq() { self.gpio_set_input(pin, level); }
         if self.board.next_deadline().is_some() { self.refresh_tick_budget(); }
     }
     fn board_command(&mut self, verb: &str, args: &[&str]) -> bool {

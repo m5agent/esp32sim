@@ -25,6 +25,8 @@ pub struct Co5300 {
     x: u16,
     y: u16,
     pending: Option<u8>,
+    wire_header: [u8; 4],
+    wire_bytes: usize,
     args: [u8; 4],
     arg_count: usize,
     pixel_hi: Option<u8>,
@@ -56,6 +58,8 @@ impl Co5300 {
             x: 0,
             y: 0,
             pending: None,
+            wire_header: [0; 4],
+            wire_bytes: 0,
             args: [0; 4],
             arg_count: 0,
             pixel_hi: None,
@@ -146,21 +150,48 @@ impl Co5300 {
 
     pub fn take_edges(&mut self) -> Vec<BoardEdge> { std::mem::take(&mut self.edges) }
 
+    /// CS begins a new instruction, independent of the host's FIFO refill boundaries.
+    pub fn select(&mut self) { self.wire_bytes = 0; }
+
+    pub fn selected_bytes(&mut self, mut bytes: &[u8]) {
+        let available = 4 - self.wire_bytes;
+        if available > 0 {
+            let read = bytes.len().min(available);
+            self.wire_header[self.wire_bytes..self.wire_bytes + read].copy_from_slice(&bytes[..read]);
+            self.wire_bytes += read;
+            if self.wire_bytes != 4 { return; }
+            let [opcode, _, command, _] = self.wire_header;
+            if matches!(opcode, 0x02 | 0x32) { self.command(command); }
+            else { self.pending = None; }
+            // SWRESET recreates panel state while the physical CS remains asserted.
+            self.wire_bytes = 4;
+            bytes = &bytes[read..];
+        }
+        self.write_data(bytes);
+    }
+
     pub fn transaction(&mut self, tx: &[u8]) {
         let data = if tx.len() >= 4 && matches!(tx[0], 0x02 | 0x32) {
-            let command = tx[2];
-            if command == 0x01 {
-                self.reset();
-                return;
-            }
-            self.pending = Some(command);
-            self.arg_count = 0;
-            self.pixel_hi = None;
-            if command == 0x35 { self.tear_enabled = true; self.schedule_rise(); }
-            if command == 0x34 { self.disable_tear(); }
-            if command == 0x2c { self.x = self.x0; self.y = self.y0; self.frames += 1; }
+            self.command(tx[2]);
             &tx[4..]
         } else { tx };
+        self.write_data(data);
+    }
+
+    fn command(&mut self, command: u8) {
+        if command == 0x01 {
+            self.reset();
+            return;
+        }
+        self.pending = Some(command);
+        self.arg_count = 0;
+        self.pixel_hi = None;
+        if command == 0x35 { self.tear_enabled = true; self.schedule_rise(); }
+        if command == 0x34 { self.disable_tear(); }
+        if command == 0x2c { self.x = self.x0; self.y = self.y0; self.frames += 1; }
+    }
+
+    fn write_data(&mut self, data: &[u8]) {
         match self.pending {
             Some(command @ (0x2a | 0x2b | 0x44)) => {
                 let needed = if command == 0x44 { 2 } else { 4 };
@@ -533,4 +564,18 @@ mod tests {
         assert_eq!((panel.pending, panel.pixel_hi, panel.frames, panel.pixels_written), (None, None, 0, 0));
     }
 
+}
+
+#[cfg(test)]
+#[test]
+fn cs_frames_bytewise_commands_and_preserves_pixel_data_prefix() {
+    let mut panel = Co5300::new(4, 4, 6);
+    for bytes in [[2, 0, 0x2a, 0, 0, 6, 0, 9], [2, 0, 0x2b, 0, 0, 2, 0, 2]] {
+        panel.select();
+        for byte in bytes { panel.selected_bytes(&[byte]); }
+    }
+    panel.select();
+    for byte in [0x32, 0, 0x2c, 0] { panel.selected_bytes(&[byte]); }
+    panel.selected_bytes(&[0x02, 0, 0x2a, 0, 0x12, 0x34, 0xab, 0xcd]);
+    assert_eq!(&panel.frame[8..12], &[0x0200, 0x2a00, 0x1234, 0xabcd]);
 }

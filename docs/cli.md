@@ -506,3 +506,42 @@ Invalid samples leave queue and time intact. Push between emulator runs at the
 bus's current cycle count. Conversion uses `AnalogInputs.cpu_hz`. Buffers retain
 two seconds, drop oldest samples on overflow, and hold the last value on
 underrun. Both forms preserve main's completed-conversion observation counters.
+
+### M5Stack small-display S3 boards
+
+| CLI board | Model | Default flash / PSRAM |
+| --- | --- | --- |
+| `m5stack-cardputer` | Original Cardputer K132 | 8 MiB / 0 MiB |
+| `m5stack-dial` | Dial K130 | 8 MiB / 0 MiB |
+| `m5stack-sticks3` | StickS3 K150 | 8 MiB / 8 MiB |
+| `stopwatch` or `m5stack-stopwatch` | StopWatch C152 with CST820 | 16 MiB / 8 MiB |
+
+Load a compatible prebuilt merged firmware with `--boot rom --flash-image FILE`.
+Use `--script FILE` for input and `--tft-png FILE` for the final framebuffer.
+Cardputer and Cardputer-ADV have distinct keyboard and microphone wiring. The
+original profile uses the K132 GPIO matrix, `key LABEL [ms]` for timed key
+presses, `key-edge LABEL 0|1` for explicit state, `press g0 MS`, and `--sd`
+or `--sd-rw` for the SPI microSD. The Cardputer microphone takes `--mic-wav`
+on I2S0 with PDM clock GPIO43 and data GPIO46. Use `power-switch 0|1`
+for the battery switch and `vbus 0|1` for USB power.
+
+Dial supports `knob cw|ccw STEPS`, `press button MS`, and `touch X Y 0|1`.
+`rfid 04010203` presents a synthetic four-byte UID and `rfid none` removes
+it. The virtual MIFARE Classic 1K tag supports selection and authenticated
+data-block reads and writes. RF modulation and Crypto1 are outside this model.
+
+StickS3 and StopWatch use `press a MS`, `press b MS`, `battery MV 0|1`,
+`pwrkey`, and `imu AX AY AZ GX GY GZ` (g and degrees per second).
+`pm1-gpio PIN 0|1` drives an external PM1 pin. The digital power model
+uses guest I2C configuration for the timer and power switch. StickS3 also
+accepts `ir-nec HEX_ADDRESS HEX_COMMAND` and drives the demodulated signal
+onto GPIO42. StopWatch motion and RX8130 nIRQ share the PM1 wake input.
+The StopWatch framebuffer retains the existing 468×466 API layout.
+
+Run the prebuilt regression cases with
+`tools/run-s3b-docs.sh BOARD BINARY OUTDIR`, using a board slug from the table
+without the `m5stack-` prefix. Set `S3B_FIRMWARE_DIR` to the firmware parent
+with `BOARD/CASE/sketch.merged.bin`, `ESP32SIM_ROM_DIR` to the ROM directory,
+and optionally `S3B_STOCK_IMAGE` to a separate official UIFlow2 image. Cardputer
+SD cases need `S3B_SD_SEED`, a FAT32 image with the docs playback fixture.
+Use `tools/check-s3b-docs.py BOARD OUTDIR` to check saved captures.

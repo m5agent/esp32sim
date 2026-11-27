@@ -336,6 +336,13 @@ impl SocBus {
 
     /// Attach fresh peripheral-side devices and restore the levels driven by the persistent board.
     pub fn attach_board_devices(&mut self) {
+        if self.cycles == 0 && self.board.name() == "m5stack-sticks3" {
+            // ESP-IDF v5.4.2 efuse_reg.h: PKG_VERSION[23:21] in
+            // RD_MAC_SPI_SYS_3. StickS3's ESP32-S3-PICO-1 is LGA56 (1);
+            // M5GFX 0.3.0 dispatches the PM1 probe only for this package.
+            let package = self.periph.efuse.ram.read(0x50);
+            self.periph.efuse.ram.write(0x50, (package & !(7 << 21)) | (1 << 21));
+        }
         if self.board.observes_gpio_pads() {
             self.board.gpio_waveform_at(self.cycles, esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux));
         }
@@ -968,7 +975,7 @@ impl SocBus {
             let until = u64::from(self.tick_pending).saturating_add(deadline.saturating_sub(self.cycles));
             budget = budget.min(until.clamp(1, u64::from(MAX_TICK_DEFER)) as u32);
         }
-        if let Some(deadline) = self.board.next_deadline() {
+        if let Some(deadline) = self.board.next_deadline().into_iter().chain(self.periph.rmt.rx_deadline()).min() {
             let until_deadline = u64::from(self.tick_pending)
                 .saturating_add(deadline.saturating_sub(self.cycles))
                 .clamp(1, u64::from(cap));
@@ -1018,8 +1025,8 @@ impl SocBus {
     fn tick_impl(&mut self, cycles: u32) -> u32 {
         // Board time advances before peripheral callbacks; inputs are delivered after them.
         if self.board_edges { self.board.advance_to(self.cycles); }
+        if self.board_power.is_some() { self.sync_board_power(); }
         if self.board_power_off() || self.power_on_reset {
-            self.sync_board_power();
             return u32::from(self.irq_dirty);
         }
         let board_i2c = self.board_power.is_some() && self.periph.i2c.iter().any(|i2c| i2c.is_active());
@@ -1042,6 +1049,13 @@ impl SocBus {
             }
         }
         if self.board_edges { self.irq_dirty |= esp_soc::gpio::drain_board_inputs(&mut *self.board, &mut self.periph.gpio, &mut self.gpio_events, self.cycles); }
+        if self.periph.rmt.rx_active() {
+            let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
+            // ESP-IDF 5.4.2 esp32s3 gpio_sig_map.h: RMT_SIG_IN0..3 are 81..84.
+            self.irq_dirty |= self.periph.rmt.sample_rx(self.cycles, |channel| {
+                routes.matrix_input(81 + channel).map(|pin| self.periph.gpio.level(pin))
+            });
+        }
         self.complete_spi2_dma();
         self.deliver_spi2_transfer();
         self.complete_spi3_dma();
@@ -1104,7 +1118,18 @@ impl SocBus {
     #[inline(never)]
     fn deliver_rmt_frames(&mut self) {
         for (ch, bits) in std::mem::take(&mut self.periph.rmt.done) {
-            for pin in esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux).output_pins(RMT_SIG_OUT0 + ch as u32) { self.board.rmt_frame(pin, &bits); }
+            let rmt = &self.periph.rmt;
+            let channel = &rmt.ch[ch];
+            let raw = if channel.conf0 & ((1 << 3) | (1 << 25)) == 0
+                && channel.rd <= esp_periph::rmt::RMT_MEM_WORDS && channel.rd == bits.len() {
+                let start = ch * esp_periph::rmt::RMT_MEM_WORDS;
+                let tick_hz = 80_000_000 / ((channel.conf0 >> 8) & 0xff).max(1);
+                Some((tick_hz, &rmt.mem[start..start + channel.rd]))
+            } else { None };
+            for pin in esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux).output_pins(RMT_SIG_OUT0 + ch as u32) {
+                self.board.rmt_frame(pin, &bits);
+                if let Some((tick_hz, symbols)) = raw { self.board.rmt_symbols(pin, tick_hz, symbols); }
+            }
         }
         self.irq_dirty = true;
     }

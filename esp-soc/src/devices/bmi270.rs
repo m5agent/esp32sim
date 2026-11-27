@@ -82,12 +82,16 @@ pub struct Bmi270 {
     /// Rate of `motion.cycle` (ticks per second of guest time).
     clock_hz: u64,
     pub resets: u32,
+    /// Any-motion timer is enabled only on boards wired to INT1.
+    any_motion: bool,
+    motion_at: Option<u64>,
+    pulse_end: Option<u64>,
 }
 
 impl Bmi270 {
     pub fn new(motion: Arc<ImuMotion>, clock_hz: u64) -> Self {
         let mut d = Bmi270 { regs: [0; 256], pages: [[0; 16]; 8], config: vec![0; BMI270_CONFIG_SIZE], config_bytes: 0,
-                             ptr: 0, first: true, motion, aux: None, sample: None, clock_hz, resets: 0 };
+                             ptr: 0, first: true, motion, aux: None, sample: None, clock_hz, resets: 0, any_motion: false, motion_at: None, pulse_end: None };
         d.reset();
         d
     }
@@ -97,8 +101,46 @@ impl Bmi270 {
         self.regs[AUX_DEV_ID] = 0x20;
         self
     }
+    /// Enable the Bosch standard-image any-motion feature (bmi270.c page 1, 0x0c).
+    pub fn with_any_motion(mut self) -> Self { self.any_motion = true; self }
+    fn any_motion_enabled(&self) -> bool {
+        self.any_motion && self.initialized() && self.pages[1][15] & 0x80 != 0 && self.regs[PWR_CTRL] & 4 != 0
+    }
+    pub fn motion_deadline(&self) -> Option<u64> { self.motion_at.into_iter().chain(self.pulse_end).min() }
+    pub fn advance_motion(&mut self, cycle: u64) {
+        if self.pulse_end.is_some_and(|at| at <= cycle) {
+            self.regs[0x1c] &= !0x40;
+            self.pulse_end = None;
+        }
+        if self.motion_at.is_some_and(|at| at <= cycle) {
+            self.motion_at = None;
+            if self.any_motion_enabled() {
+                self.regs[0x1c] |= 0x40;
+                if self.regs[0x55] & 1 == 0 { self.pulse_end = Some(cycle.saturating_add(self.clock_hz / 400)); }
+            }
+        }
+    }
+    /// INT1_IO_CTRL uses output enable, polarity and open-drain selection.
+    pub fn int1_drive(&self) -> Option<bool> {
+        let config = self.regs[0x53];
+        if config & 8 == 0 { return None; }
+        let active = self.any_motion_enabled() && self.regs[0x1c] & self.regs[0x56] & 0x40 != 0;
+        let high = active == (config & 2 != 0);
+        (config & 4 == 0 || !high).then_some(high)
+    }
     /// Override the next conversion in sensor axes (g, dps, and optionally uT).
     pub fn set_sample(&mut self, accel: [f64; 3], gyro: [f64; 3], mag: Option<[f64; 3]>) {
+        if self.any_motion_enabled() {
+            let config = self.pages[1];
+            let duration = u16::from_le_bytes([config[12], config[13]]);
+            let threshold = u16::from_le_bytes([config[14], config[15]]) & 0x07ff;
+            let previous = self.sample.map_or([0.0, 0.0, 1.0], |sample| sample.0);
+            if (0..3).any(|axis| duration & (0x2000 << axis) != 0
+                && (accel[axis] - previous[axis]).abs() > f64::from(threshold) / 2048.0) {
+                let delay = self.clock_hz / 50 * u64::from((duration & 0x1fff).max(1));
+                self.motion_at = Some(self.motion.cycle.load(Relaxed).saturating_add(delay));
+            }
+        }
         self.sample = Some((accel, gyro));
         if let Some(field) = mag { self.set_mag_field(field); }
     }
@@ -118,6 +160,8 @@ impl Bmi270 {
         self.regs[AUX_IF_CONF] = 0x83;
         self.regs[PWR_CONF] = 0x03;         // adv_power_save, fifo_self_wake_up
         self.pages = [[0; 16]; 8];
+        self.motion_at = None;
+        self.pulse_end = None;
         self.config_bytes = 0;
     }
     pub fn initialized(&self) -> bool { self.regs[INTERNAL_STATUS] & 0x0f == 0x01 }
@@ -210,6 +254,11 @@ impl Bmi270 {
                     // The whole file must be there for the feature engine to start.
                     let ok = self.config_bytes >= BMI270_CONFIG_SIZE;
                     self.regs[INTERNAL_STATUS] = if ok { 0x01 } else { 0x02 };
+                    if ok && self.any_motion {
+                        // Standard feature defaults: XYZ enabled, 5 samples at 50 Hz,
+                        // threshold 0xaa/2048 g. Feature enable remains clear.
+                        self.pages[1][12..].copy_from_slice(&[5, 0xe0, 0xaa, 0]);
+                    }
                 }
             }
             r @ FEATURES..=0x3f => self.pages[page][usize::from(r - FEATURES)] = b,
@@ -241,6 +290,11 @@ impl I2cDevice for Bmi270 {
     }
     fn read(&mut self) -> u8 {
         let v = match self.ptr {
+            0x1c if self.any_motion && self.regs[0x55] & 1 != 0 => {
+                let value = self.regs[0x1c];
+                self.regs[0x1c] &= !0x40;
+                value
+            }
             r @ FEATURES..=0x3f => self.pages[(self.regs[FEAT_PAGE as usize] & 7) as usize][usize::from(r - FEATURES)],
             INIT_DATA => {
                 // Reads of INIT_DATA return the uploaded file from INIT_ADDR on.

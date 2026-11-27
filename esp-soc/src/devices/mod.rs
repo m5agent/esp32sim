@@ -16,6 +16,9 @@ pub mod es8311;
 pub mod ft5x06;
 pub mod gt911;
 pub mod imu_motion;
+pub mod mfrc522;
+pub mod rx8130;
+
 pub mod ltr553;
 pub mod soft_i2c;
 pub mod spi_bitbang;
