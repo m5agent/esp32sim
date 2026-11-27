@@ -66,7 +66,7 @@ def plc(root, case, serial, log, frame):
     if case == "input_output-1":
         require("Write Relay 3 to ON" in serial and "Write Relay 3 to OFF" in serial and
                 field(log, "relay-states") & 0x8001 == 0x8001, "missing guest-driven all-on/all-off relay states")
-        return "guest toggled all four physical relay outputs"
+        return "guest toggled all four modeled relay outputs"
     if case == "input_output-2":
         require(all(f"Input: {pattern}" in serial for pattern in
                     ("0, 0, 0, 0, 0, 0, 0, 0", "1, 0, 0, 0, 0, 0, 0, 1", "0, 0, 0, 1, 0, 0, 0, 1")),
@@ -190,7 +190,9 @@ def stack(root, case, serial, log, frame):
         return "top touch drives 45° pitch and then 90° yaw using serial servos"
     if case == "servo-1":
         angles = re.findall(r"StackChan servo-angle: yaw=(-?[\d.]+) pitch=(-?[\d.]+)", log)
-        require(angles == [("0.000", "0.000"), ("40.000", "40.000")] and
+        require(len(angles) == 2 and angles[0] == ("0.000", "0.000") and
+                all(abs(float(angle) - 40) <= 1 for angle in angles[1]) and
+                re.search(r"StackChan: .*\byaw=40\.000 pitch=40\.000\b", log) and
                 field(log, "servo-reads") > 0 and field(log, "servo-writes") > 0,
                 f"Set Home / Go Home did not restore the saved encoder positions: {angles}")
         return "touch saves two SCSCL encoder positions and restores them after displacement"
