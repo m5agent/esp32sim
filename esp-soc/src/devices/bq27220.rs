@@ -23,6 +23,15 @@ impl Bq27220 {
     pub fn new(sample: BatterySample) -> Self {
         Self { sample, latched: sample, pointer: 0, first: true }
     }
+
+    pub fn service_state(&self) -> crate::json::Json {
+        use crate::json::Json;
+        Json::object([
+            ("voltage-mv", Json::Int(self.sample.millivolts.into())),
+            ("current-ma", Json::Int(self.sample.milliamps.into())),
+            ("state-of-charge", Json::Int(self.sample.percent.min(100).into())),
+        ])
+    }
 }
 
 impl I2cDevice for Bq27220 {

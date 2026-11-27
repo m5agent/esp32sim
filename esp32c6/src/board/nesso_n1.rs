@@ -69,6 +69,7 @@ pub struct NessoN1 {
     touch: Ft5x06Points,
     touch_down: bool,
     imu: Arc<ImuMotion>,
+    imu_device: Shared<Bmi270>,
     cycle: u64,
     edges: Vec<BoardEdge>,
     levels: u64,
@@ -104,7 +105,7 @@ impl NessoN1 {
         let imu_dev = Rc::new(RefCell::new(Bmi270::new(imu.clone(), CPU_HZ)));
         let i2c: Vec<(u8, Device)> = vec![
             (0x43, ioe[0].clone()), (0x44, ioe[1].clone()),
-            (FT5X06_ADDRESS, touch_dev), (BMI270_ADDRESS, imu_dev),
+            (FT5X06_ADDRESS, touch_dev), (BMI270_ADDRESS, imu_dev.clone()),
             (bq27220::ADDRESS, gauge.clone()),
             (aw32001::ADDRESS, charger.clone()),
         ];
@@ -113,7 +114,8 @@ impl NessoN1 {
         Self {
             panel: DcsPanel::st7789(), panel_cmd: 0, panel_read: 0, panel_resets: 0,
             lcd_ready: false, backlight: false, version: 0, soft: SoftI2c::idle(),
-            i2c, ioe, ioe_changed: Rc::new(Cell::new(true)), gauge, charger, touch, touch_down: false, imu, cycle: 0, edges: Vec::new(),
+            i2c, ioe, ioe_changed: Rc::new(Cell::new(true)), gauge, charger, touch, touch_down: false, imu,
+            imu_device: imu_dev, cycle: 0, edges: Vec::new(),
             levels: 1 << SYS_IRQ | 1 << SDA | 1 << SCL, leds: [[0; 3]], led_changes: 0,
             grove_power: false, grove_changes: 0, received_touches: 0,
             radio: Sx1262::default(), radio_ready: false, radio_selected: false,
@@ -346,6 +348,18 @@ impl BoardModel for NessoN1 {
     fn set_imu_motion(&mut self, mode: u32) -> bool {
         self.imu.mode.store(mode, Ordering::Relaxed);
         true
+    }
+
+    fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
+        vec![("pi4ioe-43", self.ioe[0].borrow().service_state()),
+             ("pi4ioe-44", self.ioe[1].borrow().service_state()),
+             ("bq27220", self.gauge.borrow().service_state()),
+             ("aw32001", self.charger.borrow().service_state()),
+             ("imu", self.imu_device.borrow().service_state())]
+    }
+
+    fn set_service_property(&mut self, path: &str, property: &str, value: &str) -> bool {
+        path == "/board/imu" && self.imu_device.borrow_mut().set_service_axis(property, value)
     }
 
     fn imu_motion(&self) -> u32 { self.imu.mode.load(Ordering::Relaxed) }

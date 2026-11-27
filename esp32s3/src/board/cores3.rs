@@ -391,7 +391,7 @@ impl BoardModel for Cores3 {
     fn imu_motion(&self) -> u32 { self.imu.mode.load(std::sync::atomic::Ordering::Relaxed) }
     fn input_levels(&self) -> Vec<(u8, bool)> {
         let mut levels = vec![(PIN_CORES3_I2C_INT, self.int_level)];
-        if self.stackchan.is_some() { levels.push((IR_RX, true)); }
+        if self.stackchan.is_some() { levels.extend([(IR_RX, true), (10, true), (9, true)]); }
         levels
     }
     fn touch(&mut self, x: u16, y: u16, down: bool) {
@@ -485,7 +485,11 @@ impl BoardModel for Cores3 {
     // M5GFX 0.3.0 board data and M5CoreS3 examples/Basic/camera/camera.ino.
     // The board supplies XCLK independently (pin_xclk = -1 in the sketch).
     fn camera_dvp_pins(&self) -> Option<[u8; 11]> { Some([39, 40, 41, 42, 15, 16, 48, 47, 45, 38, 46]) }
-    fn named_pin(&self, _name: &str) -> Option<u8> { None }
+    fn named_pin(&self, name: &str) -> Option<u8> {
+        // Legacy m5stackchan panel key injection drives GPIO10 (A) and GPIO9 (B).
+        self.stackchan.as_ref()?;
+        match name { "a" => Some(10), "b" => Some(9), _ => None }
+    }
     fn set_service_property(&mut self, path: &str, property: &str, value: &str) -> bool {
         let mut hw = self.hw.borrow_mut();
         match (path, property) {

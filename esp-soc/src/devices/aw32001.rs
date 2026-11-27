@@ -16,6 +16,29 @@ impl Aw32001 {
     pub fn new(input_present: bool, cell_mv: u16) -> Self {
         Self { input_present, cell_mv, config: [0; 8], pointer: 0, first: true }
     }
+
+    pub fn service_state(&self) -> crate::json::Json {
+        use crate::json::Json;
+        Json::object([
+            ("input-present", Json::Bool(self.input_present)),
+            ("status", Json::Int(self.register(8).into())),
+            ("config", Json::register_bytes(self.config)),
+        ])
+    }
+
+    fn register(&self, reg: u8) -> u8 {
+        match reg {
+            0x08 => {
+                let max_mv = 3600 + 15 * u16::from(self.config[4] & 63);
+                let state = if !self.input_present || self.config[1] & 8 != 0 { 0 }
+                    else if self.cell_mv < 3000 { 1 }
+                    else if self.cell_mv < max_mv { 2 } else { 3 };
+                (state << 3) | (u8::from(self.input_present) << 2)
+            }
+            0x0a => 0x49,
+            _ => self.config.get(usize::from(reg)).copied().unwrap_or(0),
+        }
+    }
 }
 
 impl I2cDevice for Aw32001 {
@@ -40,17 +63,7 @@ impl I2cDevice for Aw32001 {
     fn read(&mut self) -> u8 {
         let reg = self.pointer;
         self.pointer = self.pointer.wrapping_add(1);
-        match reg {
-            0x08 => {
-                let max_mv = 3600 + 15 * u16::from(self.config[4] & 63);
-                let state = if !self.input_present || self.config[1] & 8 != 0 { 0 }
-                    else if self.cell_mv < 3000 { 1 }
-                    else if self.cell_mv < max_mv { 2 } else { 3 };
-                (state << 3) | (u8::from(self.input_present) << 2)
-            }
-            0x0a => 0x49,
-            _ => self.config.get(usize::from(reg)).copied().unwrap_or(0),
-        }
+        self.register(reg)
     }
 }
 

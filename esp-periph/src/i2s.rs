@@ -21,6 +21,8 @@ pub struct I2s {
     acc: u64,
     /// decoded left-channel samples (host sink)
     pub pcm: Vec<i16>,
+    /// Optional host recording of the first two wire slots, interleaved.
+    pub stereo_pcm: Option<Vec<i16>>,
     pub frames_out: u64,
     /// RX bytes a SoC pump delivered to DMA (diagnostics; the S31 counts here).
     pub bytes_in: u64,
@@ -48,7 +50,7 @@ impl I2s {
         let mut ram = RegRam::new();
         // RX_EOF_NUM resets to 0x40: esp32s3 i2s_reg.h:1059, esp32c3 i2s_reg.h:1005, esp32c6 i2s_reg.h:1226.
         ram.write(0x64, 0x40);
-        I2s { cpu_hz, streaming: false, rx: None, v2: false, v2_clock: (0, 0), v2_rx_clock: (0, 0), v2_sources: [0; 4], rx_conf: 0, tx_conf: 0, int_raw: 0, int_ena: 0, ram, tx_conf1: 0, tx_clkm_conf: 0, tx_clkm_div_conf: 0, tx_tdm_ctrl: 0xffff, sample_rate: 44100, bytes_per_frame: 1, acc: 0, pcm: Vec::new(), frames_out: 0, bytes_in: 0, tx_started_log: false }
+        I2s { cpu_hz, streaming: false, rx: None, v2: false, v2_clock: (0, 0), v2_rx_clock: (0, 0), v2_sources: [0; 4], rx_conf: 0, tx_conf: 0, int_raw: 0, int_ena: 0, ram, tx_conf1: 0, tx_clkm_conf: 0, tx_clkm_div_conf: 0, tx_tdm_ctrl: 0xffff, sample_rate: 44100, bytes_per_frame: 1, acc: 0, pcm: Vec::new(), stereo_pcm: None, frames_out: 0, bytes_in: 0, tx_started_log: false }
     }
     /// The P4/S31 register layout (IDF master soc/esp32s31/register/soc/i2s_reg.h, IDF v5.5.4
     /// soc/esp32p4/register/hw_ver3/soc/i2s_reg.h): 0x30-0x40 are RX recombination registers there,
@@ -89,6 +91,17 @@ impl I2s {
     }
     /// Packed DMA sample width, independent of padding in the wire's time slots.
     pub fn sample_bytes(&self) -> usize { (((self.tx_conf1 >> if self.v2 { 14 } else { 13 }) & 0x1f) + 1).div_ceil(8) as usize }
+
+    pub fn stereo_slots(&self) -> [Option<usize>; 2] {
+        let slots = ((self.tx_tdm_ctrl >> 16) & 0xf) + 1;
+        let active = self.tx_tdm_ctrl & ((1 << slots) - 1);
+        std::array::from_fn(|slot| {
+            if active & (1 << slot) == 0 { return None; }
+            if self.tx_mono() { return Some(0); }
+            if self.tx_tdm_ctrl & (1 << 20) != 0 { return Some(slot); }
+            Some((active & ((1 << slot) - 1)).count_ones() as usize)
+        })
+    }
     pub fn read(&self, off: u32) -> u32 {
         match off {
             0xc => self.int_raw, 0x10 => self.int_raw & self.int_ena, 0x14 => self.int_ena,

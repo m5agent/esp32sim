@@ -41,6 +41,17 @@ impl Pi4ioe5v6408 {
 
     pub fn irq(&self) -> bool { self.regs[0] & 2 != 0 || self.interrupt & !self.regs[8] & !self.regs[1] != 0 }
 
+    pub fn service_state(&self) -> crate::json::Json {
+        use crate::json::Json;
+        Json::object([
+            ("direction", Json::Int(self.regs[1].into())),
+            ("output-bits", Json::Int(self.regs[2].into())),
+            ("input-bits", Json::Int(self.levels().into())),
+            ("high-impedance", Json::Int(self.regs[3].into())),
+            ("irq", Json::Bool(self.irq())),
+        ])
+    }
+
     fn latch_changes(&mut self, old: u8) {
         let levels = self.levels();
         self.interrupt |= (old ^ levels) & (levels ^ self.regs[4]) & !self.regs[1];

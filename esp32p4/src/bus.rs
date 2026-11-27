@@ -522,11 +522,22 @@ impl SocBus {
             codec.speaker_gain > 0.0 && gpio.out_signal(codec.bck) == 25 && gpio.out_signal(codec.ws) == 27 &&
                 gpio.out_signal(codec.dout) == 28 && codec.mck.is_none_or(|pin| gpio.out_signal(pin) == 26)
         });
-        let samples: Vec<i16> = stream.chunks_exact(bpf).map(|f| {
+        let decode = |sample: &[u8]| {
             if !connected { 0 }
-            else if sample_bytes == 1 { (f[0] as i8 as i16) << 8 }
-            else { i16::from_le_bytes([f[sample_bytes - 2], f[sample_bytes - 1]]) }
-        }).collect();
+            else if sample_bytes == 1 { (sample[0] as i8 as i16) << 8 }
+            else { i16::from_le_bytes([sample[sample_bytes - 2], sample[sample_bytes - 1]]) }
+        };
+        if i.stereo_pcm.is_some() {
+            let slots = i.stereo_slots();
+            let stereo = i.stereo_pcm.as_mut().unwrap();
+            // The service retains at most 16 MiB of PCM for one lease.
+            const MAX_STEREO_FRAMES: usize = 16 * 1024 * 1024 / 4;
+            let remaining = MAX_STEREO_FRAMES.saturating_sub(stereo.len() / 2);
+            stereo.extend(stream.chunks_exact(bpf).take(remaining).flat_map(|frame| slots.map(|slot| {
+                slot.and_then(|index| frame.chunks_exact(sample_bytes).nth(index)).map_or(0, decode)
+            })));
+        }
+        let samples: Vec<i16> = stream.chunks_exact(bpf).map(decode).collect();
         if !samples.is_empty() { i.frames_out += samples.len() as u64; i.pcm.extend_from_slice(&samples); }
     }
 

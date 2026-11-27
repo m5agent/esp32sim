@@ -197,6 +197,8 @@ impl M5pm1 {
     pub fn power_key(&mut self) {
         let was_off = self.state.lock().unwrap().power_off_requested;
         self.registers.regs[0x42] |= if was_off { 2 } else { 1 };
+        // BTN_STATUS bit 7 survives release for the guest's read_button_event.
+        self.registers.regs[0x48] |= 0x80;
         if was_off { self.wake(4); }
     }
     pub fn set_wake_source(&mut self, bits: u8) {
@@ -257,7 +259,7 @@ impl I2cDevice for M5pm1 {
     fn write(&mut self, byte: u8) -> bool {
         if !self.registers.first {
             let reg = self.registers.ptr;
-            if matches!(reg, 0x00..=0x04 | 0x12 | 0x22..=0x25) {
+            if matches!(reg, 0x00..=0x04 | 0x12 | 0x22..=0x25 | 0x48) {
                 self.registers.ptr = reg.wrapping_add(1);
                 return true;
             }
@@ -361,7 +363,10 @@ impl I2cDevice for M5pm1 {
         [self.registers.regs[0x22], self.registers.regs[0x23]] = state.battery_mv.to_le_bytes();
         [self.registers.regs[0x24], self.registers.regs[0x25]] = state.vbus_mv.to_le_bytes();
         [self.registers.regs[0x26], self.registers.regs[0x27]] = state.vinout_mv.to_le_bytes();
-        self.registers.read()
+        let reg = self.registers.ptr;
+        let byte = self.registers.read();
+        if reg == 0x48 { self.registers.regs[0x48] &= !0x80; }
+        byte
     }
 }
 

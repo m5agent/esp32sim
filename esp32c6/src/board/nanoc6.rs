@@ -100,6 +100,18 @@ impl BoardModel for NanoC6 {
 
     fn leds(&self) -> Option<(&[[u8; 3]], u64)> { Some((&self.leds, self.changes)) }
 
+    fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
+        use esp_soc::json::Json;
+        vec![("rgb", Json::object([
+            ("powered", Json::Bool(self.powered)),
+            ("rgb", Json::Int(i64::from(u32::from_be_bytes([0, self.leds[0][0], self.leds[0][1], self.leds[0][2]])))),
+            ("frames", Json::counter(self.rgb_frames)),
+        ])), ("ir", Json::object([
+            ("rmt-frames", Json::counter(self.ir_rmt_frames)),
+            ("nec-frames", Json::counter(self.ir.frames)),
+        ]))]
+    }
+
     fn report(&self) -> String {
         format!("[nanoc6] rgb_power={} rgb={:?} blue={:?} led_changes={} rgb_frames={} ir_rmt_frames={} nec_frames={} nec_recent={}",
             self.powered, self.leds[0], self.leds[1], self.changes, self.rgb_frames, self.ir_rmt_frames, self.ir.frames, self.ir.recent())

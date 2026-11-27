@@ -181,6 +181,9 @@ impl BoardModel for Tab5 {
         use esp_soc::json::Json;
         let rtc = self.rtc.borrow();
         vec![
+            ("pi4ioe-43", self.rails.borrow().service_state()),
+            ("pi4ioe-44", self.charger.borrow().service_state()),
+            ("ina226", self.battery.borrow().service_state()),
             ("rtc", Json::object([("registers", Json::register_bytes(rtc.registers().iter().copied())), ("irq", Json::Bool(rtc.irq()))])),
             ("imu", self.imu.borrow().service_state()),
             ("panel/controller", Json::object([
@@ -188,6 +191,15 @@ impl BoardModel for Tab5 {
                 ("sleeping", Json::Bool(self.sleeping)), ("on", Json::Bool(self.on)),
             ])),
         ]
+    }
+    fn set_service_property(&mut self, path: &str, property: &str, value: &str) -> bool {
+        match (path, property) {
+            ("/board/ina226", "bus-voltage-mv" | "current-ma") =>
+                self.battery.borrow_mut().set_service_property(property, value),
+            ("/board/imu", _) => self.imu.borrow_mut().set_service_axis(property, value),
+            ("/board/rtc", "unix-time") => self.rtc.borrow_mut().set_unix_time(value),
+            _ => false,
+        }
     }
     fn has_spi_sd_slot(&self) -> bool { true }
     fn uses_spi_pins(&self) -> bool { self.sd_spi.is_some() }

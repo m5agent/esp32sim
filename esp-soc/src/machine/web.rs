@@ -61,10 +61,11 @@ impl<S: Soc> Machine<S> {
             }
             self.ws.cam_pushed = self.bus.camera_frames() / 20;
         }
-        let (pcm, rate) = self.bus.audio();
+        let stereo = if w.service { self.bus.service_stereo_audio() } else { None };
+        let (pcm, rate) = stereo.unwrap_or_else(|| self.bus.audio());
         if pcm.len() > self.ws.audio_sent {
             let chunk = &pcm[self.ws.audio_sent..];
-            let mut b = vec![2u8];
+            let mut b = vec![if stereo.is_some() { 8u8 } else { 2u8 }];
             b.extend_from_slice(&rate.to_le_bytes());
             for s in chunk { b.extend_from_slice(&s.to_le_bytes()); }
             w.send_binary(&b);

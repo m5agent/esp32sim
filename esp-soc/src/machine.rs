@@ -1146,7 +1146,12 @@ impl<S: Soc> Machine<S> {
                 ScriptAction::Touch(x, y, d) => { self.bus.touch_input(x, y, d); }
                 ScriptAction::Board(verb, args) => {
                     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                    if !self.bus.board_command(&verb, &args) { eprintln!("[script] board refused {verb} {args:?}"); }
+                    let applied = match (verb.as_str(), args.as_slice()) {
+                        ("state-set", [path, property, value]) =>
+                            self.bus.board().set_service_property(path, property, value),
+                        _ => self.bus.board_command(&verb, &args),
+                    };
+                    if !applied { eprintln!("[script] board refused {verb} {args:?}"); }
                     *self.bus.irq_dirty() = true;
                 }
                 ScriptAction::Poke(a, v) => { let _ = self.bus.write32_unpriced(a, v); }
@@ -1283,6 +1288,13 @@ impl<S: Soc> Machine<S> {
                     ev.push((c, ScriptAction::Ble(rest.to_string())));
                 },
                 "stop" => ev.push((c, ScriptAction::Stop)),
+                "state-set" => {
+                    let args: Vec<_> = rest.split_whitespace().map(str::to_string).collect();
+                    if args.len() != 3 || !args[0].starts_with("/board/") {
+                        return Err("state-set requires a /board/ path, property and value".into());
+                    }
+                    ev.push((c, ScriptAction::Board(cmd.to_string(), args)));
+                }
                 "waituart0" => { let mut p = rest.splitn(2, char::is_whitespace); let to: f64 = p.next().and_then(|x| x.parse().ok()).ok_or_else(|| format!("line {}: waituart0 <timeout_s> <text>", ln + 1))?;
                                  let text = p.next().unwrap_or("").trim().to_string(); if text.is_empty() { return Err(format!("line {}: waituart0 needs text", ln + 1)); }
                                  ev.push((c, ScriptAction::WaitUart0(text, (to * hz) as u64, c))); }
