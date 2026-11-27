@@ -177,13 +177,14 @@ impl Rmt {
 
 /// Staged TX3 DMA symbols and, while a descriptor ring is being fed, where staging resumes.
 #[derive(Default)]
-pub struct DmaQueue { symbols: VecDeque<u32>, resume: u32 }
+pub struct DmaQueue { symbols: VecDeque<u32>, resume: u32, rx: Option<Box<RxChannels>> }
 
 /// S3 TX3 DMA view of the shared transmitter; compact C3/C6 transmitters never select DMA.
 /// IDF v5.5.4 components/soc/esp32s3/register/soc/rmt_struct.h:117-120 puts
 /// DMA_ACCESS_EN at bit 25 (v4.4.8 calls bits 25..31 reserved).
 /// DMA queue and non-DMA receive state are allocated only when configured.
-pub struct RmtDma(Rmt, Option<Box<RxChannels>>);
+#[repr(transparent)]
+pub struct RmtDma(Rmt);
 impl std::ops::Deref for RmtDma {
     type Target = Rmt;
     fn deref(&self) -> &Rmt { &self.0 }
@@ -192,7 +193,7 @@ impl std::ops::DerefMut for RmtDma {
     fn deref_mut(&mut self) -> &mut Rmt { &mut self.0 }
 }
 impl RmtDma {
-    pub fn new(cpu_hz: u64) -> Self { Self(Rmt::new(cpu_hz), None) }
+    pub fn new(cpu_hz: u64) -> Self { Self(Rmt::new(cpu_hz)) }
     pub fn dma_fifo(&mut self) -> &mut VecDeque<u32> { &mut self.0.dma_fifo.get_or_insert_with(Default::default).symbols }
     pub fn dma_fifo_len(&self) -> usize { self.0.dma_fifo.as_ref().map_or(0, |fifo| fifo.symbols.len()) }
     /// The descriptor after the last staged SUC_EOF node of a ring still being fed, or 0.
@@ -202,24 +203,33 @@ impl RmtDma {
     pub fn clear_dma_resume(&mut self) { if let Some(fifo) = self.0.dma_fifo.as_mut() { fifo.resume = 0; } }
     #[cold]
     #[inline(never)]
-    pub fn clear_dma_fifo(&mut self) { self.0.dma_fifo = None; }
-    pub fn rx_active(&self) -> bool { self.1.as_deref().is_some_and(RxChannels::active) }
+    pub fn clear_dma_fifo(&mut self) {
+        if let Some(state) = self.0.dma_fifo.as_mut().filter(|state| state.rx.is_some()) {
+            state.symbols.clear();
+            state.resume = 0;
+        } else {
+            self.0.dma_fifo = None;
+        }
+    }
+    fn receiver(&self) -> Option<&RxChannels> { self.0.dma_fifo.as_ref()?.rx.as_deref() }
+    pub fn rx_active(&self) -> bool { self.receiver().is_some_and(RxChannels::active) }
     pub fn rx_deadline(&self) -> Option<u64> {
-        self.1.as_ref()?.next_deadline(u64::from(self.0.cpu_per_apb))
+        self.receiver()?.next_deadline(u64::from(self.0.cpu_per_apb))
     }
     pub fn sample_rx(&mut self, cycle: u64, level: impl Fn(usize) -> Option<bool>) -> bool {
         let ratio = u64::from(self.0.cpu_per_apb);
-        self.1.as_mut().is_some_and(|rx| rx.sample(&mut self.0, cycle, ratio, level))
+        let Some(rx) = self.0.dma_fifo.as_mut().and_then(|state| state.rx.as_mut()) else { return false; };
+        rx.sample(&mut self.0.mem, &mut self.0.int_raw, cycle, ratio, level)
     }
     pub fn read(&self, off: u32) -> u32 {
         if !RxChannels::handles(off) { return self.0.read(off); }
-        self.1.as_ref().map_or_else(|| {
+        self.receiver().map_or_else(|| {
             if off >= 0x60 { (4 + (off - 0x60) / 4) * RMT_MEM_WORDS as u32 } else { 0 }
         }, |rx| rx.read(off))
     }
     pub fn write(&mut self, off: u32, v: u32) {
         if RxChannels::handles(off) {
-            self.1.get_or_insert_with(Default::default).write(off, v);
+            self.0.dma_fifo.get_or_insert_with(Default::default).rx.get_or_insert_with(Default::default).write(off, v);
             return;
         }
         self.0.write(off, v);

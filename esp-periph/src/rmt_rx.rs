@@ -1,6 +1,6 @@
 //! ESP32-S3 non-DMA RMT receive channels, ESP-IDF v5.4.2 rmt_reg.h and rmt_ll.h.
 //! The input is the GPIO-matrix level, already demodulated by the board receiver.
-use crate::rmt::{RMT_MEM_WORDS, Rmt};
+use crate::rmt::RMT_MEM_WORDS;
 
 #[derive(Default)]
 struct Channel {
@@ -55,8 +55,8 @@ impl RxChannels {
         self.0.iter().filter(|channel| channel.armed).filter_map(|channel| channel.deadline(ratio)).min()
     }
 
-    pub fn sample(&mut self, tx: &mut Rmt, cycle: u64, ratio: u64, level: impl Fn(usize) -> Option<bool>) -> bool {
-        let irq_before = tx.int_raw;
+    pub fn sample(&mut self, mem: &mut [u32], irq: &mut u32, cycle: u64, ratio: u64, level: impl Fn(usize) -> Option<bool>) -> bool {
+        let irq_before = *irq;
         for (index, channel) in self.0.iter_mut().enumerate() {
             if !channel.armed { continue; }
             let Some(level) = level(index) else { continue };
@@ -65,19 +65,19 @@ impl RxChannels {
             let step = channel.step(ratio);
             let base = (index + 4) * RMT_MEM_WORDS;
             let capacity = (((channel.conf0 >> 24 & 15) as usize).max(1) * RMT_MEM_WORDS)
-                .min(tx.mem.len() - base);
+                .min(mem.len() - base);
             if let Some(deadline) = channel.deadline(ratio).filter(|&at| at <= cycle) {
                 let elapsed = deadline - channel.start.unwrap();
-                channel.push(&mut tx.mem[base..base + capacity], old, elapsed / step);
+                channel.push(&mut mem[base..base + capacity], old, elapsed / step);
                 if let Some(half) = channel.half.take() {
                     if channel.written < capacity {
-                        tx.mem[base + channel.written] = u32::from(half);
+                        mem[base + channel.written] = u32::from(half);
                         channel.written += 1;
                     }
                 }
                 channel.armed = false;
                 channel.start = None;
-                tx.int_raw |= 1 << (16 + index);
+                *irq |= 1 << (16 + index);
                 continue;
             }
             if old == level { continue; }
@@ -89,16 +89,16 @@ impl RxChannels {
                     channel.level = Some(old);
                     continue;
                 }
-                channel.push(&mut tx.mem[base..base + capacity], old, elapsed / step);
+                channel.push(&mut mem[base..base + capacity], old, elapsed / step);
                 if channel.written == capacity {
                     channel.armed = false;
-                    tx.int_raw |= 1 << (16 + index) | 1 << (20 + index);
+                    *irq |= 1 << (16 + index) | 1 << (20 + index);
                     continue;
                 }
             }
             channel.start = Some(cycle);
         }
-        tx.int_raw != irq_before
+        *irq != irq_before
     }
 }
 
