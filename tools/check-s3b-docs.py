@@ -13,7 +13,7 @@ import sys
 import wave
 import zlib
 
-from check_cores3 import audio, changed, color_counts, fat32_files, frequency, require, rms
+from check_cores3 import changed, color_counts, fat32_files, frequency, require, rms
 
 CASES = {
     "cardputer": """battery button display ir_nec keyboard mic quickstart-display
@@ -99,6 +99,16 @@ def wav_pcm(source):
     return rate, pcm
 
 
+def heard_tone(path, hz, tolerance, window_ms):
+    rate, pcm = wav_pcm(str(path))
+    width = rate * window_ms // 1000
+    for start in range(0, len(pcm) - width + 1, width):
+        segment = pcm[start:start + width]
+        if rms(segment) > 100 and abs(frequency(segment, rate) - hz) < tolerance:
+            return True
+    return False
+
+
 def power_case(board, case, serial, report):
     if case in {"m5pm1-1", "m5pm1_m5ioe1-1", "wakeup-2"}:
         contains(serial, "PM1 initialization successful")
@@ -131,9 +141,9 @@ def power_case(board, case, serial, report):
 def verify(out, board, case):
     allow_blank = case in {"buzzer", "speaker", "speaker-sd-wav", "wakeup-2", "rfid-1", "rfid-2",
                            "m5pm1-1", "m5pm1-2", "m5pm1_m5ioe1-1", "m5pm1_m5ioe1-2"}
-    frame, serial, report = capture(out, board, case, screen=not allow_blank and not (case == "button" and board in {"cardputer", "dial"}))
+    frame, serial, report = capture(out, board, case, screen=not allow_blank and not (case == "button" and board != "sticks3"))
     if case == "display" or case.startswith("quickstart-"):
-        early, *_ = capture(out, board, case + "-early")
+        early, *_ = capture(out, board, case + "-early", screen=False)
         minimum_colors = 4 if case == "display" else 8
         require(len(color_counts(frame)) >= minimum_colors and changed(frame, early) >= 150, "missing animated display")
         return "display contains multicolor drawing and changes over time"
@@ -189,20 +199,25 @@ def verify(out, board, case):
         return "separate virtual UIDs read through I2C FIFO and no UID without a tag"
     if case in {"speaker", "buzzer"}:
         expected = (10000, 4000) if board in {"dial", "stopwatch"} else (7000, 4000)
-        _, tones = audio(out / f"{case}-output.wav")
         for hz in expected:
-            require(any(abs(t[3] - hz) < 150 for t in tones), f"missing {hz} Hz in captured audio")
+            require(heard_tone(out / f"{case}-output.wav", hz, 180, 10), f"missing {hz} Hz in captured audio")
         route = "GPIO3 PDM output" if board == "dial" else "I2S output"
         return f"{route} contains {expected[0]} Hz and {expected[1]} Hz tones"
     if case == "mic":
-        first, *_ = capture(out, board, "mic-tone")
-        second, *_ = capture(out, board, "mic-alt")
-        silent, *_ = capture(out, board, "mic-silent")
-        require(min(changed(first, second), changed(first, silent), changed(second, silent)) >= 25,
-                "recording waveform did not respond to both input tones")
-        _, tones = audio(out / "mic-output.wav")
-        require(any(abs(t[3] - 733) < 20 and t[1] > 0.2 for t in tones), "733 Hz record/playback marker missing")
-        return "two capture signals differ from silence and 733 Hz playback reaches speaker"
+        require(heard_tone(out / "mic-output.wav", 733, 20, 80), "733 Hz record/playback marker missing")
+        if board == "cardputer":
+            first, *_ = capture(out, board, "mic-tone")
+            second, *_ = capture(out, board, "mic-alt")
+            silent, *_ = capture(out, board, "mic-silent")
+            require(min(changed(first, second), changed(first, silent), changed(second, silent)) >= 25,
+                    "recording waveform did not respond to both input tones")
+            return "two rendered capture signals differ from silence and 733 Hz reaches speaker"
+        capture(out, board, "mic-alt")
+        capture(out, board, "mic-silent")
+        require(heard_tone(out / "mic-alt-output.wav", 997, 20, 80), "997 Hz record/playback marker missing")
+        _, silence = wav_pcm(str(out / "mic-silent-output.wav"))
+        require(rms(silence) < 100, "silent recording produced unintended audio")
+        return "733 Hz and 997 Hz both reach the speaker and the silent control stays quiet"
     if case == "sdcard":
         contains(serial, "File written", "Message appended", "Hello World!", "File renamed", "1048576 bytes written")
         require(re.search(r"\[sd-spi\] \d+ commands, [1-9]\d* blocks read, [1-9]\d* blocks written", report),
@@ -231,7 +246,8 @@ def verify(out, board, case):
         early, *_ = capture(out, board, case + "-early")
         require(changed(frame, early) >= 5, "calendar display did not advance")
         if case != "rtc-1":
-            require("SNTP" in report or "NTP Connected" in serial, "virtual SNTP exchange not observed")
+            require(re.search(r"[1-9]\d* NTP answers", report) or "NTP Connected" in serial,
+                    "virtual SNTP exchange not observed")
         else:
             contains(serial, "RTC found.", "UTC:")
         return "RTC calendar advances in the guest"

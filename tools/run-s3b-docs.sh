@@ -150,9 +150,14 @@ for image in "$firmware"/*/sketch.merged.bin; do
         rfid-*|keyboard|encoder|ir_nec-2|ir_nec-3)
             run "$label-idle" "$image" "$seconds" ;;
         mic)
-            run mic-alt "$image" 3.8 --mic-wav "$out/mic-alt.wav"
-            run mic-tone "$image" 3.8 --mic-wav "$out/mic.wav"
-            run mic-silent "$image" 3.8 --mic-wav "$out/silence.wav"
+            if [[ "$board" == cardputer ]]; then
+                run mic-alt "$image" 3.8 --mic-wav "$out/mic-alt.wav"
+                run mic-tone "$image" 3.8 --mic-wav "$out/mic.wav"
+                run mic-silent "$image" 3.8 --mic-wav "$out/silence.wav"
+            else
+                run mic-alt "$image" "$seconds" --script "$out/$board-mic.txt" --mic-wav "$out/mic-alt.wav" --wav "$out/mic-alt-output.wav"
+                run mic-silent "$image" "$seconds" --script "$out/$board-mic.txt" --mic-wav "$out/silence.wav" --wav "$out/mic-silent-output.wav"
+            fi
             ;;
     esac
 done
