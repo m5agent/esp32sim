@@ -139,7 +139,12 @@ for image in "$firmware"/*/sketch.merged.bin; do
         battery)
             run "$label-first" "$image" 4.9 "${flags[@]}"
             run "$label-idle" "$image" "$seconds" ;;
-        imu|touch|touch-*)
+        touch-1)
+            # This example redraws only when a gesture changes. The first
+            # capture shows a short touch before the hold state takes over.
+            run "$label-first" "$image" 2.15 "${flags[@]}"
+            run "$label-idle" "$image" "$seconds" ;;
+        imu|touch|touch-2)
             run "$label-first" "$image" 3.3 "${flags[@]}"
             run "$label-idle" "$image" "$seconds" ;;
         button)
