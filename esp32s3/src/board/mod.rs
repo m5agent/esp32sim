@@ -12,6 +12,9 @@
 //! - `NoBoard` — a bare module: nothing on the pins (any ESP32-S3 firmware, console only)
 pub use esp_soc::board::{Board, BoardEdge, BoardModel, NoBoard, VirtualCycle};
 
+mod atom_s3;
+mod atom_s3_panel;
+mod atom_s3_camera;
 pub mod atech14;
 pub mod cardputer_adv;
 mod cardputer_adv_ir;
@@ -33,6 +36,12 @@ pub use waveshare_lcd4b::*;
 
 /// Board by name: `atech14` (default), `none`, `stopwatch` or a supported Waveshare board.
 pub fn make_board(name: &str) -> Option<Board> {
+    use atom_s3::{AtomBoard, AtomS3};
+    let atoms = [AtomBoard::Lite, AtomBoard::S3, AtomBoard::S3Gc9107, AtomBoard::U, AtomBoard::R,
+                 AtomBoard::RGc9107, AtomBoard::Voice, AtomBoard::Cam, AtomBoard::M12];
+    if let Some(board) = atoms.into_iter().find(|board| board.name() == name) {
+        return Some(Box::new(AtomS3::new(board)));
+    }
     match name {
         "atech14" | "atech" => Some(Box::new(Atech14::new())),
         "none" | "bare" => Some(Box::new(NoBoard)),

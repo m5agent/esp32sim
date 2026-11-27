@@ -35,3 +35,5 @@ pub use ft5x06::{Ft5x06, Ft5x06Points, FT5X06_ADDRESS};
 pub use ltr553::{Ltr553, LTR553_ADDRESS};
 pub use spi_bitbang::SpiBitBang;
 pub use ws2812::Ws2812Chain;
+
+pub mod lp5562;

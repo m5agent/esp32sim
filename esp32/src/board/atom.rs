@@ -118,11 +118,13 @@ impl BoardModel for Atom {
         if ![ax, ay, az, gx, gy, gz].iter().all(|value| value.is_finite()) { return false; }
         // M5Unified 0.3.0 IMU_Class.inl reverses sensor X and Z on both
         // Matrix generations. Host inputs are expressed in board axes.
-        let accel = [-ax, ay, -az];
-        let gyro = [-gx, gy, -gz];
+        let sample = [-ax, ay, -az, -gx, gy, -gz];
         match &mut *imu.0.borrow_mut() {
-            Sensor::Mpu(sensor) => sensor.set_sample(accel, gyro),
-            Sensor::Bmi(sensor) => sensor.set_sample(accel, gyro, None),
+            Sensor::Mpu(sensor) => sensor.set_sample(sample),
+            Sensor::Bmi(sensor) => {
+                let [ax, ay, az, gx, gy, gz] = sample;
+                sensor.set_sample([ax, ay, az], [gx, gy, gz], None);
+            }
         }
         true
     }

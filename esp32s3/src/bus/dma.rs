@@ -347,6 +347,13 @@ impl SocBus {
                 c.mic_lanes
             } else { [false; 2] }
         });
+        let lanes = self.board.pdm_mic().map_or(lanes, |(clock, data)| {
+            let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
+            let active = port == 0 && self.periph.i2s0.rx_pdm() && !self.periph.i2s0.rx_slave()
+                && routes.matrix_output(clock as usize, signals.clock[1] as u32)
+                && routes.matrix_input(signals.data) == Some(data);
+            [active; 2]
+        });
         let mut bank = self.periph.i2s0.take_pcm_bank();
         let i2s = if port == 0 { &mut self.periph.i2s0 } else { &mut self.periph.i2s1 };
         let bytes = i2s.receive_with_lanes((cycles, self.cycles), port == 0, &self.periph.gpio, signals, bank.as_deref_mut(), lanes);
@@ -616,6 +623,14 @@ impl SocBus {
     /// matrix select bit follow ESP-IDF v5.4 esp32s3 gpio_sig_map.h and gpio_reg.h.
     fn camera_is_routed(&self) -> bool {
         let Some(pins) = self.board.camera_dvp_pins() else { return true; };
+        // esp32-camera v2.1.4 target/esp32s3/ll_cam.c drives XCLK from CAM_CLK_IDX.
+        if let Some(pin) = self.board.camera_xclk_pin() {
+            let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
+            let routed = routes.matrix_output(pin as usize, 149) ||
+                self.periph.ledc.output(&self.periph.gpio, pin).is_some_and(|(hz, duty)|
+                    (6_000_000. ..= 27_000_000.).contains(&hz) && (1..65535).contains(&duty));
+            if !routed { return false; }
+        }
         let signals = [133, 134, 135, 136, 137, 138, 139, 140, 149, 150, 152];
         // The ESP32-S3 esp32-camera driver can invert VSYNC during capture setup.
         pins.into_iter().zip(signals).all(|(pin, signal)| {
