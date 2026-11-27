@@ -7,6 +7,7 @@ use esp_soc::{
     devices::{bm8563::Bm8563, mpu6886::Mpu6886, BM8563_ADDRESS},
     devices::axp192::{Axp192, AXP192_ADDRESS},
     devices::lepton::{Lepton, LeptonEncoder},
+    devices::nec::NecReceiver,
     devices::soft_i2c::{SoftI2c, SoftOp},
     pins::PinRoutes,
 };
@@ -88,6 +89,7 @@ pub(crate) struct Stick {
     buzzer_pwm: Option<(f64, u32)>,
     buzzer_updates: u64,
     ir_frames: u64,
+    ir: NecReceiver<{ crate::periph::CPU_HZ }>,
 }
 
 impl Stick {
@@ -105,7 +107,7 @@ impl Stick {
         Self { kind, panel: Panel::new(kind == StickKind::C, kind == StickKind::Plus2),
             wire: SoftI2c::idle(), devices, axp, rtc, imu, lepton, encoder, drives: [None; 40], edges: Vec::new(), releases: Vec::new(),
             hold: false, wake_until: 0, cycle: 0, rtc_low: false, backlight_gpio: false, backlight_pwm: 0, backlight_last: 0, backlight_updates: 0,
-            vbus: true, buzzer_pwm: None, buzzer_updates: 0, ir_frames: 0 }
+            vbus: true, buzzer_pwm: None, buzzer_updates: 0, ir_frames: 0, ir: NecReceiver::default() }
     }
 
     fn drive(&mut self, cycle: VirtualCycle, pin: u8, level: Option<bool>) {
@@ -259,6 +261,11 @@ impl BoardModel for Stick {
         } else {
             self.backlight_pwm = clock(BACKLIGHT).map_or(0, |(_, duty)| duty.min(65535) as u16);
         }
+        if self.kind == StickKind::Se {
+            let carrier = clock(self.ir_pin()).is_some_and(|(hz, duty)|
+                (30_000.0..=45_000.0).contains(&hz) && (1..65535).contains(&duty));
+            self.ir.carrier(cycle, carrier);
+        }
         let brightness = self.brightness();
         if brightness != self.backlight_last {
             self.backlight_last = brightness;
@@ -333,10 +340,10 @@ impl BoardModel for Stick {
         let panel = &self.panel.ram;
         let thermal = self.lepton.as_ref().map_or(0, |cam| cam.borrow().frames);
         let pmic_irq = self.axp.as_ref().is_some_and(|p| p.borrow().irq_low());
-        format!("[stick] {} frames={} pixels={} id_reads={} soft_i2c={} panel_power={} backlight={} backlight_updates={} hold={} pmic_irq={} buzzer_updates={} ir_frames={} thermal_frames={} rtc={year:02x}-{month:02x}-{day:02x}T{hour:02x}:{min:02x}:{sec:02x} madctl={:02x}",
+        format!("[stick] {} frames={} pixels={} id_reads={} soft_i2c={} panel_power={} backlight={} backlight_updates={} hold={} pmic_irq={} buzzer_updates={} ir_frames={} thermal_frames={} rtc={year:02x}-{month:02x}-{day:02x}T{hour:02x}:{min:02x}:{sec:02x} madctl={:02x} nec={:?}",
             self.name(), self.panel.ram.frames, self.panel.ram.pixels_written, self.panel.id_reads,
             self.wire.transactions, self.panel_power(), self.brightness(), self.backlight_updates,
-            self.hold, pmic_irq, self.buzzer_updates, self.ir_frames, thermal, panel.madctl)
+            self.hold, pmic_irq, self.buzzer_updates, self.ir_frames, thermal, panel.madctl, self.ir.recent)
     }
 }
 

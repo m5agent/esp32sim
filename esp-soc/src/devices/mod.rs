@@ -22,6 +22,7 @@ pub mod lepton;
 pub mod ltr553;
 pub mod mpu6886;
 pub mod mpu9250;
+pub mod nec;
 pub mod sh1107;
 pub mod soft_i2c;
 pub mod spi_bitbang;

@@ -193,9 +193,12 @@ def check(device, out):
         elif case == "ir_nec":
             pin = 19 if device == "stickc-plus2" else 9
             codes = nec_frames(out / f"{case}.vcd", pin)
-            hit = ({0xaa55ff00, 0xa956fe01}.issubset(codes) if pin == 9
-                   else any(code & 0xffff == 0x1111 for code in codes))
-            reason = f"Decoded GPIO{pin} NEC codes " + ", ".join(f"{code:08x}" for code in codes[:8])
+            if pin == 9:
+                hit = "(0, 85)" in diag and "(1, 86)" in diag
+                reason = "Decoded two expected NEC commands from the active-low GPIO9 PWM envelope" if hit else "GPIO9 PWM envelope did not decode"
+            else:
+                hit = any(code & 0xffff == 0x1111 for code in codes)
+                reason = "Decoded GPIO19 NEC codes " + ", ".join(f"{code:08x}" for code in codes[:8])
         elif case == "led":
             vcd = out / "led.vcd"
             edges = [line for line in vcd.read_text().splitlines() if line in {"0s19", "1s19"}] if vcd.is_file() else []
