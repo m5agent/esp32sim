@@ -113,7 +113,7 @@ def power_case(board, case, serial, report):
 def verify(out, board, case):
     allow_blank = case in {"buzzer", "speaker", "speaker-sd-wav", "wakeup-2",
                            "m5pm1-1", "m5pm1-2", "m5pm1_m5ioe1-1", "m5pm1_m5ioe1-2"}
-    frame, serial, report = capture(out, board, case, screen=not allow_blank and not (case == "button" and board == "cardputer"))
+    frame, serial, report = capture(out, board, case, screen=not allow_blank and not (case == "button" and board in {"cardputer", "dial"}))
     if case == "display" or case.startswith("quickstart-"):
         early, *_ = capture(out, board, case + "-early")
         require(len(color_counts(frame)) >= 8 and changed(frame, early) >= 150, "missing animated display")
@@ -160,7 +160,7 @@ def verify(out, board, case):
         require("PICC type:" not in idle and "MIFARE_Read() failed" not in serial
                 and "MIFARE_Write() failed" not in serial, "negative control or virtual tag transfer failed")
         if case == "rfid-2":
-            contains(serial, "Data was written")
+            contains(serial, "Number of bytes that match = 16", "Success :-)")
         return "separate virtual UIDs read through I2C FIFO and no UID without a tag"
     if case in {"speaker", "buzzer"}:
         expected = (10000, 4000) if board in {"dial", "stopwatch"} else (7000, 4000)

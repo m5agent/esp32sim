@@ -336,6 +336,13 @@ impl SocBus {
 
     /// Attach fresh peripheral-side devices and restore the levels driven by the persistent board.
     pub fn attach_board_devices(&mut self) {
+        if self.cycles == 0 && self.board.name() == "m5stack-sticks3" {
+            // ESP-IDF v5.4.2 efuse_reg.h: PKG_VERSION[23:21] in
+            // RD_MAC_SPI_SYS_3. StickS3's ESP32-S3-PICO-1 is LGA56 (1);
+            // M5GFX 0.3.0 dispatches the PM1 probe only for this package.
+            let package = self.periph.efuse.ram.read(0x50);
+            self.periph.efuse.ram.write(0x50, (package & !(7 << 21)) | (1 << 21));
+        }
         if self.board.observes_gpio_pads() {
             self.board.gpio_waveform_at(self.cycles, esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux));
         }
