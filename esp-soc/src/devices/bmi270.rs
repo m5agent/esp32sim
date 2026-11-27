@@ -120,11 +120,13 @@ impl Bmi270 {
             }
         }
     }
-    pub fn int1_level(&self) -> bool {
+    /// INT1_IO_CTRL uses output enable, polarity and open-drain selection.
+    pub fn int1_drive(&self) -> Option<bool> {
         let config = self.regs[0x53];
-        if config & 8 == 0 { return true; }
+        if config & 8 == 0 { return None; }
         let active = self.any_motion_enabled() && self.regs[0x1c] & self.regs[0x56] & 0x40 != 0;
-        active == (config & 2 != 0)
+        let high = active == (config & 2 != 0);
+        (config & 4 == 0 || !high).then_some(high)
     }
     /// Override the next conversion in sensor axes (g, dps, and optionally uT).
     pub fn set_sample(&mut self, accel: [f64; 3], gyro: [f64; 3], mag: Option<[f64; 3]>) {

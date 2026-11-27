@@ -74,6 +74,7 @@ pub struct StopWatch {
     cycle: VirtualCycle,
     gpio_events: u64,
     vibration: BTreeSet<u16>,
+    motor_duty_since: (u16, VirtualCycle),
     external_port_routes: [bool; 2],
     lcd_selected: bool,
 }
@@ -114,7 +115,8 @@ impl StopWatch {
             (Es8311::ADDRESS, Rc::new(RefCell::new(codec.i2c_port()))),
         ]);
         Self { wiring, bus, codec, motion, imu, rtc, pm1_irq_high: true,
-            cycle: 0, gpio_events: 0, vibration: BTreeSet::new(), external_port_routes: [false; 2], lcd_selected: false }
+            cycle: 0, gpio_events: 0, vibration: BTreeSet::new(), motor_duty_since: (0, 0),
+            external_port_routes: [false; 2], lcd_selected: false }
     }
 }
 
@@ -206,15 +208,23 @@ impl BoardModel for StopWatch {
         {
             let mut pmic = self.wiring.power.pmic.borrow_mut();
             pmic.advance(cycle);
-            // C152 schematic: RX8130 nIRQ shares the PMG0 wake input.
-            pmic.gpio_input(0, !rtc.irq() && imu.int1_level());
+            // C152 sheet 4: RX8130 nIRQ shares PMG0 with Q7, which pulls low on high INT1.
+            pmic.gpio_input(0, !rtc.irq() && !imu.int1_drive().unwrap_or(false));
         }
         self.wiring.sync();
         let expander = self.wiring.expander.lock().unwrap();
         if self.wiring.power.powered() {
-            if expander.vibration_duty > 0 { self.vibration.insert(expander.vibration_duty); }
+            let duty = expander.vibration_duty;
+            if self.motor_duty_since.0 != duty { self.motor_duty_since = (duty, cycle); }
+            // Report PWM states that lasted a full period without counting intermediate I2C bytes.
+            if duty > 0 && expander.vibration_hz > 0
+                && cycle.saturating_sub(self.motor_duty_since.1) >= CPU_HZ / u64::from(expander.vibration_hz) {
+                self.vibration.insert(duty);
+            }
             // C152 schematic sheet 4: PYG1 selects UART0 or USB on J6 pins 2/3.
             self.external_port_routes[usize::from(expander.external_usb)] = true;
+        } else {
+            self.motor_duty_since = (0, cycle);
         }
         self.wiring.panel.lock().expect("StopWatch panel mutex poisoned").panel.advance_to(cycle);
     }

@@ -109,7 +109,7 @@ impl BoardModel for StickS3 {
         imu.advance_motion(cycle);
         let mut pmic = self.power.pmic.borrow_mut();
         pmic.advance(cycle);
-        pmic.gpio_input(4, imu.int1_level());
+        pmic.gpio_input(4, imu.int1_drive().unwrap_or(true));
         drop(pmic);
         drop(imu);
         self.sync_lcd();
