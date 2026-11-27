@@ -22,6 +22,14 @@ python3 docs/fixtures/lx6-receivers/replay.py \
   "$LX6A_SIM" "$LX6C_SIM" "$BUILD" "$ESP32_ROM_ELF" "$NEW_OUT"
 ```
 
+For a Stick-family replay, build the same guest with
+`-D LX6_RECEIVER_STICK=ON` and give the replay script
+`--stick-board m5stack-stickc` or another Stick profile with the
+same pinout. It selects test mode on the two board buttons, reads PDM
+on G34 with clock G0 and receives demodulated NEC on the Grove white
+wire G33. G33 represents the external [M5Stack Unit IR](https://docs.m5stack.com/en/unit/Unit_IR)
+receive line. The StickC boards have onboard IR transmitters.
+
 The RMT and PDM controller contracts run with `cargo test -p esp32 --lib`.
 The DAC controller contracts target the LX6-C implementation. In a
 detached checkout of that source, include `dac_contract.rs` at the end of

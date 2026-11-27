@@ -32,8 +32,11 @@ master FIFO payloads are outside this subset.
 The PDM input accepts decoded PCM with `--mic-wav FILE` and requires the guest
 to configure its PDM receive mode and the board's clock/data route. The piezo
 model observes LEDC and derives a baseband signal from the guest's routed
-one-bit I²S output. Raw microphone waveforms, acoustic behavior, IR receive,
-and physical thermal measurements are outside these models.
+one-bit I²S output. The shared controller also supports raw PDM on the same
+GPIO route. Use the [receiver fixture](fixtures/lx6-receivers/README.md) to replay
+raw microphone data and NEC received from a simulated external Unit IR on G33.
+Acoustic behavior, optical propagation and physical thermal measurements are
+outside these models.
 
 To replay the pinned documentation cases and the catalog image in one tool:
 

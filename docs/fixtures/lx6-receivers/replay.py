@@ -17,15 +17,15 @@ def sha(path):
         return file_digest(stream, "sha256").hexdigest()
 
 
-def input_nec(packet, micros):
+def input_nec(packet, micros, pin):
     times = [9000, 4500]
     for bit in range(32):
         times.extend((560, 1690 if packet & (1 << bit) else 560))
     times.append(560)
     for index, duration in enumerate(times):
-        yield f"{micros / 1_000_000:.6f} gpio 32 {index & 1}"
+        yield f"{micros / 1_000_000:.6f} gpio {pin} {index & 1}"
         micros += duration
-    yield f"{micros / 1_000_000:.6f} gpio 32 1"
+    yield f"{micros / 1_000_000:.6f} gpio {pin} 1"
 
 
 def inspect_dac(path):
@@ -72,27 +72,36 @@ def main():
     parser.add_argument("rom", type=Path, help="ESP32 ECO3 mask ROM ELF")
     parser.add_argument("out", type=Path, help="new replay output directory")
     parser.add_argument("--only", choices=("rmt", "pdm", "dac"))
+    parser.add_argument("--stick-board", choices=("m5stack-stickc", "m5stack-stickc-plus", "m5stack-stickc-plus-se",
+                        "m5stack-stickc-plus2", "m5stack-stickt2"),
+                        help="use the compiled Stick fixture wiring for the NEC/PDM receiver replays")
     args = parser.parse_args()
+    if args.stick_board and args.only == "dac":
+        parser.error("the Stick fixture routes the receiver paths only")
+    mode0, mode1, rmt_pin, pdm_pin = (37, 39, 33, 34) if args.stick_board else (16, 17, 32, 19)
     args.out.mkdir()
     results = {}
     if args.only in (None, "rmt"):
         packets = [0xAA55FF00, 0xA956FE01]
         edges = [edge for packet, when in zip(packets, (1_400_000, 1_700_000))
-                 for edge in input_nec(packet, when)]
-        received = run(args, "rmt-rx", args.sim, "esp32dev", 2.2,
-                       ["0.05 gpio 16 0", "0.05 gpio 17 0", "0.1 gpio 32 1", *edges])
+                 for edge in input_nec(packet, when, rmt_pin)]
+        board = args.stick_board or "esp32dev"
+        initial = [f"0.05 gpio {mode1} 0", f"0.1 gpio {rmt_pin} 1"]
+        received = run(args, "rmt-rx", args.sim, board, 2.2,
+                       [f"0.05 gpio {mode0} 0", *initial, *edges])
         seen = [int(text, 16) for text in re.findall(r"^LX6 NEC RX ([\da-f]{8})", received, re.M)]
         assert seen == packets, seen
-        idle = run(args, "rmt-idle", args.sim, "esp32dev", 3.8,
-                   ["0.05 gpio 16 1", "0.05 gpio 17 0", "0.1 gpio 32 1"])
+        idle = run(args, "rmt-idle", args.sim, board, 3.8, [f"0.05 gpio {mode0} 1", *initial])
         assert "LX6 RMT NO FRAME" in idle and "LX6 NEC RX" not in idle
         results["rmt"] = {"packets": [f"{value:08x}" for value in seen], "idle": "no frame"}
     if args.only in (None, "pdm"):
-        common = ["0.05 gpio 16 0", "0.05 gpio 17 1", "0.1 gpio 19 0"]
-        waveform = [*common, "0.993457 gpio 19 1", "1.151379 gpio 19 0", "1.290243 gpio 19 1"]
+        common = [f"0.05 gpio {mode0} 0", f"0.05 gpio {mode1} 1", f"0.1 gpio {pdm_pin} 0"]
+        waveform = [*common, f"0.993457 gpio {pdm_pin} 1", f"1.151379 gpio {pdm_pin} 0",
+                    f"1.290243 gpio {pdm_pin} 1"]
         trace = args.out / "pdm.vcd"
-        capture = run(args, "pdm", args.sim, "m5stack-atomu", 2, waveform, ("--vcd", str(trace)))
-        idle = run(args, "pdm-idle", args.sim, "m5stack-atomu", 2, common)
+        board = args.stick_board or "m5stack-atomu"
+        capture = run(args, "pdm", args.sim, board, 2, waveform, ("--vcd", str(trace)))
+        idle = run(args, "pdm-idle", args.sim, board, 2, common)
         pattern = r"^LX6 PDM RAW \d+ low=(\d+) high=(\d+) mixed=(\d+)"
         decoded = [tuple(map(int, row)) for row in re.findall(pattern, capture, re.M)]
         silent = [tuple(map(int, row)) for row in re.findall(pattern, idle, re.M)]
@@ -102,7 +111,7 @@ def main():
         assert low >= 4096 and high >= 4096 and mixed > 0, decoded
         results["raw_pdm"] = {"low_high_mixed": decoded, "idle_words": 4096 * 5,
                               "gpio_trace_sha256": sha(trace)}
-    if args.only in (None, "dac"):
+    if not args.stick_board and args.only in (None, "dac"):
         capture = args.out / "dac.wav"
         audio = run(args, "dac", args.dac_sim, "m5stack-basic-v27", 1.6,
                     ["0.05 gpio 16 1", "0.05 gpio 17 1"],
@@ -114,6 +123,9 @@ def main():
                 "guest_sha256": {name: sha(args.build / name) for name in
                                  ("bootloader/bootloader.bin", "partition_table/partition-table.bin",
                                   "lx6_receivers.bin")}}
+    if args.stick_board:
+        manifest["board"] = args.stick_board
+        manifest["pins"] = {"rmt_input": rmt_pin, "pdm_clock": 0, "pdm_data": pdm_pin}
     (args.out / "run.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps(results, indent=2))
 
