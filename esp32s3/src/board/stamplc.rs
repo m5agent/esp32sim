@@ -20,8 +20,8 @@ const SD_CS: u8 = 10;
 const SDA: u8 = 13;
 const SCL: u8 = 15;
 const IRQ: u8 = 14;
-// ESP-IDF v5.4.2 ESP32-S3 gpio_sig_map.h.
-const U2RTS_OUT_IDX: u32 = 19;
+// ESP-IDF v5.4.2 ESP32-S3 gpio_sig_map.h, indexed by UART port.
+const UART_RTS_OUT: [u32; 3] = [13, 16, 19];
 const IO_PINS: [usize; 8] = [4, 5, 6, 7, 12, 13, 14, 15];
 const SD_PINS: SpiPins = SpiPins { sclk: 1 << LCD_CLK, mosi: 1 << LCD_DATA, miso: Some(9), cs: 1 << SD_CS };
 
@@ -180,7 +180,12 @@ impl BoardModel for StamPlc {
         self.cycle = cycle;
         let pad = |pin| routes.software_pad_output(pin);
         self.rs485.de = pad(DIR) == Some(true);
-        self.rs485.hardware_rts = routes.matrix_output(usize::from(DIR), U2RTS_OUT_IDX);
+        self.rs485.hardware_rts = 0;
+        for (port, signal) in UART_RTS_OUT.into_iter().enumerate() {
+            if routes.matrix_output(usize::from(DIR), signal) {
+                self.rs485.hardware_rts |= 1 << port;
+            }
+        }
         let reset = pad(RESET) == Some(false);
         let selected = pad(LCD_CS) == Some(false);
         let clk = pad(LCD_CLK) == Some(true);

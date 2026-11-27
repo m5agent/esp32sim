@@ -28,7 +28,7 @@ fn frame(data: &[u8]) -> Vec<u8> {
 #[derive(Default)]
 pub struct Peer {
     pub de: bool,
-    pub hardware_rts: bool,
+    pub hardware_rts: u8,
     guest: Vec<u8>,
     stop: Option<u64>,
     outbound: Option<Vec<u8>>,
@@ -41,7 +41,8 @@ pub struct Peer {
 impl Peer {
     pub fn deadline(&self) -> Option<u64> { self.stop }
     pub fn transmit(&mut self, cycle: u64, route: UartRoute, byte: u8) {
-        if !route.transmits_on(TX) || !route.matches_baud(BAUD) || !(self.de || self.hardware_rts && route.rs485_transmitting) { return; }
+        let rts = self.hardware_rts & (1 << route.port) != 0 && route.rs485_transmitting;
+        if !route.transmits_on(TX) || !route.matches_baud(BAUD) || !(self.de || rts) { return; }
         if self.guest.len() < 256 { self.guest.push(byte); }
         self.stop = Some(cycle.saturating_add(GAP));
     }
@@ -122,5 +123,19 @@ mod tests {
         for byte in frame(&[1, 1, 0, 2, 0, 1]) { peer.transmit(30 + GAP, route, byte); }
         peer.de = false;
         assert_eq!(peer.receive(30 + GAP * 2)[0].data, frame(&[1, 1, 1, 1]));
+    }
+
+    #[test]
+    fn master_counts_echo_only_on_the_uart_driving_rts() {
+        let mut peer = Peer { hardware_rts: 1 << 1, ..Peer::default() };
+        assert!(peer.master_request(2, true));
+        let request = peer.receive(0).pop().unwrap().data;
+        for port in [2, 1] {
+            let mut route = UartRoute::new(port, 1 << TX, Some(RX), Some(BAUD));
+            route.rs485_transmitting = true;
+            for &byte in &request { peer.transmit(10, route, byte); }
+            assert!(peer.receive(10 + GAP).is_empty());
+            assert_eq!(peer.acknowledgments, u64::from(port == 1));
+        }
     }
 }
