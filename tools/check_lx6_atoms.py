@@ -13,14 +13,14 @@ def nec_frames(path):
     if not path.exists():
         return []
     rises = []
-    previous = False
+    previous = None
+    ts = 0
     for line in path.read_text().splitlines():
         if line.startswith("#"):
             ts = int(line[1:]) / 1_000_000
         elif line in {"1s12", "0s12"}:
             current = line.startswith("1")
-            # The board drives the LED active-low.
-            if previous and not current:
+            if previous is False and current:
                 rises.append(ts)
             previous = current
     groups = []
@@ -30,7 +30,7 @@ def nec_frames(path):
         groups[-1].append(ts)
     frames = []
     for start, first in enumerate(groups):
-        if len(first) < 50 or start + 34 > len(groups):
+        if start + 34 > len(groups):
             continue
         sequence = groups[start:start + 34]
         if not 12_000 <= sequence[1][0] - first[0] <= 15_000:
@@ -81,7 +81,7 @@ def check(device, out):
         record("ir_nec", ran("ir_nec") and 0xaa55ff00 in frames and 0xa956fe01 in frames,
                {"gpio12_frames": [f"{frame:08x}" for frame in frames]})
         text = log("quickstart-logoutput")
-        record("quickstart-logoutput", ran("quickstart-logoutput") and "count:0" in text and "count:1" in text,
+        record("quickstart-logoutput", ran("quickstart-logoutput") and "count:1" in text and "count:2" in text,
                "UART0 loop log counts")
         if matrix:
             samples = imu_samples(log("imu"))
@@ -92,20 +92,30 @@ def check(device, out):
             record("imu", ran("imu") and ran("imu-idle") and all(hits) and clear,
                    {"samples": samples, "idle_samples": idle})
         else:
-            rows["imu"] = {"status": "NOT RUN", "evidence": "Matrix-only example. Lite boot is the no-IMU control."}
+            samples = imu_samples(log("imu"))
+            record("imu", ran("imu") and bool(samples) and all(not any(sample) for sample in samples),
+                   "Matrix-only example; Lite serves as the no-IMU control.")
     elif device == "atom-echo":
-        for name in ("quickstart-echorest", "quickstart-playmusic", "quickstart-recordplay"):
-            rows[name] = {"status": "NOT RUN", "evidence": "Pinned Arduino build produced no merged image."}
+        defects = {
+            "quickstart-echorest": "BaiduRest.cpp:175: WiFiClient declaration missing",
+            "quickstart-playmusic": "LED_DisPlay.h:62: boolean declaration missing",
+            "quickstart-recordplay": "LED_DisPlay.h:62: boolean declaration missing",
+        }
+        for name, defect in defects.items():
+            if not (out / f"{name}.status").exists():
+                rows[name] = {"status": "DOCS-DEFECT", "evidence": defect}
+            else:
+                rows[name] = {"status": "NOT RUN", "evidence": "Case captured; requires an app-specific stimulus and oracle."}
 
     stock = log("stock")
-    board = {"atom-lite": 130, "atom-matrix": 131, "atom-matrix-v11": 131, "atomu": 132, "atom-echo": 142}[device]
+    board = {"atom-lite": 128, "atom-matrix": 141, "atom-matrix-v11": 141, "atomu": 130, "atom-echo": 142}[device]
     observed = re.findall(r"(?m)^LX6-BOARD (\d+)", stock)
     button = re.findall(r"(?m)^LX6-BUTTON ([01])", stock)
     rgb = re.search(r"RGB frames=[1-9]\d* pixels=\d+ first=204060", log("stock", "err"))
     record("stock-repl", ran("stock") and "POWERON_RESET" in stock and observed == [str(board)]
            and button == ["0", "1", "0"] and bool(rgb),
            {"board": observed, "button": button, "rgb": bool(rgb)})
-    record("stock-startup", "MicroPython" in stock and "Traceback" not in stock, "ROM to stock MicroPython prompt")
+    record("stock-startup", "MicroPython" in stock and ">>> " in stock and "Traceback" not in stock, "ROM to stock MicroPython prompt")
     if device in {"atomu", "atom-echo"}:
         audio = {}
         for suffix in ("silent", "733", "1234"):

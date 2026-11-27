@@ -147,10 +147,10 @@ impl ClassicI2s {
         if !active { self.inner.frames_due(0); }
     }
     #[inline]
-    pub(crate) fn data(&mut self, cycles: u64, now: u64, port: usize, gpio: &ClassicGpio, sources: Option<&mut PcmSources>) -> Vec<u8> {
+    pub(crate) fn data(&mut self, cycles: u64, now: u64, port: usize, gpio: &ClassicGpio, sources: Option<&mut PcmSources>, lanes: [bool; 2]) -> Vec<u8> {
         let (data, clock) = [(155, [27, 28]), (181, [164, 165])][port];
         let signals = esp_periph::i2s::RxSignals { data, clock, input_select_bit: 7, output_mask: 0x3ff };
-        self.inner.receive(cycles, now, port == 0, &gpio.gpio, signals, sources)
+        self.inner.receive_with_lanes((cycles, now), port == 0, &gpio.gpio, signals, sources, lanes)
     }
     pub(crate) fn abort_camera_dma(&mut self) {
         self.camera = None;
@@ -330,7 +330,7 @@ impl SocBus {
         if irq & (1 << 14) != 0 { out.running = false; }
         let i2s = &mut self.periph.i2s[port];
         i2s.out = out;
-        i2s.ram.write(0x40, out.eof_desc);
+        i2s.ram.write(0x38, out.eof_desc);
         i2s.inner.int_raw |= irq;
         self.irq_dirty |= irq != 0;
     }
@@ -344,10 +344,20 @@ impl SocBus {
             #[cfg(test)] { self.periph.i2s[port].step_calls += 1; }
             // Pin-routed sources live on controller 0, as on the other chips.
             let mut bank = self.periph.i2s[0].inner.take_pcm_bank();
+            let lanes = self.board.i2s_codecs().map_or([true; 2], |codec| {
+                let routes = self.periph.gpio.routes();
+                if codec.mic_port == port
+                    && routes.matrix_input(155) == Some(codec.din)
+                    && routes.matrix_output(usize::from(codec.ws), 28) {
+                    codec.mic_lanes
+                } else {
+                    [false; 2]
+                }
+            });
             let data = if self.periph.i2s[port].camera_mode {
-                self.camera_dma_data(cycles).unwrap_or_else(|| self.periph.i2s[port].data(cycles, self.cycles, port, &self.periph.gpio, bank.as_deref_mut()))
+                self.camera_dma_data(cycles).unwrap_or_else(|| self.periph.i2s[port].data(cycles, self.cycles, port, &self.periph.gpio, bank.as_deref_mut(), lanes))
             } else {
-                self.periph.i2s[port].data(cycles, self.cycles, port, &self.periph.gpio, bank.as_deref_mut())
+                self.periph.i2s[port].data(cycles, self.cycles, port, &self.periph.gpio, bank.as_deref_mut(), lanes)
             };
             self.periph.i2s[0].inner.restore_pcm_bank(bank);
             let mut dma = self.periph.i2s[port].dma;
@@ -635,5 +645,57 @@ mod tests {
             let mut i = receiver(bits, 1 << 5);
             assert_eq!(i.inner.rx_data(cycles, false, |_| [1, -2]), frame, "{bits}-bit");
         }
+    }
+}
+
+#[cfg(test)]
+mod audio_tests {
+    use super::*;
+
+    #[test]
+    fn classic_pdm_modes_use_64_or_128_clocks_and_pack_signed_pcm() {
+        let mut i2s = ClassicI2s::new();
+        // 160 MHz / 25 / 4 = 1.6 MHz PDM clock, one left PCM slot.
+        i2s.write(0xac, 25);
+        i2s.write(0xb0, (16 << 18) | (4 << 6));
+        i2s.write(0x2c, 1 << 3);
+        i2s.write(0x08, (1 << 5) | (1 << 17));
+        let gpio = crate::periph::Peripherals::new([0; 6]).gpio;
+        for (sinc, rate) in [(0, 25000), (1 << 24, 12500)] {
+            i2s.write(0xb4, (1 << 1) | (1 << 3) | sinc);
+            assert_eq!(i2s.inner.rx_rate(), Some(rate));
+            i2s.inner.rx_input().push(&[[0x1234, -0x5678]]);
+            let samples = i2s.data(CPU_HZ / u64::from(rate), 0, 0, &gpio, None, [true; 2]);
+            assert_eq!(samples, (-0x5678i16).to_le_bytes());
+        }
+        i2s.write(0xb4, 1 << 1);
+        assert!(i2s.data(CPU_HZ / 100, 0, 0, &gpio, None, [true; 2]).is_empty());
+    }
+
+    #[test]
+    fn classic_tx_dma_paces_frames_and_sets_eof_at_descriptor_completion() {
+        let mut b = SocBus::new(0, [0; 6]);
+        let base = 0x3ff6_d000;
+        let desc = 0x3ffb_0000;
+        let payload = desc + 0x80;
+        // I2S1 DPORT gate. 160 MHz / 25 / 8 / (2 * 16) = 25 kHz.
+        for (addr, value) in [(0x3ff0_00c0, 1 << 21), (0x3ff0_00c4, 0),
+            (desc, 0xc000_8008), (desc + 4, payload), (desc + 8, 0),
+            (payload, 0x1234_5678), (payload + 4, 0xabcd_fedc),
+            (base + 0xac, 25), (base + 0xb0, (16 << 12) | 8),
+            (base + 0x20, 1 << 12), (base + 0x60, CHECK_OWNER | (1 << 6)),
+            (base + 0x30, (1 << 29) | (desc & 0xfffff)),
+            (base + 8, 1 << 4), (base + 0x14, 1 << 12)] {
+            b.write32(addr, value).unwrap();
+        }
+        b.i2s_step(CPU_HZ / 25000);
+        assert_eq!(b.periph.i2s[1].inner.pcm, [0x5678]);
+        assert_eq!(b.read32(base + 0x10), Ok(0));
+        b.i2s_step(CPU_HZ / 25000);
+        assert_eq!(b.periph.i2s[1].inner.pcm, [0x5678, -292]);
+        assert_eq!(b.read32(base + 0x10), Ok(1 << 12));
+        assert_eq!(b.read32(base + 0x38), Ok(desc));
+        assert_eq!(b.read32(desc), Ok(0x4000_8008));
+        assert_eq!(b.read32(base + 0x30), Ok(1 << 31 | (desc & 0xfffff)));
     }
 }

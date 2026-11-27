@@ -329,7 +329,11 @@ impl ClassicGpio {
         };
         level ^= cfg & (1 << 9) != 0;
         oe ^= cfg & (1 << 11) != 0;
-        oe.then_some(level)
+        // IDF v5.5.4 esp32 gpio_reg.h GPIO_PINn_PAD_DRIVER bit 2.
+        // A high latch on an open-drain pad releases the wire, so the
+        // external level or weak IO_MUX pull decides what GPIO_IN reads.
+        let open_drain = self.gpio.pin[pin] & (1 << 2) != 0;
+        (oe && !(open_drain && level)).then_some(level)
     }
     fn pad_level(&self, pin: usize) -> bool {
         // Atom Lite/Matrix sense GPIO34 is wired to GPIO23. An explicit

@@ -98,7 +98,10 @@ impl BoardModel for Atom {
         let mut pins = vec![(BUTTON, true)];
         if self.kind.matrix() { pins.extend([(21, true), (25, true)]); }
         if matches!(self.kind, AtomKind::Echo) { pins.push((34, true)); }
-        else { pins.push((12, false)); }
+        else {
+            pins.push((12, false));
+            if matches!(self.kind, AtomKind::AtomU) { pins.push((34, false)); }
+        }
         pins
     }
 

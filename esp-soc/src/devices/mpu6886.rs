@@ -42,7 +42,7 @@ impl Mpu6886 {
         let accel_range = 2 << ((self.regs[0x1c] >> 3) & 3);
         let gyro_range = 250 << ((self.regs[0x1b] >> 3) & 3);
         for (start, axes, range) in [(0x3b, self.accel, accel_range), (0x43, self.gyro, gyro_range)] {
-            for (word, sample) in self.regs[start..start + 6].chunks_exact_mut(2).zip(axes) {
+            for (word, sample) in self.regs[start..start + 6].as_chunks_mut::<2>().0.iter_mut().zip(axes) {
                 let value = (sample * 32768.0 / f64::from(range)).round() as i16;
                 word.copy_from_slice(&value.to_be_bytes());
             }

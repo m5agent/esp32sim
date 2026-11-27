@@ -63,30 +63,30 @@ SCRIPT
     atom-echo)
         sketch quickstart-echorest quickstart-echorest 4.0
         sketch quickstart-playmusic quickstart-playmusic 4.0 --wav "$out/playmusic.wav"
-        sketch quickstart-recordplay quickstart-recordplay 4.0 --i2s-tone 0:733:192 --wav "$out/recordplay.wav"
+        sketch quickstart-recordplay quickstart-recordplay 4.0 --i2s-tone 0:733:0.02 --wav "$out/recordplay.wav"
         ;;
 esac
 
 cat >"$out/stock.script" <<'SCRIPT'
-1.8 uart0 import M5; M5.begin(); print('LX6'+'-BOARD', M5.getBoard())
-2.1 uart0 from hardware import RGB; rgb=RGB(io=27,n=1,type='WS2812'); rgb.set_brightness(100); rgb.fill_color(0x204060)
-2.4 uart0 M5.update(); print('LX6'+'-BUTTON', int(M5.BtnA.isPressed()))
+1.8 uart0-cr import M5; M5.begin(); print('LX6'+'-BOARD', M5.getBoard())
+2.1 uart0-cr from hardware import RGB; rgb=RGB(io=27,n=25 if M5.getBoard()==141 else 1,type='WS2812'); rgb.set_brightness(100); rgb.fill_color(0x204060)
+2.4 uart0-cr M5.update(); print('LX6'+'-BUTTON', int(M5.BtnA.isPressed()))
 2.5 press a 400
-2.7 uart0 M5.update(); print('LX6'+'-BUTTON', int(M5.BtnA.isPressed()))
-3.2 uart0 M5.update(); print('LX6'+'-BUTTON', int(M5.BtnA.isPressed()))
+2.7 uart0-cr M5.update(); print('LX6'+'-BUTTON', int(M5.BtnA.isPressed()))
+3.2 uart0-cr M5.update(); print('LX6'+'-BUTTON', int(M5.BtnA.isPressed()))
 SCRIPT
 run stock "$stock/$device.bin" 3.5 --script "$out/stock.script" --tft-png "$out/stock.png"
 
 if [[ $device == atomu || $device == atom-echo ]]; then
     cat >"$out/audio.script" <<'SCRIPT'
-1.8 uart0 import M5, time; M5.begin(); buf=bytearray(3200); print('LX6'+'-MIC', M5.Mic.begin(), M5.Mic.record(buf,16000,False))
-2.7 uart0 print('LX6'+'-SAMPLES', int(M5.Mic.isRecording()), sum(1 for x in buf if x), sum(buf)); M5.Mic.end()
+1.8 uart0-cr import M5, time; M5.begin(); buf=bytearray(3200); print('LX6'+'-MIC', M5.Mic.begin(), M5.Mic.record(buf,16000,False))
+2.7 uart0-cr print('LX6'+'-SAMPLES', int(M5.Mic.isRecording()), sum(1 for x in buf if x), sum(buf)); M5.Mic.end()
 SCRIPT
     if [[ $device == atom-echo ]]; then
-        printf '%s\n' "3.0 uart0 print('LX6'+'-SPEAKER', M5.Speaker.begin()); M5.Speaker.setVolumePercentage(0.6); M5.Speaker.tone(440,400)" >>"$out/audio.script"
+        printf '%s\n' "3.0 uart0-cr print('LX6'+'-SPEAKER', M5.Speaker.begin()); M5.Speaker.setVolumePercentage(0.6); M5.Speaker.tone(440,400)" >>"$out/audio.script"
     fi
     run audio-silent "$stock/$device.bin" 3.8 --script "$out/audio.script"
-    run audio-733 "$stock/$device.bin" 3.8 --script "$out/audio.script" --i2s-tone 0:733:192 --wav "$out/audio-733.wav"
-    run audio-1234 "$stock/$device.bin" 3.8 --script "$out/audio.script" --i2s-tone 0:1234:384
+    run audio-733 "$stock/$device.bin" 3.8 --script "$out/audio.script" --i2s-tone 0:733:0.02 --wav "$out/audio-733.wav"
+    run audio-1234 "$stock/$device.bin" 3.8 --script "$out/audio.script" --i2s-tone 0:1234:0.04
 fi
 python3 "$tools/check_lx6_atoms.py" "$device" "$out"
