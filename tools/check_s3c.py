@@ -140,7 +140,7 @@ def stack(root, case, serial, log, frame):
         require(min(changed(frame, control), changed(alternative, control), changed(frame, alternative)) > 30,
                 "one injected value did not alter the guest screen")
         if case == "battery":
-            text(frame, (0, 48, 240, 120), "7.62 V and 129.97 mA", "e93f13dde839f8a287a453e75")
+            text(frame, (0, 48, 240, 120), "7.62 V and 129.97 mA", "e93f13dde839f8a287a453e7")
             text(alternative, (0, 48, 240, 120), "6.85 V and 289.93 mA", "7c85424470ab65c2de7c928f")
             return "two injected INA226 voltage and load readings on LCD"
         if case == "imu":
