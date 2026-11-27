@@ -1,4 +1,4 @@
-//! Original ESP32 RMT transmitter: eight channels sharing 512 words of RAM.
+//! Original ESP32 RMT: eight channels sharing 512 words of RAM.
 //! ESP-IDF v5.5.4 components/soc/esp32/register/soc/rmt_reg.h:79-138 (idle, clock and continuous bits); 0xa0-0xac interrupt banks and 0x800 RAM window.
 //! Transaction completion and timing behavior are inferred, not hardware-validated.
 use emu_core::ClockDomain;
@@ -7,6 +7,10 @@ use esp_periph::{Device, RegRam, WriteEffect};
 const CHANNELS: usize = 8;
 const WORDS: usize = 64;
 pub const SIGNAL0: usize = 87;
+pub const RX_SIGNAL0: usize = 83;
+const RX_ENABLE: u32 = 1 << 1;
+const RX_OWNER: u32 = 1 << 5;
+const RX_FILTER_ENABLE: u32 = 1 << 7;
 const CONTINUOUS: u32 = 1 << 6;
 const APB_SOURCE: u32 = 1 << 17;
 const IDLE_LEVEL: u32 = 1 << 18;
@@ -26,6 +30,16 @@ struct Channel {
     errors: u32,
     level: bool,
     bits: Vec<bool>,
+    rx: Receiver,
+}
+
+#[derive(Default)]
+struct Receiver {
+    level: Option<bool>,
+    started: bool,
+    elapsed: u64,
+    pending: Option<u64>,
+    halves: usize,
 }
 
 pub struct ClassicRmt {
@@ -34,6 +48,7 @@ pub struct ClassicRmt {
     ch: [Channel; CHANNELS],
     raw: u32,
     ena: u32,
+    rx_mask: u8,
     pub clock_enabled: bool,
     pub outputs: Vec<(usize, bool)>,
     pub done: Vec<(usize, Vec<bool>)>,
@@ -64,6 +79,7 @@ impl ClassicRmt {
             ch: Default::default(),
             raw: 0,
             ena: 0,
+            rx_mask: 0,
             clock_enabled: false,
             outputs: (0..CHANNELS).map(|n| (n, false)).collect(),
             done: Vec::new(),
@@ -117,6 +133,87 @@ impl ClassicRmt {
         } else {
             self.ch[n].running = false;
             self.raw |= 1 << (3 * n);
+        }
+    }
+
+    pub(crate) fn receiving(&self) -> u8 {
+        if self.powered() { self.rx_mask } else { 0 }
+    }
+
+    fn filter_ticks(&self, n: usize) -> u64 {
+        let conf = self.conf1(n);
+        if conf & RX_FILTER_ENABLE == 0 { 0 } else { u64::from((conf >> 8) & 255) }
+    }
+
+    fn idle_ticks(&self, n: usize) -> u64 {
+        let threshold = (self.regs.read(0x20 + n as u32 * 8) >> 8) & 0xffff;
+        u64::from(threshold.max(1)) * self.divider(n)
+    }
+
+    /// Sample the routed pad after GPIO or matrix changes.
+    pub(crate) fn receive_level(&mut self, n: usize, level: Option<bool>) {
+        let rx = &mut self.ch[n].rx;
+        match (rx.level, level) {
+            (_, None) => {
+                *rx = Receiver { halves: rx.halves, ..Receiver::default() };
+                return;
+            }
+            (None, Some(value)) => {
+                rx.level = Some(value);
+                return;
+            }
+            (Some(previous), Some(value)) if previous == value => {
+                rx.pending = None;
+                return;
+            }
+            _ => { rx.pending.get_or_insert(0); }
+        }
+        self.advance_rx(n, 0);
+    }
+
+    fn store_pulse(&mut self, n: usize, level: bool, ticks: u64) -> bool {
+        let duration = (ticks / self.divider(n)).min(0x7fff) as u32;
+        // A sub-tick pulse cannot be represented. Zero is the hardware end marker.
+        if duration == 0 { return true; }
+        let halves = self.ch[n].rx.halves;
+        if halves / 2 >= self.words(n) || n * WORDS + halves / 2 >= self.mem.len() {
+            self.error(n, 1 << 28);
+            self.rx_mask &= !(1 << n);
+            return false;
+        }
+        let slot = &mut self.mem[n * WORDS + halves / 2];
+        let pulse = duration | (u32::from(level) << 15);
+        if halves.is_multiple_of(2) { *slot = pulse; } else { *slot |= pulse << 16; }
+        self.ch[n].rx.halves += 1;
+        true
+    }
+
+    fn advance_rx(&mut self, n: usize, ticks: u64) {
+        let filter = self.filter_ticks(n);
+        let idle = self.idle_ticks(n);
+        let rx = &mut self.ch[n].rx;
+        let Some(level) = rx.level else { return; };
+        rx.elapsed = rx.elapsed.saturating_add(ticks);
+        if let Some(pending) = &mut rx.pending {
+            *pending = pending.saturating_add(ticks);
+            if *pending >= filter {
+                let duration = rx.elapsed.saturating_sub(*pending);
+                let started = rx.started;
+                rx.level = Some(!level);
+                rx.elapsed = *pending;
+                rx.pending = None;
+                rx.started = true;
+                if started && !self.store_pulse(n, level, duration) { return; }
+            }
+        }
+        let rx = &self.ch[n].rx;
+        if rx.started && rx.pending.is_none() && rx.elapsed >= idle {
+            // The last pulse is saturated to the interval where RX stopped.
+            // If the last word uses only one half, its other half is already zero.
+            if self.store_pulse(n, rx.level.unwrap(), idle) {
+                self.raw |= 1 << (3 * n + 1);
+                self.rx_mask &= !(1 << n);
+            }
         }
     }
 
@@ -181,10 +278,11 @@ impl Device for ClassicRmt {
             0x60..=0x7c => {
                 let n = ((off - 0x60) / 4) as usize;
                 let c = &self.ch[n];
+                let state = if c.running { 1 } else if self.rx_mask & (1 << n) != 0 { 3 } else { 0 };
                 c.errors
-                    | (u32::from(c.running) << 24)
+                    | (state << 24)
                     | (((n * WORDS + c.rd) as u32 & 0x3ff) << 12)
-                    | (n * WORDS) as u32
+                    | ((n * WORDS + c.rx.halves.div_ceil(2)) as u32 & 0x3ff)
             }
             0x00..=0x1c | 0x80..=0x9c => 0,
             0xa0 => self.raw,
@@ -200,7 +298,30 @@ impl Device for ClassicRmt {
             0x00..=0x1c => {}
             0x24..=0x5c if off % 8 == 4 => {
                 let n = ((off - 0x24) / 8) as usize;
+                let previous = self.conf1(n);
                 self.regs.write(off, value & 0xfffff & !0x1d & !(1 << 16));
+                if value & RX_ENABLE == 0 {
+                    self.rx_mask &= !(1 << n);
+                }
+                if value & (1 << 2) != 0 || (value & RX_ENABLE != 0 && previous & RX_ENABLE == 0) {
+                    self.rx_mask &= !(1 << n);
+                    self.ch[n].rx = Receiver::default();
+                    self.ch[n].errors &= !((1 << 27) | (1 << 28));
+                    if value & RX_ENABLE != 0 {
+                        let words = self.words(n);
+                        if value & RX_OWNER == 0 {
+                            self.error(n, 1 << 27);
+                        } else if words == 0 || n * WORDS + words > self.mem.len() {
+                            self.error(n, 1 << 28);
+                        } else {
+                            self.rx_mask |= 1 << n;
+                        }
+                    }
+                }
+                if self.rx_mask & (1 << n) != 0 && value & RX_OWNER == 0 {
+                    self.error(n, 1 << 27);
+                    self.rx_mask &= !(1 << n);
+                }
                 let c = &mut self.ch[n];
                 if value & (1 << 3) != 0 {
                     c.rd = 0;
@@ -236,13 +357,14 @@ impl Device for ClassicRmt {
         u64::from(self.raw & self.ena != 0)
     }
     fn clock(&self) -> Option<ClockDomain> {
-        (self.powered() && self.ch.iter().any(|c| c.running)).then_some(ClockDomain::Apb)
+        (self.powered() && (self.rx_mask != 0 || self.ch.iter().any(|c| c.running))).then_some(ClockDomain::Apb)
     }
     fn tick(&mut self, ticks: u64) {
         #[cfg(test)] { self.tick_calls += 1; }
         if self.powered() {
             for n in 0..CHANNELS {
                 self.advance(n, ticks);
+                if self.rx_mask & (1 << n) != 0 { self.advance_rx(n, ticks); }
             }
         }
     }
@@ -253,11 +375,14 @@ impl Device for ClassicRmt {
         if !self.powered() {
             return None;
         }
-        self.ch
-            .iter()
-            .filter(|c| c.running)
-            .map(|c| c.remaining.max(1))
-            .min()
+        self.ch.iter().enumerate().filter_map(|(n, c)| {
+            let tx = c.running.then_some(c.remaining.max(1));
+            let rx = if self.rx_mask & (1 << n) == 0 { None }
+                else if let Some(pending) = c.rx.pending { Some(self.filter_ticks(n).saturating_sub(pending).max(1)) }
+                else if c.rx.started { Some(self.idle_ticks(n).saturating_sub(c.rx.elapsed).max(1)) }
+                else { None };
+            tx.into_iter().chain(rx).min()
+        }).min()
     }
 }
 
@@ -293,6 +418,59 @@ mod tests {
     fn start(r: &mut ClassicRmt, n: u32) {
         let conf = r.read(conf1(n));
         r.write(conf1(n), conf | 1 | (1 << 3) | (1 << 4));
+    }
+
+    #[test]
+    fn rx_filters_glitches_latches_pulses_and_raises_idle_irq() {
+        let mut r = model();
+        configure(&mut r, 2, 1, 8, true);
+        r.write(0x30, (1 << 24) | (40 << 8) | 8);
+        let conf = OWNER | APB | super::RX_ENABLE | super::RX_FILTER_ENABLE | (4 << 8);
+        r.write(0xa8, 1 << 7);
+        r.write(conf1(2), conf);
+        r.receive_level(2, Some(true));
+        r.tick(1000);
+        assert_eq!(r.read(0xa0), 0);
+        r.receive_level(2, Some(false));
+        r.tick(3);
+        r.receive_level(2, Some(true));
+        r.tick(1000);
+        assert_eq!(r.read(0xa0), 0);
+        r.receive_level(2, Some(false));
+        assert_eq!(r.next_deadline(), Some(4));
+        r.tick(80);
+        r.receive_level(2, Some(true));
+        r.tick(4);
+        assert_eq!(r.next_deadline(), Some(316));
+        r.tick(316);
+        assert_eq!(r.read(ram(128)), 10 | ((0x8000 | 40) << 16));
+        assert_eq!(r.read(0x68) & 0x3ff, 129);
+        assert_eq!(r.read(0xa4), 1 << 7);
+        r.write(0xac, 1 << 7);
+        assert_eq!(r.irq_sources(), 0);
+        r.write(conf1(2), conf | (1 << 2));
+        assert_eq!(r.read(0x68) & 0x3ff, 128);
+    }
+
+    #[test]
+    fn rx_faults_on_owner_or_memory_boundary_and_preserves_neighbor() {
+        let mut r = model();
+        configure(&mut r, 0, 1, 1, true);
+        r.write(0x20, (1 << 24) | (100 << 8) | 1);
+        r.write(conf1(0), APB | super::RX_ENABLE);
+        assert_eq!(r.read(0x60) >> 27 & 1, 1);
+        r.write(0xac, 4);
+        r.write(ram(64), 0xface_cafe);
+        r.write(conf1(0), OWNER | APB | super::RX_ENABLE | (1 << 2));
+        r.receive_level(0, Some(true));
+        for index in 0..=128 {
+            r.receive_level(0, Some(index % 2 != 0));
+            r.tick(8);
+        }
+        r.receive_level(0, Some(true));
+        assert_eq!(r.read(0xa0), 4);
+        assert_eq!(r.read(0x60) >> 28 & 1, 1);
+        assert_eq!(r.read(ram(64)), 0xface_cafe);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! interrupt _S defines 142-184, RXEOF_NUM 676-682, CONF_CHAN 692-695, INLINK_ADDR 763-768,
 //! LC_CONF 856-868, clocks 1340-1390. include/soc/gpio_sig_map.h:69-72,299,309-312,343
 //! supplies the GPIO matrix signals; dport_reg.h:947,965 defines the clock gates.
-//! Samples are packed at DMA boundaries; no bit-level clock model is claimed.
+//! Converted samples and the raw RX waveform tap share the native descriptor DMA.
 use esp_periph::{Device, RegRam, WriteEffect};
 use esp_periph::i2s::{I2s, PcmSources};
 use xtensa_lx7::bus::{Bus, Fault};
@@ -32,6 +32,37 @@ pub struct CameraRx {
     pub reset: bool,
 }
 
+#[derive(Default)]
+struct RawPdm {
+    phase: u64,
+    bits: usize,
+    words: [u16; 2],
+}
+
+impl RawPdm {
+    /// One data sample per BCK tick, alternating the two PDM slots.
+    /// Shift the first bit into bit 15 of each little-endian FIFO word.
+    fn sample(&mut self, cycles: u64, rate: u32, level: bool, slots: u32, swap_clock: bool) -> Vec<u8> {
+        self.phase += cycles * u64::from(rate) * 32;
+        let samples = self.phase / CPU_HZ;
+        self.phase %= CPU_HZ;
+        let mut bytes = Vec::new();
+        for _ in 0..samples {
+            let lane = (self.bits & 1) ^ usize::from(swap_clock);
+            self.words[lane] = (self.words[lane] << 1) | u16::from(level);
+            self.bits += 1;
+            if self.bits == 32 {
+                for (lane, word) in self.words.into_iter().enumerate() {
+                    if slots & (1 << lane) != 0 { bytes.extend_from_slice(&word.to_le_bytes()); }
+                }
+                self.bits = 0;
+                self.words = [0; 2];
+            }
+        }
+        bytes
+    }
+}
+
 pub struct ClassicI2s {
     pub inner: I2s,
     ram: RegRam,
@@ -43,6 +74,7 @@ pub struct ClassicI2s {
     camera_capable: bool,
     pub(crate) camera: Option<Box<crate::camera_dma::Capture>>,
     camera_mode: bool,
+    raw_pdm: RawPdm,
 }
 impl Default for ClassicI2s { fn default() -> Self { Self::new() } }
 impl ClassicI2s {
@@ -57,10 +89,14 @@ impl ClassicI2s {
         ram.write(0xb4, 1 << 24);
         Self { inner: I2s::new(CPU_HZ), ram, dma: esp_periph::gdma::GdmaInCh { conf1: LC_CONF_RESET & CHECK_OWNER, ..Default::default() },
             out: Default::default(), clock_enabled: false,
-            #[cfg(test)] step_calls: 0, camera_capable: port == 0, camera: None, camera_mode: false }
+            #[cfg(test)] step_calls: 0, camera_capable: port == 0, camera: None, camera_mode: false,
+            raw_pdm: RawPdm::default() }
     }
     /// RXEOF_NUM (0x24) in words: IDF v5.5.4 hal/esp32/include/hal/i2s_ll.h:639-643.
     pub(crate) fn rx_eof_words(&self) -> u32 { self.ram.read(0x24) }
+    pub(crate) fn raw_pdm_mode(&self) -> bool {
+        self.camera_capable && !self.camera_mode && self.ram.read(0xb4) & 0xa == 2
+    }
     /// ESP-IDF v4.4.7 components/soc/esp32/include/soc/i2s_reg.h:
     /// CONF2 0xa8, LCD_EN bit 5 and CAMERA_EN bit 0 (1298-1346);
     /// FIFO_CONF 0x20, force/mode/descriptor bits (640-670);
@@ -149,6 +185,22 @@ impl ClassicI2s {
     #[inline]
     pub(crate) fn data(&mut self, cycles: u64, now: u64, port: usize, gpio: &ClassicGpio, sources: Option<&mut PcmSources>, lanes: [bool; 2]) -> Vec<u8> {
         let (data, clock) = [(155, [27, 28]), (181, [164, 165])][port];
+        if self.raw_pdm_mode() {
+            let Some(rate) = self.inner.raw_pdm_word_rate() else { return Vec::new(); };
+            // The I2S master enables the clock's peripheral output. Resolve
+            // its matrix route without requiring a software GPIO driver.
+            let routes = gpio.routes();
+            let clock_signal = clock[1] as u32;
+            let clock_inverted = [false, true].into_iter().find(|&inverted| {
+                routes.output_pins(clock_signal | (u32::from(inverted) << 9)).next().is_some()
+            });
+            let (Some(swap_clock), Some(level)) = (clock_inverted, gpio.signal_input(data)) else {
+                self.raw_pdm = RawPdm::default();
+                return Vec::new();
+            };
+            let slots = self.inner.read(0x50) & 3;
+            return self.raw_pdm.sample(cycles, rate, level, slots, swap_clock);
+        }
         let signals = esp_periph::i2s::RxSignals { data, clock, input_select_bit: 7, output_mask: 0x3ff };
         self.inner.receive_with_lanes((cycles, now), port == 0, &gpio.gpio, signals, sources, lanes)
     }
@@ -184,6 +236,13 @@ impl Device for ClassicI2s {
         // Cache dispatch on configuration writes: a PCM-only channel must not
         // call the camera producer or poll camera registers on every DMA step.
         if off == 0xa8 { self.camera_mode = self.camera_capable && value & 0x21 == 0x21; }
+        if self.camera_capable && (
+            (off == 8 && ((previous ^ value) & 0xa0 != 0 || value & 0xa != 0))
+            || (off == 0x60 && value & 0xd != 0)
+            || matches!(off, 0x2c | 0xa8 | 0xac | 0xb0 | 0xb4) && previous != value
+        ) {
+            self.raw_pdm = RawPdm::default();
+        }
         if self.camera_rx().is_some() || self.camera.is_some() {
             // Stop/restart, mode/FIFO reconfiguration and all native RX reset
             // pulses discard the old frame. INLINK restarts begin at fresh VSYNC.
@@ -408,6 +467,49 @@ mod tests {
         rmw(b, base, 0xb0, 63 << 18, 0);
         b.write32(base + 0x1c, 0).unwrap();
         rmw(b, base, 0x1c, 0, 1 << 21);
+    }
+
+    #[test]
+    fn raw_pdm_packs_timed_bits_in_order_and_does_not_leak_the_other_slot() {
+        let mut capture = RawPdm::default();
+        let pair = CPU_HZ / (40_000 * 32);
+        // The remainder accumulates across uneven host GPIO event intervals.
+        assert!(capture.sample(pair + 1, 40_000, true, 3, false).is_empty());
+        let frame = CPU_HZ / 40_000;
+        assert_eq!(capture.sample(frame - pair - 1, 40_000, false, 3, false),
+            [0, 0x80, 0, 0]);
+        assert!(capture.sample(pair + 1, 40_000, true, 2, true).is_empty());
+        assert_eq!(capture.sample(frame - pair - 1, 40_000, false, 2, true), [0, 0x80]);
+        assert_eq!(capture.sample(frame, 40_000, false, 1, false), [0, 0]);
+    }
+
+    #[test]
+    fn raw_pdm_uses_gpio_routes_and_native_rx_dma() {
+        let mut b = SocBus::new(0, [0; 6]);
+        let base = 0x3ff4_f000;
+        let desc = 0x3ffb_0000;
+        let payload = desc + 0x80;
+        for (addr, value) in [
+            (0x3ff0_00c0, 1 << 4), (0x3ff0_00c4, 0),
+            (0x3ff4_906c, 2 << 12), (0x3ff4_9074, 2 << 12 | 1 << 9),
+            (0x3ff4_4024, 1 << 5), (0x3ff4_4544, 28 | 1 << 10),
+            (0x3ff4_439c, 19 | 1 << 7),
+            (desc, 0x8000_0004), (desc + 4, payload), (desc + 8, 0),
+            (base + 0xac, 25), (base + 0xb0, 16 << 18 | 8 << 6),
+            (base + 0x2c, 1 << 3), (base + 0xb4, 1 << 1),
+            (base + 0x24, 1), (base + 0x34, 1 << 29 | (desc & 0xfffff)),
+            (base + 8, 1 << 5),
+        ] { b.write32(addr, value).unwrap(); }
+        assert_eq!(b.periph.i2s[0].inner.raw_pdm_word_rate(), Some(25_000));
+        b.periph.gpio.set_input(19, true);
+        b.i2s_step(CPU_HZ / 50_000);
+        assert_eq!(b.read32(base + 0xc).unwrap() & (1 << 9), 0);
+        b.periph.gpio.set_input(19, false);
+        b.i2s_step(CPU_HZ / 50_000);
+        b.i2s_step(CPU_HZ / 25_000);
+        assert_eq!(b.read32(payload), Ok(0x0000_ff00));
+        assert_eq!(b.read32(base + 0x3c), Ok(desc));
+        assert_ne!(b.read32(base + 0xc).unwrap() & (1 << 9), 0);
     }
     #[test]
     fn inlink_start_self_clears_without_replaying_on_rmw() {
