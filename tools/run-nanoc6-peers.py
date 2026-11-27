@@ -32,6 +32,7 @@ def run(args):
         "commit": args.commit, "binary_sha256": sha(args.binary), "rom_sha256": sha(args.rom),
         "firmware_sha256": [sha(image) for image in args.images],
         "seconds": args.seconds, "isolated": args.isolated, "board": args.board,
+        "resets": args.reset, "observe_leds": args.observe_leds,
         "scripts": {node: sha(Path(path)) for node, path in args.script},
     }, indent=2) + "\n")
     scripts = {int(node): path for node, path in args.script}
@@ -51,7 +52,8 @@ def run(args):
             stack.callback(proc.wait)
             stack.callback(lambda p=proc: p.kill() if p.poll() is None else None)
             motes.append(proc)
-            exchange(proc, {"type": "hello", "id": index + 1, "seed": 1})
+            exchange(proc, {"type": "hello", "id": index + 1, "seed": 1,
+                            "args": {"observe_leds": args.observe_leds}})
         trace = stack.enter_context((args.output / "radio.ndjson").open("w"))
         last_channel = [None] * len(motes)
         pending = [[] for _ in motes]
@@ -63,6 +65,8 @@ def run(args):
         for t, events in inputs.items():
             for node, data in events:
                 pending[node].append({"type": "serial", "t": t, "data": data})
+        for second, node in args.reset:
+            pending[int(node)].append({"type": "reset", "t": round(float(second) * 1e9)})
         end = round(args.seconds * 1e9)
         while min(now) < end:
             index = min(range(len(motes)), key=now.__getitem__)
@@ -77,7 +81,8 @@ def run(args):
                     print(f'{ev["t"] / 1e9:.6f} {ev["line"]}', file=serial[index], flush=True)
                 else:
                     print(json.dumps({"node": index, **ev}), file=trace)
-                    last_channel[index] = ev["ch"]
+                    if "ch" in ev:
+                        last_channel[index] = ev["ch"]
                     if ev["type"] == "tx" and len(motes) == 2 and not args.isolated:
                         if last_channel[peer] == ev["ch"]:
                             pending[peer].append({"type": "rx", "t": ev["t"],
@@ -100,6 +105,8 @@ if __name__ == "__main__":
     parser.add_argument("--commit", required=True)
     parser.add_argument("--seconds", type=float, default=45)
     parser.add_argument("--isolated", action="store_true", help="negative control without forwarding")
+    parser.add_argument("--observe-leds", action="store_true")
+    parser.add_argument("--reset", action="append", nargs=2, metavar=("SECONDS", "NODE"), default=[])
     parser.add_argument("--script", action="append", nargs=2, metavar=("NODE", "FILE"), default=[])
     parser.add_argument("--serial", action="append", nargs=3, metavar=("SECONDS", "NODE", "TEXT"), default=[])
     run(parser.parse_args())

@@ -31,6 +31,19 @@ def rgb(text):
     return match[1] if match else None
 
 
+
+def zigbee_light_transitions(peers, switch_log):
+    first = re.search(r"^(\d+\.\d+) Sending (?:ON|OFF) command", switch_log, re.M)
+    if first is None:
+        return False
+    first_command = round(float(first[1]) * 1e9)
+    seen = set()
+    for line in read(peers, "radio.ndjson").splitlines():
+        event = json.loads(line)
+        if event["type"] == "leds" and event["node"] == 1 and event["t"] >= first_command:
+            seen.add(tuple(event["rgb"][1]))
+    return {(0, 0, 0), (0, 0, 255)} <= seen
+
 def nano_cases(out, peers):
     def log(label):
         return read(out, label + ".log")
@@ -67,7 +80,7 @@ def nano_cases(out, peers):
         "zigbee-4": ("LED device bound successfully!" in zigbee_switch
                      and "Sending ON command" in zigbee_switch and "Sending OFF command" in zigbee_switch),
         "zigbee-5": ("Connected to Zigbee network!" in zigbee_led
-                     and "LED ON" in zigbee_led and "LED OFF" in zigbee_led),
+                     and zigbee_light_transitions(peers / "zigbee-peer", zigbee_switch)),
         "stock": "C6_REPL 323" in stock and "BTN_LOW 0" in stock and "BTN_HIGH 1" in stock,
     }
 
