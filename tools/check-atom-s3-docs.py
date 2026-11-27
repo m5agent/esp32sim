@@ -11,7 +11,7 @@ import subprocess
 import sys
 import wave
 
-BOARD_ID = {"atoms3-lite": 137, "atoms3": 11, "atoms3r": 142, "atoms3u": 138,
+BOARD_ID = {"atoms3-lite": 137, "atoms3": 11, "atoms3r": 18, "atoms3u": 138,
             "atom-echos3r": 145, "atoms3r-cam": 144, "atoms3r-m12": 143}
 
 
