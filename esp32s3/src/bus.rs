@@ -597,6 +597,7 @@ impl SocBus {
             self.spi3_pins = self.board.uses_spi_pins().then(|| self.periph.spi3_pins());
         }
         self.periph.write32(a, v);
+        if a == 0x6004_1014 && v & (1 << 27) != 0 { self.start_lcd_i80(); }
         // Only an SDMMC register write starts a command, only a USB-OTG one can make the cable's work due.
         if matches!(a >> 12, 0x60028 | 0x60080) && (self.periph.sdmmc.pending() || self.periph.usb_otg.pending()) { self.run_dma_hosts(); }
         if matches!(a & !0xfff, 0x6000_4000 | 0x6000_9000) && self.board.observes_gpio_pads() {

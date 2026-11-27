@@ -2,7 +2,7 @@
 //! Register sources: M5PM1 Chip User Manual v1.9, pp. 4–10, 12–18, 23;
 //! M5IOE1 Chip User Manual, sections III and IV (links and wiring in docs/m5-i2c.md).
 use super::{I2cDevice, Reg8Device};
-use std::sync::{Arc, Mutex};
+use std::{cell::Cell, rc::Rc, sync::{Arc, Mutex}};
 
 /// Host inputs and a latched shutdown request, shared with the board after I2C attachment.
 #[derive(Debug)]
@@ -10,11 +10,12 @@ pub struct M5pm1State {
     pub battery_mv: u16,
     pub charging: bool,
     pub power_off_requested: bool,
+    pub driven_high: u8,
 }
 
 impl Default for M5pm1State {
     fn default() -> Self {
-        Self { battery_mv: 3900, charging: false, power_off_requested: false }
+        Self { battery_mv: 3900, charging: false, power_off_requested: false, driven_high: 0 }
     }
 }
 
@@ -27,7 +28,11 @@ impl M5pm1 {
     pub const ADDRESS: u8 = 0x6e;
 
     pub fn new(state: Arc<Mutex<M5pm1State>>) -> Self {
-        state.lock().expect("M5PM1 state mutex poisoned").power_off_requested = false;
+        {
+            let mut state = state.lock().expect("M5PM1 state mutex poisoned");
+            state.power_off_requested = false;
+            state.driven_high = 0;
+        }
         Self {
             registers: Reg8Device::new("m5pm1", &[
                 (0x00, 0x50), (0x01, 0x20), (0x02, 0x05), (0x03, 0x06),
@@ -52,7 +57,18 @@ impl I2cDevice for M5pm1 {
                 self.state.lock().expect("M5PM1 state mutex poisoned").power_off_requested = true;
             }
         }
-        self.registers.write(byte)
+        let update = !self.registers.first && matches!(self.registers.ptr, 0x10 | 0x11 | 0x13 | 0x16 | 0x17);
+        let ack = self.registers.write(byte);
+        if update {
+            let r = &self.registers.regs;
+            let functions = u16::from_le_bytes([r[0x16], r[0x17]]);
+            let mut high = r[0x10] & r[0x11] & !r[0x13] & 0x1f;
+            for pin in 0..5 {
+                if (functions >> (2 * pin)) & 3 != 0 { high &= !(1 << pin); }
+            }
+            self.state.lock().expect("M5PM1 state mutex poisoned").driven_high = high;
+        }
+        ack
     }
 
     fn read(&mut self) -> u8 {
@@ -75,6 +91,7 @@ pub struct M5ioe1State {
 pub struct M5ioe1 {
     registers: Reg8Device,
     state: Arc<Mutex<M5ioe1State>>,
+    outputs: Option<Rc<Cell<u16>>>,
 }
 
 impl M5ioe1 {
@@ -88,8 +105,15 @@ impl M5ioe1 {
             registers: Reg8Device::new("m5ioe1", &[
                 (0x00, lo), (0x01, hi), (0x02, b'A'), (0x13, 0xff), (0x14, 0x3f),
             ]),
-            state,
+            state, outputs: None,
         }
+    }
+
+    /// Optional physical output observation for boards that wire other GPIO banks.
+    pub fn with_outputs(mut self, outputs: Rc<Cell<u16>>) -> Self {
+        outputs.set(0);
+        self.outputs = Some(outputs);
+        self
     }
 }
 
@@ -104,6 +128,10 @@ impl I2cDevice for M5ioe1 {
         let ack = self.registers.write(byte);
         let regs = &self.registers.regs;
         let high = regs[0x03] & regs[0x05] & !regs[0x13];
+        if let Some(outputs) = &self.outputs {
+            let high_b = regs[0x04] & regs[0x06] & !regs[0x14];
+            outputs.set(u16::from_le_bytes([high, high_b]));
+        }
         *self.state.lock().expect("M5IOE1 state mutex poisoned") = M5ioe1State {
             oled_rail: high & 0x80 != 0,
             oled_reset_high: high & 0x10 != 0,

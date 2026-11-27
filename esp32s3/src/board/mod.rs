@@ -18,6 +18,10 @@ mod cardputer_adv_ir;
 mod cardputer_adv_cap;
 pub mod cores3;
 use esp_soc::devices::soft_i2c;
+mod paper_i2c;
+mod paper_parallel;
+mod paper_spi;
+pub use paper_spi::PaperSpi;
 pub mod stopwatch;
 pub mod waveshare_amoled18;
 pub mod waveshare_cam;
@@ -36,6 +40,10 @@ pub fn make_board(name: &str) -> Option<Board> {
     match name {
         "atech14" | "atech" => Some(Box::new(Atech14::new())),
         "none" | "bare" => Some(Box::new(NoBoard)),
+        "paperdiy" | "m5stack-paperdiy" => Some(Box::new(paper_parallel::PaperParallel::new(true))),
+        "papers3" | "m5stack-papers3" => Some(Box::new(paper_parallel::PaperParallel::new(false))),
+        "papermono" | "m5stack-papermono" => Some(Box::new(PaperSpi::mono(None).ok()?)),
+        "papercolor" | "m5stack-papercolor" => Some(Box::new(PaperSpi::color())),
         "stopwatch" | "m5stack-stopwatch" => Some(Box::new(StopWatch::new())),
         "cardputer-adv" | "m5stack-cardputer-adv" => Some(Box::new(CardputerAdv::new())),
         "cores3" | "m5stack-cores3" => Some(Box::new(Cores3::new())),

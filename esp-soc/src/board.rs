@@ -43,6 +43,15 @@ impl SpiPins {
     }
 }
 
+/// LCD_CAM I80 outputs after GPIO matrix routing. Each signal is a GPIO mask.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LcdI80Pins {
+    pub data: [u64; 16],
+    pub write: u64,
+    pub select: u64,
+    pub width: u8,
+}
+
 /// I2S transducers wired to the same clock pins. PCM levels are digital.
 pub struct I2sCodecs {
     pub port: usize, // TX controller
@@ -214,6 +223,8 @@ pub trait BoardModel {
     /// Observe routed LEDC PWM frequency and duty after the peripheral advances.
     fn observes_ledc(&self) -> bool { false }
     fn ledc_output_at(&mut self, _cycle: VirtualCycle, _pwm: &dyn Fn(u8) -> Option<(f64, u32)>) {}
+    /// Completed LCD_CAM I80 data phase, in physical bus byte order.
+    fn lcd_i80_data(&mut self, _pins: LcdI80Pins, _data: &[u8]) {}
 }
 
 pub type Board = Box<dyn BoardModel>;
