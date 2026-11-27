@@ -35,6 +35,42 @@ The mask ROM ELF is picked up from `~/.espressif/tools/esp-rom-elfs/*/esp32c6_re
 (shipped with ESP-IDF); override with `--rom`. Flags mirror the C3 binary — see `--help`;
 `esp32sim --chip c6` is the same thing.
 
+## M5Stack C6 boards
+
+`--board m5stack-nanoc6` defaults to 4 MiB flash. The active-low input names
+`btnA`, `button` and `boot` map to GPIO9. The status LED is GPIO7 and the
+SK6812-compatible pixel takes RMT data from GPIO20 when GPIO19 enables its rail.
+Use `--console usb` for Arduino USB CDC and UIFlow2 and `--console uart0` for
+the boot console or UART0 applications.
+
+`--board arduino-nesso-n1` defaults to 16 MiB flash with the C6 QFN40 package
+identity. The built-in ST7789, FT6336-family touch, BMI270, expanders and power
+devices use the board's SPI and I²C routes. For scripted input, use
+`<seconds> key A down` and `<seconds> key A up` (or `B`), and
+`<seconds> touch X Y 1` for a touch in the 135×240 glass coordinates.
+`--imu-motion 1` selects scripted motion. A board script line
+`<seconds> battery MV MA SOC VIN` sets gauge inputs in millivolts, signed
+milliamps and integer percent, and sets VIN present (`1`) or absent (`0`).
+`--cap-peer IN:OUT` connects the built-in SX1262 to another process via
+loopback UDP using the Cardputer-ADV CAP packet format.
+
+The docs runners take prebuilt merged images arranged as
+`<firmware-dir>/<case>/sketch.merged.bin` and emit a hash-bound receipt.
+Use a fresh output directory for each run.
+
+```sh
+python3 tools/run-nanoc6-docs.py BINARY C6_ROM NANO_FIRMWARE_DIR OUT --commit COMMIT
+python3 tools/check-nanoc6.py OUT PEER_EVIDENCE_ROOT
+python3 tools/run-nesso-n1-docs.py BINARY C6_ROM NESSO_FIRMWARE_DIR OUT --commit COMMIT
+python3 tools/check-nesso-n1.py OUT PEER_EVIDENCE_ROOT
+```
+
+`run-nanoc6-peers.py` drives the existing `--cooja` endpoint and writes
+timed console and MAC frame traces. The checker reads evidence subdirectories
+`thread-peer`, `thread-scan`, `zigbee-peer`, `zigbee-temp` and `zigbee-scan`.
+`run-nesso-n1-lora.py` drives the two RadioLib sketches and accepts
+`--isolated` for the disconnected control. These are virtual-device checks.
+
 ## Verified against real silicon
 
 The Waveshare board (chip rev v0.1, efuse block v0.3, MAC `dc:1e:d5:6e:8c:dc`; its efuse summary
@@ -229,14 +265,17 @@ entry the driver enabled; no destination only for a coordinator on its PAN or a 
 promiscuous` takes everything — raises `RX_SFD_DONE` after 5 bytes and `RX_DONE` after
 `6 + len + 2` bytes, counted from the frame's first preamble byte, exactly as the transmitter
 counts them; the buffer is written by the bus as the driver reads it; an AR frame is acknowledged from
-there: the ACK (`02 <version> seq`, pending bit 0) starts 192 µs (12 symbols) after the frame's
-end and takes 11 bytes of air, 352 µs, then `ACK_TX_DONE`. The ACK leaves through the same host
-path as a data frame — the round is cut at its first cycle — so a lock-stepped medium sees it
-in time for the sender's ACK wait. The two radio timers count microseconds to their thresholds.
-ED keeps the synthetic scene from before. **Not modelled**: enhanced ACKs (frame version 2),
-security, the frame-pending table, CCA against energy that is not a frame. `--debug ieee802154`
-narrates commands, events and DMA; `--log-periph` reports the first touch of an offset the
-model does not interpret.
+there. A legacy ACK starts 192 µs (12 symbols) after the frame, with the pending bit written
+by the guest's RX interrupt. The ESP-IDF driver owns the source-match table. A version-2 ACK
+uses the frame the guest supplies through TX DMA and the enhanced-ACK notify register.
+An ACK takes the air time of its full frame and the MAC raises `ACK_TX_DONE`. The host
+receives the transmit event at the first air cycle, so the sender can receive it within its
+ACK deadline. A secure TX frame uses the guest-programmed AES-128 key, nonce address and
+payload offset for CCM*. The two radio timers count microseconds to their thresholds.
+
+ED samples a synthetic scene. CCA accounts for a frame in flight. `--debug ieee802154`
+narrates commands, events and DMA, and `--log-periph` reports the first touch of an offset
+the MAC model does not interpret.
 
 Why the filter and the ACK matter to the driver: without them, a frame with the AR bit that was
 *not* addressed to the C6 (another node's unicast) still raised `RX_DONE`, the driver went to
@@ -398,9 +437,24 @@ no display.
   registers the bootloader would have set up are not preset; ROM boot is the tested path.
 - **Watchdogs.** The LP_WDT and the TIMG watchdogs are register RAM: they never fire.
 - **WiFi** beyond one station: legacy rates only, no power save, no TSF.
-- **BLE, the LP core** — nothing of that radio or the second core is modelled. The
-  802.15.4 MAC sends, receives, acknowledges and filters (above); enhanced ACKs and security are not there.
+- **BLE and the LP core** have separate coverage limits. The IEEE 802.15.4 behavior above
+  covers the modeled MAC and the packet-level medium.
 - **Peripherals on demand**: GDMA, I2C, SPI2, RMT, ADC, TWAI, PARL_IO. Each shows up as an
   unknown register with `--log-periph` the moment a firmware wants it. The registers hello_world
   still touches without a model are PMU, IO_MUX, HP_SYSTEM, APB_SARADC and a few LP blocks —
   all of them configuration the firmware only writes and reads back.
+
+### NanoC6 Grove ENV-III and paired radio replay
+
+Use `--board m5stack-nanoc6-enviii` for a NanoC6 with Unit ENV-III on
+Grove I2C0 (GPIO2 SDA, GPIO1 SCL). The SHT30 at 0x44 responds to the
+single-shot commands with the temperature and humidity words and their
+CRC bytes. A script line such as `12 enviii 24.0 45` changes temperature
+in Celsius and relative humidity in percent before the next conversion.
+The QMP6988 at 0x70 exposes its ID, configuration, trim and a fixed
+nominal pressure and temperature sample.
+
+The native Cooja peer replay can observe board LED transitions with
+`--observe-leds` and request a firmware-preserving reset with
+`--reset SECONDS NODE`. The latter takes the ROM software-reset path
+inside that mote and retains its Flash and the shared radio timeline.

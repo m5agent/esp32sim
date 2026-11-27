@@ -76,8 +76,13 @@ pub struct Summary {
 }
 
 #[derive(Clone, Debug)]
-enum Input { Rx { t: u64, frame: Vec<u8>, rssi: i8, lqi: u8 }, Serial { t: u64, data: Vec<u8> }, Ignored { t: u64 } }
-impl Input { fn t(&self) -> u64 { match self { Input::Rx { t, .. } | Input::Serial { t, .. } | Input::Ignored { t } => *t } } }
+enum Input {
+    Rx { t: u64, frame: Vec<u8>, rssi: i8, lqi: u8 },
+    Serial { t: u64, data: Vec<u8> },
+    Reset { t: u64 },
+    Ignored { t: u64 },
+}
+impl Input { fn t(&self) -> u64 { match self { Input::Rx { t, .. } | Input::Serial { t, .. } | Input::Reset { t } | Input::Ignored { t } => *t } } }
 
 /// Read the `hello` line (the first message) before the machine exists: the node id names the
 /// MAC address unless the command line did.
@@ -108,6 +113,8 @@ struct Peer<'a> {
     out: Vec<String>,
     partial: [Vec<u8>; 3],
     radio_reported: Option<&'static str>,
+    observe_leds: bool,
+    led_revision: Option<u64>,
     summary: Summary,
     halted: bool,
 }
@@ -127,6 +134,14 @@ impl<'a> Peer<'a> {
         self.radio_reported = Some(name);
         let (t, ch) = (self.now_ns(), self.m.bus.periph.radio.channel());
         self.out.push(format!("{{\"type\":\"radio\",\"t\":{},\"state\":\"{}\",\"ch\":{}}}", t, name, ch));
+    }
+
+    fn report_leds(&mut self) {
+        if !self.observe_leds { return; }
+        let Some((rgb, revision)) = self.m.bus.board.leds() else { return };
+        if self.led_revision == Some(revision) { return; }
+        self.led_revision = Some(revision);
+        self.out.push(format!("{{\"type\":\"leds\",\"t\":{},\"rgb\":{:?}}}", self.now_ns(), rgb));
     }
 
     /// Guest console bytes since the last call, as `log` events stamped now (complete lines
@@ -219,7 +234,10 @@ impl<'a> Peer<'a> {
                 if self.cfg.verbose { eprintln!("[cooja] rx at t={} ({} bytes, rssi {}): {}", t, frame.len(), rssi, if taken { "taken" } else { "dropped, radio not listening" }); }
             }
             Input::Serial { data, .. } => { self.m.bus.serial_input(&data); self.m.sync_irq(); }
-            Input::Ignored { .. } => {}
+            Input::Reset { .. } if self.cfg.reboot => {
+                self.m.bus.request_reset(0x0c); // SW_CPU, through the C6 ROM restart path.
+            }
+            Input::Reset { .. } | Input::Ignored { .. } => {}
         }
     }
 
@@ -259,6 +277,7 @@ impl<'a> Peer<'a> {
             let late = target < self.now_ns();
             if late && self.cfg.verbose { eprintln!("[cooja] input for t={} arrives with the guest at t={}: taken as started {} ns ago", target, self.now_ns(), self.now_ns() - target); }
             if let Some(tx_t) = self.run_to(target.max(self.now_ns())) {
+                self.report_leds();
                 let wake = self.wake(tx_t);
                 self.summary.sim_ns = tx_t;
                 return self.done(output, tx_t, wake);
@@ -269,6 +288,7 @@ impl<'a> Peer<'a> {
             }
         }
         self.report_radio();
+        self.report_leds();
         let wake = self.wake(t);
         self.summary.sim_ns = t;
         self.done(output, t, wake)
@@ -285,6 +305,7 @@ fn parse_inputs(msg: &Json) -> Vec<Input> {
                 v.push(Input::Rx { t, frame, rssi: ev.i64_or("rssi", -60).clamp(-128, 127) as i8, lqi: ev.i64_or("lqi", 255).clamp(0, 255) as u8 });
             }
             "serial" => { if let Some(data) = ev.get("data").and_then(|f| f.as_str()).and_then(hex_decode) { v.push(Input::Serial { t, data }); } }
+            "reset" => v.push(Input::Reset { t }),
             _ => v.push(Input::Ignored { t }),
         }
     }
@@ -297,7 +318,9 @@ pub fn run(m: &mut esp32c6::Machine, cfg: Config, hello: &Hello, input: &mut dyn
     let mut cfg = cfg;
     if let Some(us) = hello.args.as_ref().and_then(|a| a.get("slice_us")).and_then(|v| v.as_i64()) { if us > 0 { cfg.slice_ns = (us as u64).saturating_mul(1000); } }
     m.console.capture = true;
-    let mut peer = Peer { m, cfg, pending: Vec::new(), out: Vec::new(), partial: Default::default(), radio_reported: None, summary: Summary::default(), halted: false };
+    let observe_leds = matches!(hello.args.as_ref().and_then(|a| a.get("observe_leds")), Some(Json::Bool(true)));
+    let mut peer = Peer { m, cfg, pending: Vec::new(), out: Vec::new(), partial: Default::default(), radio_reported: None,
+        observe_leds, led_revision: None, summary: Summary::default(), halted: false };
     if peer.cfg.verbose { eprintln!("[cooja] hello: node {} seed {} at ({}, {}), slice {} µs", hello.id, hello.seed, hello.x, hello.y, peer.cfg.slice_ns / 1000); }
     // the reply to hello carries the first wake: the guest is booting, so "soon"
     peer.drain_console();

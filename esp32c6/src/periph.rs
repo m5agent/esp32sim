@@ -512,7 +512,7 @@ impl Peripherals {
         if addr == PERIPH_BASE + 0x9609c && v & 2 != 0 { self.mcpwm = Mcpwm::new(87, 8); }
         let fx = mmio::write32(self, addr, v);
         // One test covers every effect, as the SPI test alone did before RX existed.
-        if fx.contains(WriteEffect::SPI_EXEC | WriteEffect::RX_CONF | WriteEffect::PERIPH_RESET) {
+        if fx.contains(WriteEffect::SPI_EXEC | WriteEffect::RX_CONF | WriteEffect::PERIPH_RESET) || addr == 0x6000_c024 {
             if fx.contains(WriteEffect::PERIPH_RESET) { self.pcr_reset(); }
             self.spi_exec |= fx.contains(WriteEffect::SPI_EXEC);
             self.refresh_work();
@@ -531,7 +531,7 @@ impl Peripherals {
         }
     }
 
-    pub fn refresh_work(&mut self) { self.work_pending = self.spi_exec || self.optional.i2s0.rx_running(); }
+    pub fn refresh_work(&mut self) { self.work_pending = self.spi_exec || self.optional.i2s0.active(); }
 
     /// PCR reset pulse for a peripheral modeled here; only ECC uses it so far.
     #[cold]

@@ -44,8 +44,10 @@
 //! out through the same host path as a data frame — `tx_started` at its first cycle — so a
 //! lock-stepped medium sees it in time for the sender's ACK wait.
 //!
-//! Not modelled: enhanced ACKs (frame version 2), security, the frame-pending table (the ACK's
-//! pending bit is 0), CCA against energy that is not a frame.
+//! The guest driver manages the source-match table and sets ACK_FRAME_PENDING_EN during
+//! RX_DONE. Transmit security uses the programmed key, address and payload offset.
+//! The version-2 ACK sent after RX_DONE is prepared in guest DMA and published through
+//! ENHANCE_ACK_CFG. CCA against energy without a frame is unmodelled.
 //!
 //! The DMA side is the bus's: the device cannot see SRAM, so it leaves a `tx_request` (fetch
 //! the frame at this address) and an `rx_write` (store this buffer there) for `SocBus` to
@@ -58,6 +60,8 @@ use crate::periph::CPU_HZ;
 use emu_core::ClockDomain;
 use esp_periph::{Device, RegRam, WriteEffect};
 use std::collections::HashSet;
+
+mod security;
 
 pub const CMD_TX_START: u32 = 0x41;
 pub const CMD_RX_START: u32 = 0x42;
@@ -86,13 +90,21 @@ pub const RX_ABORT_BY_FILTER_FAIL: u32 = 5;
 pub const RX_ABORT_BY_UNEXPECTED_ACK: u32 = 8;
 pub const TX_ABORT_BY_RX_ACK_TIMEOUT: u32 = 16;
 pub const TX_ABORT_BY_TX_STOP: u32 = 17;
+const TX_ABORT_BY_TX_SECURITY_ERROR: u32 = 19;
 pub const TX_ABORT_BY_CCA_BUSY: u32 = 25;
 
 /// `CONF` (0x04) bits the model reads.
 pub const CONF_AUTO_ACK_TX: u32 = 1 << 0;
+const CONF_ENHANCE_ACK_TX: u32 = 1 << 1;
 pub const CONF_AUTO_ACK_RX: u32 = 1 << 3;
 pub const CONF_COORDINATOR: u32 = 1 << 6;
 pub const CONF_PROMISCUOUS: u32 = 1 << 7;
+const CONF_AUTOPEND_ENHANCE: u32 = 1 << 12;
+const ACK_FRAME_PENDING_EN: u32 = 0x6c;
+const ENHANCE_ACK_CFG: u32 = 0x7c;
+const SEC_CTRL: u32 = 0x128;
+const SEC_EXTEND_ADDRESS: u32 = 0x12c;
+const SEC_KEY: u32 = 0x134;
 
 /// `ACK_TIMEOUT` out of reset, in units of 16 µs: 1728 µs, the default that IDF v5.5.4 documents
 /// for `esp_ieee802154_set_ack_timeout` (`components/ieee802154/include/esp_ieee802154.h:204`).
@@ -192,26 +204,56 @@ pub struct MacHeader {
     pub frame_type: u8, pub ack_request: bool, pub version: u8, pub seq: u8,
     pub dst_pan: Option<u16>, pub dst_short: Option<u16>, pub dst_ext: Option<[u8; 8]>,
     pub src_pan: Option<u16>,
+    pub src_short: Option<u16>, pub src_ext: Option<[u8; 8]>,
+    pub seq_suppressed: bool,
+    pub address_end: usize,
 }
 
 /// Parse the frame control field and the addresses (on-air byte order, least significant
 /// first). `None` if the frame is shorter than its header says.
 pub fn parse_header(f: &[u8]) -> Option<MacHeader> {
-    if f.len() < 3 { return None; }
-    let fcf = u16::from_le_bytes([f[0], f[1]]);
-    let mut h = MacHeader { frame_type: (fcf & 7) as u8, ack_request: fcf & 0x20 != 0, version: ((fcf >> 12) & 3) as u8, seq: f[2], ..Default::default() };
-    let pan_comp = fcf & 0x40 != 0;
+    let fcf = u16::from_le_bytes(f.get(..2)?.try_into().ok()?);
+    let version = ((fcf >> 12) & 3) as u8;
+    let seq_suppressed = version == 2 && fcf & (1 << 8) != 0;
+    let seq = if seq_suppressed { 0 } else { *f.get(2)? };
+    let mut h = MacHeader { frame_type: (fcf & 7) as u8, ack_request: fcf & 0x20 != 0,
+        version, seq, seq_suppressed, ..Default::default() };
+    let compressed = fcf & 0x40 != 0;
     let (dst_mode, src_mode) = ((fcf >> 10) & 3, (fcf >> 14) & 3);
-    let mut i = 3;
-    let take = |i: &mut usize, n: usize| -> Option<&[u8]> { let s = f.get(*i..*i + n)?; *i += n; Some(s) };
-    if dst_mode != 0 {
-        let p = take(&mut i, 2)?; h.dst_pan = Some(u16::from_le_bytes([p[0], p[1]]));
-        match dst_mode { 2 => { let a = take(&mut i, 2)?; h.dst_short = Some(u16::from_le_bytes([a[0], a[1]])); } 3 => { let a = take(&mut i, 8)?; h.dst_ext = Some(a.try_into().unwrap()); } _ => return None }
+    let (dst_pan, src_pan) = if version == 2 {
+        let dst_pan = match (dst_mode, src_mode, compressed) {
+            (0, 0, true) => true,
+            (0, _, _) | (_, 0, true) | (3, 3, true) => false,
+            _ => true,
+        };
+        let src_pan = src_mode != 0 && !compressed && (dst_mode, src_mode) != (3, 3);
+        (dst_pan, src_pan)
+    } else { (dst_mode != 0, src_mode != 0 && !compressed) };
+
+    let mut i = if seq_suppressed { 2 } else { 3 };
+    let mut take = |n: usize| -> Option<&[u8]> { let bytes = f.get(i..i + n)?; i += n; Some(bytes) };
+    if dst_pan { h.dst_pan = Some(u16::from_le_bytes(take(2)?.try_into().ok()?)); }
+    match dst_mode {
+        0 => {}
+        2 => h.dst_short = Some(u16::from_le_bytes(take(2)?.try_into().ok()?)),
+        3 => h.dst_ext = Some(take(8)?.try_into().ok()?),
+        _ => return None,
     }
-    if src_mode != 0 {
-        if !pan_comp { let p = take(&mut i, 2)?; h.src_pan = Some(u16::from_le_bytes([p[0], p[1]])); } else { h.src_pan = h.dst_pan; }
+    h.src_pan = if src_pan { Some(u16::from_le_bytes(take(2)?.try_into().ok()?)) }
+        else if src_mode != 0 { h.dst_pan } else { None };
+    match src_mode {
+        0 => {}
+        2 => h.src_short = Some(u16::from_le_bytes(take(2)?.try_into().ok()?)),
+        3 => h.src_ext = Some(take(8)?.try_into().ok()?),
+        _ => return None,
     }
+    h.address_end = i;
     Some(h)
+}
+
+enum OutgoingAck {
+    Legacy { bytes: [u8; 3], data_request: bool },
+    Enhanced { frame: Option<Vec<u8>> },
 }
 
 pub struct Ieee802154 {
@@ -232,14 +274,12 @@ pub struct Ieee802154 {
     pub tx_started: bool,
     pub tx_count: u64,
     // ---- the ACK we wait for
-    /// the sequence number of our AR frame, while in `RxAck`
-    ack_wait_seq: u8,
     /// `ACK_TIMEOUT` (0x5c) running, in `RxAck`
     ack_timeout: Countdown,
     pub ack_rx_count: u64,
     // ---- the ACK we send
     ack_turnaround: Countdown, ack_done: Countdown,
-    ack_frame: [u8; 3],
+    outgoing_ack: Option<OutgoingAck>,
     pub ack_tx_count: u64,
     // ---- RX
     rx_in_flight: Option<RxFrame>,
@@ -281,8 +321,8 @@ impl Ieee802154 {
             ram: RegRam::new(), state: RadioState::Idle, events: 0, event_en: 0, freq: 3, txpower: 0, duration: 0,
             dma_tx_addr: 0, dma_rx_addr: 0, rx_length: 0, rx_abort_reason: 0, tx_abort_reason: 0,
             tx_request: None, tx_frame: Vec::new(), tx_sfd: Countdown::default(), tx_done: Countdown::default(), tx_started: false, tx_count: 0,
-            ack_wait_seq: 0, ack_timeout: Countdown::default(), ack_rx_count: 0,
-            ack_turnaround: Countdown::default(), ack_done: Countdown::default(), ack_frame: [0; 3], ack_tx_count: 0,
+            ack_timeout: Countdown::default(), ack_rx_count: 0,
+            ack_turnaround: Countdown::default(), ack_done: Countdown::default(), outgoing_ack: None, ack_tx_count: 0,
             rx_in_flight: None, rx_sfd: Countdown::default(), rx_done: Countdown::default(), rx_write: None, rx_count: 0, rx_dropped: 0, rx_filtered: 0,
             timer: [RadioTimer::default(); 2],
             ed_rss: -92, ed_left: None, scans: 0, level_dbm, target_dbm: level_dbm, noise: 0x9e37_79b9, scene_acc: 0, scene_ticks: 0, live: false,
@@ -326,8 +366,9 @@ impl Ieee802154 {
         let pan_ok = |pan: u16, own_pan: u16| pan == 0xffff || own_pan == pan || own_pan == 0xffff;
         match (h.dst_pan, h.dst_short, h.dst_ext) {
             (Some(pan), Some(0xffff), _) => pan == 0xffff || mine.iter().any(|m| pan_ok(pan, m.0)),
-            (Some(pan), Some(short), _) => mine.iter().any(|m| pan_ok(pan, m.0) && m.1 == short),
-            (Some(pan), _, Some(ext)) => mine.iter().any(|m| pan_ok(pan, m.0) && m.2 == ext),
+            (pan, Some(short), _) => mine.iter().any(|m| pan.is_none_or(|id| pan_ok(id, m.0))
+                && (short == 0xffff || m.1 == short)),
+            (pan, _, Some(ext)) => mine.iter().any(|m| pan.is_none_or(|id| pan_ok(id, m.0)) && m.2 == ext),
             _ => match h.src_pan {
                 Some(pan) if h.frame_type == 0 => pan == 0xffff || mine.iter().any(|m| pan_ok(pan, m.0)),
                 Some(pan) => self.conf(CONF_COORDINATOR) && (pan == 0xffff || mine.iter().any(|m| pan_ok(pan, m.0))),
@@ -386,7 +427,7 @@ impl Ieee802154 {
                     return false;
                 }
             }
-            (RadioState::RxAck, Some(h)) => h.frame_type == 2 && frame.len() == 3 && h.seq == self.ack_wait_seq,
+            (RadioState::RxAck, Some(h)) => self.accepts_ack(&h, frame.len()),
             _ => false,
         };
         if !taken {
@@ -423,6 +464,16 @@ impl Ieee802154 {
         true
     }
 
+    fn accepts_ack(&self, ack: &MacHeader, len: usize) -> bool {
+        if ack.frame_type != 2 || len > 125 || (ack.version != 2 && len != 3) { return false; }
+        let Some(sent) = parse_header(&self.tx_frame) else { return false };
+        if ack.seq_suppressed != sent.seq_suppressed || (!ack.seq_suppressed && ack.seq != sent.seq) {
+            return false;
+        }
+        ack.dst_short.is_none_or(|address| sent.src_short == Some(address))
+            && ack.dst_ext.is_none_or(|address| sent.src_ext == Some(address))
+    }
+
     /// The frame in flight is complete: lay it out as the driver reads it and raise `RX_DONE`
     /// — or `ACK_RX_DONE` for the acknowledgement we were waiting for. A frame with the AR bit
     /// (frame version 0 or 1, `CONF.auto_ack_tx`) is acknowledged from here: the turnaround
@@ -441,18 +492,25 @@ impl Ieee802154 {
             self.ack_rx_count += 1;
             self.events |= EVENT_ACK_RX_DONE;
             self.state = RadioState::Idle;
-            if self.dbg { eprintln!("[802.15.4] ACK_RX_DONE: seq {} to {:#010x}", rx.frame[2], self.dma_rx_addr); }
+            if self.dbg { eprintln!("[802.15.4] ACK_RX_DONE: {} bytes to {:#010x}", rx.frame.len(), self.dma_rx_addr); }
             return;
         }
         self.rx_count += 1;
         self.events |= EVENT_RX_DONE;
         if self.dbg { eprintln!("[802.15.4] RX_DONE: {} bytes to {:#010x}", rx.frame.len(), self.dma_rx_addr); }
         let h = parse_header(&rx.frame).unwrap_or_default();
-        if h.ack_request && h.version <= 1 && self.conf(CONF_AUTO_ACK_TX) {
+        self.outgoing_ack = match h.version {
+            0 | 1 if h.ack_request && self.conf(CONF_AUTO_ACK_TX) => {
+                let data_request = h.frame_type == 3 && rx.frame[0] & 8 == 0
+                    && rx.frame.get(h.address_end) == Some(&4);
+                Some(OutgoingAck::Legacy { bytes: [0x02, h.version << 4, h.seq], data_request })
+            }
+            2 if h.ack_request && self.conf(CONF_ENHANCE_ACK_TX) => Some(OutgoingAck::Enhanced { frame: None }),
+            _ => None,
+        };
+        if self.outgoing_ack.is_some() {
             self.state = RadioState::TxAck;
-            self.ack_frame = [0x02, (h.version << 4), h.seq];
             match overshoot { Some(o) => self.ack_turnaround.chain(ns_cycles(ACK_TURNAROUND_NS), o), None => self.ack_turnaround.arm(ns_cycles(ACK_TURNAROUND_NS), false) }
-            if self.dbg { eprintln!("[802.15.4] acknowledging seq {} in {} cycles", h.seq, self.ack_turnaround.remaining()); }
         } else {
             self.state = RadioState::Idle;
         }
@@ -461,14 +519,42 @@ impl Ieee802154 {
     /// The bus fetched the frame `TX_START` pointed at: `psdu` is the MAC frame without its
     /// length byte and without the FCS (the hardware appends the CRC). Starts the air-time
     /// clock and flags the start for the host.
-    pub fn tx_loaded(&mut self, psdu: Vec<u8>) {
+    pub fn tx_loaded(&mut self, mut psdu: Vec<u8>) {
         self.live = true;
+        let ctrl = self.ram.read(SEC_CTRL);
+        if ctrl & 1 != 0 && !self.protect_frame(&mut psdu, ((ctrl >> 8) & 0x7f) as usize) {
+            self.tx_abort(TX_ABORT_BY_TX_SECURITY_ERROR);
+            self.abort_rx_silently();
+            self.state = RadioState::Idle;
+            return;
+        }
+        if let Some(OutgoingAck::Enhanced { frame }) = &mut self.outgoing_ack {
+            *frame = Some(psdu);
+            if !self.ack_turnaround.armed() { self.ack_turnaround.arm(0, true); }
+            return;
+        }
         self.tx_sfd.arm(air_cycles(SFD_BYTES), true);
         self.tx_done.arm(air_cycles(PHY_OVERHEAD_BYTES + psdu.len() as u64 + 2), true);
         if self.dbg { eprintln!("[802.15.4] tx {} bytes on channel {}: TX_DONE in {} cycles", psdu.len(), self.channel(), self.tx_done.remaining()); }
         self.tx_frame = psdu;
         self.tx_started = true;
         self.tx_count += 1;
+    }
+
+    fn protect_frame(&self, psdu: &mut [u8], payload: usize) -> bool {
+        let Some(header) = parse_header(psdu) else { return false };
+        if psdu[0] & 8 == 0 { return false; }
+        let addr = self.register_bytes(SEC_EXTEND_ADDRESS);
+        let key = self.register_bytes(SEC_KEY);
+        security::protect(psdu, header.address_end, payload, addr, key).is_some()
+    }
+
+    fn register_bytes<const N: usize>(&self, base: u32) -> [u8; N] {
+        let mut bytes = [0; N];
+        for (i, word) in bytes.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            word.copy_from_slice(&self.ram.read(base + 4 * i as u32).to_le_bytes());
+        }
+        bytes
     }
 
     /// The host's yield flag: a transmission began at the instruction (or the device tick)
@@ -513,6 +599,7 @@ impl Ieee802154 {
     fn abort_rx_silently(&mut self) {
         if self.rx_in_flight.take().is_some() { self.rx_dropped += 1; }
         self.rx_sfd.clear(); self.rx_done.clear(); self.ack_timeout.clear(); self.ack_turnaround.clear(); self.ack_done.clear();
+        self.outgoing_ack = None;
     }
     /// `RX_ABORT` with a reason, if the driver enabled that reason (`RX_ABORT_EVENT_EN`, bit reason-1).
     fn rx_abort(&mut self, reason: u32) {
@@ -523,6 +610,33 @@ impl Ieee802154 {
     fn tx_abort(&mut self, reason: u32) {
         self.tx_abort_reason = reason;
         if self.ram.read(0x78) & (1 << (reason - 1)) != 0 { self.events |= EVENT_TX_ABORT; }
+    }
+
+    fn start_ack(&mut self, over: u64) {
+        let Some(ack) = self.outgoing_ack.take() else { return };
+        self.tx_frame = match ack {
+            OutgoingAck::Legacy { mut bytes, data_request } => {
+                // Firmware selects the pending bit in the RX_DONE interrupt.
+                if self.ram.read(ACK_FRAME_PENDING_EN) & 1 != 0
+                    && (self.conf(CONF_AUTOPEND_ENHANCE) || data_request)
+                {
+                    bytes[0] |= 1 << 4;
+                }
+                bytes.to_vec()
+            }
+            OutgoingAck::Enhanced { frame: Some(frame) } => {
+                self.tx_sfd.chain(air_cycles(SFD_BYTES), over);
+                frame
+            }
+            pending => {
+                self.outgoing_ack = Some(pending);
+                return;
+            }
+        };
+        self.tx_started = true;
+        self.ack_tx_count += 1;
+        self.ack_done.chain(air_cycles(PHY_OVERHEAD_BYTES + self.tx_frame.len() as u64 + 2), over);
+        if self.dbg { eprintln!("[802.15.4] ACK on air ({} bytes)", self.tx_frame.len()); }
     }
 
     fn note_unknown(&mut self, off: u32, write: bool, v: u32) {
@@ -576,7 +690,12 @@ impl Device for Ieee802154 {
             0x60 => self.event_en = v & 0x1fff, 0x64 => self.events &= !v,                          // EVENT_STATUS: write 1 to clear
             0xa8 => self.timer[0].threshold = v, 0xb0 => self.timer[1].threshold = v,
             0xd0 => self.dma_tx_addr = v, 0xe0 => self.dma_rx_addr = v,
-            0x04 | 0x08..=0x44 | 0x58 | 0x5c | 0x68 | 0x6c | 0x70 | 0x78 | 0x7c | 0x90 | 0xb8 | 0xbc | 0xc0..=0xcc | 0xd4 | 0xd8 | 0xe4 | 0xe8 | 0xf0 | 0xf4 | 0x100..=0x120 | 0x128..=0x140 | 0x180 => self.ram.write(off, v),
+            ENHANCE_ACK_CFG => {
+                if v != 0 && matches!(self.outgoing_ack, Some(OutgoingAck::Enhanced { frame: None })) {
+                    self.tx_request = Some(self.dma_tx_addr);
+                }
+            }
+            0x04 | 0x08..=0x44 | 0x58 | 0x5c | 0x68 | 0x6c | 0x70 | 0x78 | 0x90 | 0xb8 | 0xbc | 0xc0..=0xcc | 0xd4 | 0xd8 | 0xe4 | 0xe8 | 0xf0 | 0xf4 | 0x100..=0x120 | 0x128..=0x140 | 0x180 => self.ram.write(off, v),
             _ => { self.note_unknown(off, true, v); self.ram.write(off, v) }
         }
         WriteEffect::NONE
@@ -600,7 +719,6 @@ impl Device for Ieee802154 {
                 if h.ack_request && self.conf(CONF_AUTO_ACK_RX) {
                     // wait for the acknowledgement; hardware's own timeout unless ACK_TIMEOUT is zero
                     self.state = RadioState::RxAck;
-                    self.ack_wait_seq = h.seq;
                     let timeout = self.ram.read(0x5c) & 0xffff;
                     if timeout != 0 { self.ack_timeout.chain(ns_cycles(timeout as u64 * 16_000), over); }
                     if self.dbg { eprintln!("[802.15.4] TX_DONE: waiting for the ACK of seq {}{}", h.seq, if timeout != 0 { format!(", {} µs", timeout * 16) } else { String::new() }); }
@@ -620,16 +738,11 @@ impl Device for Ieee802154 {
             self.abort_rx_silently();
             self.tx_abort(TX_ABORT_BY_RX_ACK_TIMEOUT);
             self.state = RadioState::Idle;
-            if self.dbg { eprintln!("[802.15.4] no ACK for seq {}: RX_ACK_TIMEOUT", self.ack_wait_seq); }
+            if self.dbg { eprintln!("[802.15.4] no ACK: RX_ACK_TIMEOUT"); }
         }
         if let Some(over) = self.rx_done.tick(cycles) { self.finish_rx(Some(over)); }
         if let Some(over) = self.ack_turnaround.tick(cycles).filter(|_| self.state == RadioState::TxAck) {
-            // the acknowledgement goes on the air now: the host sees it as a transmission
-            self.tx_frame = self.ack_frame.to_vec();
-            self.tx_started = true;
-            self.ack_tx_count += 1;
-            self.ack_done.chain(air_cycles(PHY_OVERHEAD_BYTES + ACK_MAC_BYTES + 2), over);
-            if self.dbg { eprintln!("[802.15.4] ACK seq {} on the air, ACK_TX_DONE in {} cycles", self.ack_frame[2], self.ack_done.remaining()); }
+            self.start_ack(over);
         }
         if self.ack_done.tick(cycles).is_some() && self.state == RadioState::TxAck {
             self.events |= EVENT_ACK_TX_DONE;
@@ -684,6 +797,94 @@ mod tests {
         let h = parse_header(&BROADCAST).unwrap();
         assert_eq!((h.ack_request, h.dst_short), (false, Some(0xffff)));
         assert!(parse_header(&[0x41, 0xd8, 0x01, 0xcd]).is_none(), "shorter than its header");
+    }
+
+    #[test]
+    fn data_request_ack_uses_pending_written_after_rx_done() {
+        let mut r = armed_rx();
+        let mut request = UNICAST_AR;
+        request[0] = request[0] & !7 | 3; // MAC command
+        request[15] = 4; // Data Request
+        assert!(r.receive(&request[..16], -60, 200, None));
+        assert_ne!(r.events & EVENT_RX_DONE, 0);
+        r.write(ACK_FRAME_PENDING_EN, 1);
+        r.tick(ns_cycles(ACK_TURNAROUND_NS));
+        assert_eq!(r.tx_frame, [0x12, 0x10, 0x2d]);
+
+        let mut r = armed_rx();
+        assert!(r.receive(&UNICAST_AR, -60, 200, None));
+        r.write(ACK_FRAME_PENDING_EN, 1);
+        r.tick(ns_cycles(ACK_TURNAROUND_NS));
+        assert_eq!(r.tx_frame, [0x02, 0x10, 0x2d]);
+    }
+
+    #[test]
+    fn enhanced_ack_is_fetched_from_guest_dma_and_uses_its_full_airtime() {
+        let mut radio = armed_rx();
+        let conf = radio.read(0x04);
+        radio.write(0x04, conf | CONF_ENHANCE_ACK_TX);
+        let mut request = UNICAST_AR;
+        request[1] = (request[1] & !0x30) | 0x20;
+        assert!(radio.receive(&request, -56, 230, None));
+        assert_ne!(radio.events & EVENT_RX_DONE, 0);
+        assert!(radio.tx_request.is_none());
+        radio.write(0xd0, 0x4080_2000);
+        radio.write(ENHANCE_ACK_CFG, 1);
+        assert_eq!(radio.tx_request.take(), Some(0x4080_2000));
+        let ack = [0x02, 0x22, request[2], 0x80, 0x3f];
+        radio.tx_loaded(ack.to_vec());
+        let turnaround = ns_cycles(ACK_TURNAROUND_NS);
+        radio.tick(turnaround - 1);
+        assert!(!radio.take_tx_started());
+        radio.tick(1);
+        assert!(radio.take_tx_started());
+        assert_eq!(radio.tx_frame, ack);
+        let airtime = air_cycles(PHY_OVERHEAD_BYTES + ack.len() as u64 + 2);
+        radio.tick(airtime - 1);
+        assert_eq!(radio.events & EVENT_ACK_TX_DONE, 0);
+        radio.tick(1);
+        assert_ne!(radio.events & EVENT_ACK_TX_DONE, 0);
+    }
+
+    #[test]
+    fn enhanced_ack_reaches_rx_dma_with_its_ie() {
+        let mut radio = configured();
+        let mut request = UNICAST_AR;
+        request[1] = (request[1] & !0x30) | 0x20;
+        radio.write(0x00, CMD_TX_START);
+        radio.tx_loaded(request.to_vec());
+        radio.tick(1);
+        radio.tick(air_cycles(PHY_OVERHEAD_BYTES + request.len() as u64 + 2));
+        assert_eq!(radio.state, RadioState::RxAck);
+        let mut ack = [0x02, 0x22, request[2] ^ 1, 0x80, 0x3f];
+        assert!(!radio.receive(&ack, -56, 230, None));
+        ack[2] = request[2];
+        assert!(radio.receive(&ack, -56, 230, None));
+        assert_ne!(radio.events & EVENT_ACK_RX_DONE, 0);
+        let (address, bytes) = radio.rx_write.unwrap();
+        assert_eq!(address, 0x4081_0000);
+        assert_eq!(&bytes[1..6], &ack);
+    }
+
+    #[test]
+    fn tx_security_registers_encrypt_and_authenticate_psdu() {
+        let mut r = configured();
+        let header = [0x49, 0x98, 0xf2, 0xaa, 0xbb, 0xcc, 0xdd, 0x11, 0x22,
+                      0x0d, 2, 0, 0, 0, 1];
+        let psdu = [&header[..], b"wire-frame", &[0; 4]].concat();
+        for (i, bytes) in [0x03020100, 0x07060504].into_iter().enumerate() {
+            r.write(SEC_EXTEND_ADDRESS + 4 * i as u32, bytes);
+        }
+        for (i, bytes) in [0x03020100, 0x07060504, 0x0b0a0908, 0x0f0e0d0c].into_iter().enumerate() {
+            r.write(SEC_KEY + 4 * i as u32, bytes);
+        }
+        r.write(SEC_CTRL, (15 << 8) | 1);
+        r.write(0x00, CMD_TX_START);
+        r.tx_loaded(psdu);
+        assert_eq!(&r.tx_frame[..15], &header);
+        // AES-128-CCM cross-checked with OpenSSL for this key, nonce and header.
+        assert_eq!(&r.tx_frame[15..], &[0xce, 0x5b, 0x3c, 0x72, 0xf0, 0x6d, 0xc6,
+                                          0x87, 0x94, 0x3b, 0x1f, 0x69, 0xdc, 0xe7]);
     }
 
     /// The same frame must occupy the air for the same time whether this radio sends it or
