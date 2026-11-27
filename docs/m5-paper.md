@@ -34,21 +34,28 @@ Additional script inputs:
 - `paper-battery MILLIVOLTS CHARGING` on PaperMono and PaperColor.
 - `adc 3 VOLTS` on PaperS3, before the 2:1 divider factor applied by the guest.
 - `sht40 CELSIUS PERCENT_RH` on PaperColor.
+- `imu AX AY AZ GX GY GZ` on PaperMono, with acceleration in g and angular velocity in degrees per second.
 - `paper-tag HEX_UID` or `paper-tag none` on PaperMono. The modeled NFC-A reader supports 4- or 7-byte UIDs.
 - `--lora-peer IN:OUT` connects two PaperMono processes on loopback UDP. The peer uses the Cardputer-ADV CAP channel header and SX1262 packet engine. Give the other process the reversed port pair.
 
 The board matrix runners in `tools/run-*-docs.sh` accept a simulator binary,
 a directory containing prebuilt `CASE/sketch.merged.bin` images, and a new
 output directory. Use `--source COMMIT --rom-dir ROM_DIR` to bind the run to
-its source and ROM. `tools/check-paper-docs.py OUT` evaluates captured frames
-and the supported guest oracles. `tools/probe-paper-service.py` tests the
-private service stream via an inherited Unix socket.
+its source and ROM. Pass `--sd` with a FAT32 fixture for the SD examples, or
+`--stock` with a matching UIFlow2 image to exercise stock display, USB CDC and
+board input. `tools/check-paper-docs.py OUT` checks the guest and its captured
+output. `tools/probe-paper-service.py` exercises the service stream via an
+inherited Unix socket.
 
-Open validation covers PMIC wake and power-key behavior, full NFC
-read/write and card emulation, complete stock input and REPL, SD power
-gating and partial-waveform cases outside the supported display drivers.
-Provisional Arduino board selections remain visible in the individual
-build receipts.
+PaperMono's NFC examples cover reader-side scanning, block reads and NDEF
+write/readback. The card-emulation example requires NFC power via IOE1 GPIO4
+and an external reader fixture. PaperColor's GPIO48 IR decoder observes the
+LEDC carrier and validates completed NEC frames. The board package's built-in
+RGB LED alias shares GPIO48, so disable IRremote's send feedback for this
+transmitter. The PaperColor SHT40 sketch uses `Wire1` to share the controller
+that owns the internal GPIO3 SDA and GPIO2 SCL lines. The original 3.2.5
+Arduino build selections are recorded in the individual receipts. The
+M5Stack 3.3.10 package provides all four board IDs.
 
 The ESP Online Tester board and I80 implementations at `81bc93c0` served
 as comparative references. The pin routes, refresh commands and waveform
