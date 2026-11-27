@@ -470,10 +470,10 @@ impl SocBus {
             }
             return;
         };
-        // A malformed chain still completes the transfer with the bytes gathered before the
-        // fault, as before the shared gather; GDMA additionally reports OUT_DSCR_ERR.
-        let mut data = Vec::with_capacity(want);
-        self.gather_dma_out(ch, want, &mut data);
+        // SPI's data phase can end in the middle of a descriptor while GDMA
+        // remains bound. M5GFX's CPU-driven fallback sends the rest through
+        // a second SPI_USR without reprogramming the link.
+        let data = self.stream_dma_out(ch, want);
         self.periph.spi2.complete_dma_tx(&data);
     }
 
@@ -669,11 +669,26 @@ impl SocBus {
         let connected = self.board.name() == "arduino-nesso-n1"
             && esp_soc::pins::ChipPins::C6.routes(&self.periph.gpio, &self.periph.io_mux)
                 .matrix_output(11, 15);
+        let bytes = self.stream_dma_out(index, frames * width);
+        if connected {
+            // M5Unified drives the piezo with one stereo frame of sigma-delta
+            // bits per sample. Recover baseband from the bit density.
+            let i2s = &mut self.periph.optional.i2s0;
+            i2s.frames_out += (bytes.len() / width) as u64;
+            i2s.pcm.extend(bytes.chunks_exact(width).map(|frame| {
+                let ones = frame.iter().map(|byte| byte.count_ones()).sum::<u32>() as i32;
+                (ones * 65534 / (width as i32 * 8) - 32767) as i16
+            }));
+        }
+    }
+
+    /// Clock a bounded number of bytes out, retaining the cursor on a partial
+    /// descriptor. Completion flags and optional writeback are per descriptor.
+    fn stream_dma_out(&mut self, index: usize, limit: usize) -> Vec<u8> {
         let old = self.periph.gdma.gdma.out[index];
         let mut channel = old;
         let mut bytes = Vec::new();
         let mut walk = esp_periph::gdma::DescriptorWalk::new(esp_periph::gdma::GDMA_DESCRIPTOR_STEP_BUDGET);
-        let limit = frames * width;
         while channel.desc != 0 && bytes.len() < limit {
             let desc = channel.desc;
             let read = walk.read_with(desc, |addr| self.sram_bytes(addr, 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).ok_or(Fault::Unmapped));
@@ -716,16 +731,7 @@ impl SocBus {
         }
         self.periph.gdma.gdma.out[index] = channel;
         self.irq_dirty |= channel.int_raw != old.int_raw;
-        if connected {
-            // M5Unified drives the piezo with one stereo frame of sigma-delta
-            // bits per sample. Recover baseband from the bit density.
-            let i2s = &mut self.periph.optional.i2s0;
-            i2s.frames_out += (bytes.len() / width) as u64;
-            i2s.pcm.extend(bytes.chunks_exact(width).map(|frame| {
-                let ones = frame.iter().map(|byte| byte.count_ones()).sum::<u32>() as i32;
-                (ones * 65534 / (width as i32 * 8) - 32767) as i16
-            }));
-        }
+        bytes
     }
 
     /// PCM for one RX interval: pin-routed sources when a bank is attached, else controller input.
@@ -958,6 +964,33 @@ mod parlio_dma_tests {
         assert!(frames.lock().unwrap().is_empty());
         bus.write32(0x6001_5008, (24 << 2) | (1 << 19) | (3 << 27)).unwrap();
         assert_eq!(*frames.lock().unwrap(), [(4, vec![false; 24])]);
+    }
+
+    #[test]
+    fn spi_dma_continues_a_descriptor_across_usr_transactions() {
+        let mut bus = SocBus::new(1024, [0; 6]);
+        let descriptor = SRAM_LOW + 32;
+        let buffer = SRAM_LOW + 96;
+        for (address, word) in [(descriptor, 0xc000_4004),
+            (descriptor + 4, buffer), (descriptor + 8, 0)] {
+            assert!(bus.sram_store(address, &word.to_le_bytes()));
+        }
+        assert!(bus.sram_store(buffer, &[0x11, 0x22, 0x33, 0x44]));
+        let dma = &mut bus.periph.gdma.gdma.out[0];
+        dma.desc = descriptor;
+        dma.running = true;
+        let mut halves = Vec::new();
+        for _ in 0..2 {
+            let spi = &mut bus.periph.spi2;
+            spi.write(0x30, 1 << 28);
+            spi.write(0x10, 1 << 27);
+            spi.write(0x1c, 15);
+            spi.write(0, 1 << 24);
+            bus.spi2_dma_tx();
+            halves.push(bus.periph.spi2.take_transfer().unwrap().tx);
+        }
+        assert_eq!(halves, [[0x11, 0x22], [0x33, 0x44]]);
+        assert!(!bus.periph.gdma.gdma.out[0].running);
     }
 
     #[test]
