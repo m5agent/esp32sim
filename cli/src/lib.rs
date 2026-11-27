@@ -712,8 +712,8 @@ fn setup_esp32(o: &Opts) -> esp32::Machine {
     attach_wifi_station(&mut m.bus, o);
     attach_nearby_networks(&mut m.bus.periph.wifi.link, o);
     if let Some(mb) = o.psram_mb {
-        if !matches!(mb, 0 | 4) { usage_error("--psram-mb: classic ESP32 supports only 0 or 4 MiB"); }
-        m.bus.set_psram_size(mb << 20).unwrap_or_else(|e| usage_error(&e));
+        let bytes = mb.saturating_mul(1 << 20);
+        m.bus.set_psram_size(bytes).unwrap_or_else(|e| usage_error(&format!("--psram-mb: {e}")));
     }
     for (flag, on) in [("--flash-octal", o.flash_octal), ("--efuse-regs", o.efuse_regs.is_some()), ("--regs-init", o.regs_init.is_some()), ("--regstat", o.regstat.is_some())] {
         if on { eprintln!("{} is not available on the classic ESP32", flag); std::process::exit(2); }
