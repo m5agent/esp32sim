@@ -566,6 +566,9 @@ pub struct StationLink {
     /// an access point or a virtual station is attached (`on_air`): kept as one flag because
     /// the chips test it every scheduling round, WiFi in use or not
     air: bool,
+    diagnostic: bool,
+    radio_disabled: bool,
+    link_disabled: bool,
 }
 
 /// A receive descriptor's `has_data` bit (word 0 bit 30), the same on the S3, C3 and C6 MACs: the
@@ -597,7 +600,7 @@ impl StationLink {
         if self.aps.is_empty() { return Err("a further access point needs the first one attached".into()); }
         if self.aps.len() >= APS_MAX { return Err(format!("more than {APS_MAX} access points")); }
         check_new_ap(&self.aps.iter().map(|a| a.cfg.clone()).collect::<Vec<_>>(), &cfg)?;
-        let mut ap = VirtualAp::new(cfg, debug.has("wifi-frames"));
+        let mut ap = VirtualAp::new(cfg, self.diagnostic || debug.has("wifi-frames"));
         ap.next_beacon_us += 7_000 * self.aps.len() as u64;
         self.aps.push(ap);
         Ok(())
@@ -627,7 +630,7 @@ impl StationLink {
         let mut net = self.net;
         if let Some(nat) = net.as_mut().and_then(|net| net.nat.as_mut()) { nat.abort_all(); }
         let sta = self.sta.map(|mut s| { s.restart(); s });
-        StationLink { aps: self.aps, net, relay: self.relay, tap: self.tap, sta, air: self.air, ..Default::default() }
+        StationLink { aps: self.aps, net, relay: self.relay, tap: self.tap, sta, air: self.air, diagnostic: self.diagnostic, radio_disabled: self.radio_disabled, link_disabled: self.link_disabled, ..Default::default() }
     }
 
     /// Record every Ethernet frame the station sends and receives into `tap`.
@@ -659,7 +662,50 @@ impl StationLink {
     pub fn station(&self) -> Option<&sta::VirtualSta> { self.sta.as_ref() }
     /// Something on the air for the chip's MAC to hear: an access point, or a virtual station.
     #[inline]
-    pub fn on_air(&self) -> bool { self.air }
+    pub fn on_air(&self) -> bool { self.air && !self.radio_disabled }
+
+    pub fn network_mode(&self) -> &'static str {
+        if self.sta.is_some() { "softap" }
+        else if self.relay { "relay" }
+        else if self.net.as_ref().is_some_and(|net| net.nat.is_some()) { "nat" }
+        else if self.diagnostic { "diagnostic" }
+        else if self.net.is_some() { "restricted" }
+        else if self.air { "diagnostic" }
+        else { "offline" }
+    }
+
+    pub fn enable_diagnostics(&mut self) {
+        self.diagnostic = true;
+        if let Some(net) = &mut self.net { net.log = true; }
+        for ap in &mut self.aps { ap.log = true; }
+    }
+
+    pub fn fault_state(&self) -> (bool, bool) { (!self.link_disabled, !self.radio_disabled) }
+
+    pub fn set_fault(&mut self, radio: bool, up: bool) -> bool {
+        if !self.air { return false; }
+        let disabled = if radio { &mut self.radio_disabled } else { &mut self.link_disabled };
+        if *disabled != up { return true; }
+        *disabled = !up;
+        self.eth_tx.clear();
+        self.eth_rx.clear();
+        if let Some(nat) = self.net.as_mut().and_then(|net| net.nat.as_mut()) { nat.abort_all(); }
+        for ap in &mut self.aps {
+            if radio {
+                ap.state = StaState::Idle;
+                ap.wpa.state = WpaState::Idle;
+                ap.queue.clear();
+            } else {
+                // Keep management responses and the association. Queued IP traffic belongs to
+                // the old link and must not be delivered after it comes back.
+                ap.queue.retain(|queued| queued.frame.first().is_some_and(|fc| fc & 0x0c != 8));
+            }
+        }
+        if radio {
+            if let Some(station) = &mut self.sta { station.restart(); }
+        }
+        true
+    }
     /// The address-match bits of a received frame's `rx_ctrl` word 0 (bits 28 to 30), as the S3,
     /// C3, C6 and S31 MACs set them; the classic ESP32 has its own (`esp32/src/wifi.rs`). libpp
     /// takes the interface a frame is for from them, as `wDev_ProcessRxSucData` does in the
@@ -728,8 +774,10 @@ impl StationLink {
     /// data goes to the network or the relay.
     pub fn station_tx(&mut self, frame: &[u8], now_us: u64) {
         self.tx_frames += 1;
+        if self.radio_disabled { return; }
         if self.sta.is_some() {
             let Some(eth) = self.sta.as_mut().and_then(|s| s.on_ap_tx(frame, now_us)) else { return };
+            if self.link_disabled { return; }
             if !self.relay {
                 self.capture_whole(crate::netcap::Dir::FromStation, now_us, &eth);
                 let sent = self.sta.as_mut().map_or(Vec::new(), |s| { s.host_rx(&eth, now_us); s.take_sent() });
@@ -741,6 +789,7 @@ impl StationLink {
             return;
         }
         let Some(eth) = self.route_station_tx(frame, now_us).and_then(|data| data_to_eth(&data)) else { return };
+        if self.link_disabled { return; }
         if !self.relay || (eth.len() <= RELAY_FRAME_MAX && self.eth_tx.len() < RELAY_QUEUE) {
             self.capture(crate::netcap::Dir::FromStation, now_us, &eth);
             self.eth_tx.push(eth);
@@ -805,7 +854,7 @@ impl StationLink {
     /// exchange is not crowded out by beacon traffic; the rest waits in the access point's queue.
     /// The caller delivers the frame and then reports `rx_delivered` or `drop_rx`.
     pub fn next_rx(&mut self, now_us: u64, ring_busy: bool) -> Option<Vec<u8>> {
-        if self.in_rx_gap(now_us) { return None; }
+        if self.radio_disabled || self.in_rx_gap(now_us) { return None; }
         if ring_busy && now_us.wrapping_sub(self.last_rx_us) < RX_STALL_US { return None; }
         if self.sta.is_some() {
             let mut due = self.sta.as_mut().map_or(Vec::new(), |s| s.step(now_us));
@@ -862,7 +911,7 @@ impl StationLink {
     /// The network behind the access point answers what the station sent at once and reads the
     /// host's sockets every `NET_POLL_US`. Nothing to do in relay mode: the host has the frames.
     pub fn net_step(&mut self, now_us: u64) {
-        if self.relay { return; }
+        if self.relay || self.link_disabled || self.radio_disabled { return; }
         let sta = self.current().map(|i| self.aps[i].sta)
             .or_else(|| self.aps.iter().map(|ap| ap.sta).find(|m| *m != [0; 6]));
         let Some(net) = self.net.as_mut() else { return };
@@ -888,6 +937,7 @@ impl StationLink {
 
     /// A frame from the host for the station, in relay mode.
     pub fn receive_relay_frame(&mut self, frame: &[u8]) -> Result<(), String> {
+        if self.link_disabled || self.radio_disabled { return Err("the virtual link is down".into()); }
         if !self.relay || (self.aps.is_empty() && self.sta.is_none()) { return Err("Ethernet relay requires relay mode and a virtual AP or station".into()); }
         if self.sta.as_ref().is_some_and(|s| s.state != sta::StaLink::Joined) { return Err("the virtual station has not joined the guest's access point yet".into()); }
         if !(14..=RELAY_FRAME_MAX).contains(&frame.len()) { return Err(format!("Ethernet frame must be 14..={RELAY_FRAME_MAX} bytes without FCS")); }

@@ -260,6 +260,22 @@ impl BoardModel for AtomS3 {
     fn set_camera_jpeg(&mut self, jpeg: Jpeg) -> Result<(), JpegError> {
         self.camera.as_ref().ok_or(JpegError::Unsupported)?.borrow_mut().jpeg(jpeg)
     }
+    fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
+        use esp_soc::json::Json;
+        let Some(camera) = &self.camera else { return Vec::new(); };
+        let camera = camera.borrow();
+        vec![("camera", Json::object([
+            ("auto-increment", Json::Bool(camera.auto_increment)),
+            ("powered", Json::Bool(camera.powered)),
+            ("frame-seed", Json::counter(camera.frame_seed.into())),
+            ("frames", Json::counter(camera.frames)),
+        ]))]
+    }
+    fn set_camera_auto_increment(&mut self, enabled: bool) -> bool {
+        let Some(camera) = &self.camera else { return false; };
+        camera.borrow_mut().auto_increment = enabled;
+        true
+    }
     fn camera_frame(&mut self) -> Option<(u32, u32, Arc<Vec<u8>>)> { self.camera.as_ref()?.borrow_mut().frame() }
     fn camera_preview(&self, w: u32, h: u32) -> Option<Vec<u8>> { self.camera.as_ref()?.borrow().preview(w, h) }
 

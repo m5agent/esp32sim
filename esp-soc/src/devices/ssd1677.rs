@@ -45,6 +45,8 @@ impl Ssd1677 {
         }
     }
 
+    pub fn control(&self) -> u8 { self.ctrl2 }
+    pub fn waveform_timing(&self) -> Option<&[u8]> { self.lut.as_ref().map(|lut| &lut[50..]) }
     pub fn deadline(&self) -> Option<u64> { self.busy_until }
     fn busy_for(&mut self, now: u64, ms: u64) {
         self.busy_until = Some(now.saturating_add(ms.saturating_mul(self.cycles_per_ms)));

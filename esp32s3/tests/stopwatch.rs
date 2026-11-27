@@ -78,7 +78,7 @@ fn factory_devices_and_active_low_button_inputs() {
         assert_eq!(board.named_pin("btn_b"), Some(1));
         assert_eq!(board.named_pin("missing"), None);
         assert_eq!(board.input_levels(), [(38, false), (2, true), (1, true), (12, true), (13, true), (47, true), (48, true)]);
-        assert_eq!(board.display().map(|(w, h, _, _)| (w, h)), Some((468, 466)));
+        assert_eq!(board.display().map(|(w, h, _, _)| (w, h)), Some((466, 466)));
     }
 }
 
@@ -128,9 +128,9 @@ fn firmware_power_sequence_gates_spi_and_preserves_full_window_stride() {
     command(&mut board, 0x3c, &strip);
     let (_, _, frame, version) = board.display().unwrap();
     assert_eq!(frame[0], 0xf800);
-    assert_eq!(frame[467], 0x07e0);
-    assert_eq!(frame[468], 0x001f);
-    assert_eq!(frame[469], 0);
+    assert_eq!(frame[465], 0x07e0);
+    assert_eq!(frame[466], 0x001f);
+    assert_eq!(frame[467], 0);
     assert!(version > 0);
     assert_eq!(board.display_frames(), 1);
     board.spi_transfer(3, &[0x02, 0, 0x2c, 0, 0xff, 0xff], 0);
@@ -138,7 +138,10 @@ fn firmware_power_sequence_gates_spi_and_preserves_full_window_stride() {
     command(&mut board, 0x2a, &[1, 0xd9, 1, 0xd9]);
     command(&mut board, 0x2b, &[1, 0xd1, 1, 0xd1]);
     command(&mut board, 0x2c, &[0xff, 0xff]);
-    assert_eq!(board.display().unwrap().2[468 * 466 - 1], 0xffff);
+    assert_eq!(board.display().unwrap().2[466 * 466 - 1], 0);
+    command(&mut board, 0x2a, &[1, 0xd7, 1, 0xd7]);
+    command(&mut board, 0x2c, &[0xff, 0xff]);
+    assert_eq!(board.display().unwrap().2[466 * 466 - 1], 0xffff);
 }
 
 #[test]
@@ -198,8 +201,8 @@ fn cst820_reports_clamped_touch_and_clears_it_on_expander_reset() {
     power_up(&mut devices);
     assert_eq!(read(&mut devices, 0x15, 0xa7, 3), [0xb7, 0x41, 2]);
     board.touch(999, 999, true);
-    assert_eq!(read(&mut devices, 0x15, 0x02, 5), [1, 1, 0xd3, 1, 0xd1]);
-    board.touch(467, 465, false);
+    assert_eq!(read(&mut devices, 0x15, 0x02, 5), [1, 1, 0xd1, 1, 0xd1]);
+    board.touch(465, 465, false);
     assert_eq!(read(&mut devices, 0x15, 0x02, 1), [0]);
     board.touch(100, 200, true);
     update(&mut devices, 0x4f, 0x05, 0, 8);

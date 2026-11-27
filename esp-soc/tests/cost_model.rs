@@ -289,6 +289,7 @@ impl SocBus for TestBus {
         self.memory[start..start + data.len()].copy_from_slice(data);
         Ok(())
     }
+    fn flash_contents(&self) -> &[u8] { &[] }
     fn write_flash(&mut self, _offset: usize, _data: &[u8]) -> Result<(), String> { Ok(()) }
     fn boot_app(&mut self, _app_off: usize) -> Result<u32, String> { Ok(0) }
     fn reboot(&mut self, _mac: [u8; 6]) -> u32 {

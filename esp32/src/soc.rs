@@ -98,6 +98,8 @@ impl esp_soc::SocBus for SocBus {
         let log = self.debug.has("wifi-frames");
         self.periph.wifi.link.attach_station(esp_soc::wifi::sta::VirtualSta::new(cfg, log))
     }
+    fn wifi_link(&self) -> Option<&esp_soc::wifi::StationLink> { Some(&self.periph.wifi.link) }
+    fn wifi_link_mut(&mut self) -> Option<&mut esp_soc::wifi::StationLink> { Some(&mut self.periph.wifi.link) }
     fn attach_wifi(&mut self, cfg: esp_soc::wifi::ApConfig, nat: Option<esp_soc::nat::Nat>) -> Result<(), String> {
         self.periph.wifi.link.attach_new(cfg, nat, &self.debug);
         Ok(())
@@ -145,6 +147,7 @@ impl esp_soc::SocBus for SocBus {
     fn load_bytes(&mut self, addr: u32, data: &[u8]) -> Result<(), String> {
         SocBus::load_bytes(self, addr, data)
     }
+    fn flash_contents(&self) -> &[u8] { &self.flash }
     fn write_flash(&mut self, offset: usize, data: &[u8]) -> Result<(), String> {
         SocBus::write_flash(self, offset, data)
     }

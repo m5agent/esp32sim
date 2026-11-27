@@ -158,6 +158,8 @@ pub trait SocBus: Bus {
     /// Queue a 14..=1518-byte Ethernet frame without FCS. Requires relay mode and an AP.
     /// At most 64 frames may await delivery; a full queue returns an error without changing it.
     fn receive_ethernet_frame(&mut self, _frame: &[u8]) -> Result<(), String> { Err("this chip has no Ethernet transport".into()) }
+    fn wifi_link(&self) -> Option<&crate::wifi::StationLink> { None }
+    fn wifi_link_mut(&mut self) -> Option<&mut crate::wifi::StationLink> { None }
     fn cycles(&self) -> u64;
     /// Convert a positive bus-reference interval to CPU clocks, rounding up to
     /// the first CPU boundary at/after it. Fixed-clock chips compile to identity.
@@ -182,6 +184,8 @@ pub trait SocBus: Bus {
     fn take_host_event(&mut self) -> bool { false }
     fn misc(&mut self) -> &mut Misc;
     fn load_bytes(&mut self, addr: u32, data: &[u8]) -> Result<(), String>;
+    /// Bytes in the guest SPI Flash, including writes the guest has completed.
+    fn flash_contents(&self) -> &[u8];
     fn write_flash(&mut self, offset: usize, data: &[u8]) -> Result<(), String>;
     /// Map and copy the app image at flash `app_off` as the bootloader would; returns the entry point.
     fn boot_app(&mut self, app_off: usize) -> Result<u32, String>;
@@ -263,6 +267,12 @@ pub trait SocBus: Bus {
     fn set_reset_cause(&mut self, cause: u32);
     /// Chip-specific end-of-run statistics (audio, WiFi, crypto, DMA engines).
     fn report(&self) -> String { String::new() }
+    fn sd_state(&self) -> Option<esp_periph::sdmmc::SdMediaState> { self.board_ref().spi_sd_state() }
+    fn set_sd_present(&mut self, present: bool) -> bool {
+        self.flush_ticks();
+        let cycle = self.cycles();
+        self.board().set_spi_sd_present(cycle, present)
+    }
     /// Put an SD card holding `image` in the board's SD socket, in place of the one there; says
     /// where it went.
     fn attach_sd_card(&mut self, _image: Box<dyn esp_periph::sdmmc::SdStore>, _config: esp_periph::sdmmc::SdCardConfig) -> Result<String, String> { Err("this chip has no SD card host".into()) }

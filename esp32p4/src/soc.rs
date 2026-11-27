@@ -172,6 +172,7 @@ impl esp_soc::SocBus for SocBus {
     fn refresh_irq(&mut self) -> bool { self.periph.refresh_lines(); true }
     fn misc(&mut self) -> &mut Misc { &mut self.periph.misc }
     fn load_bytes(&mut self, addr: u32, data: &[u8]) -> Result<(), String> { SocBus::load_bytes(self, addr, data) }
+    fn flash_contents(&self) -> &[u8] { &self.flash }
     fn write_flash(&mut self, offset: usize, data: &[u8]) -> Result<(), String> { SocBus::write_flash(self, offset, data) }
     /// Copy the RAM segments and map the flash-resident ones through the flash MMU, as the
     /// 2nd-stage bootloader would. The clocks and caches it would have set up are not.
@@ -327,6 +328,15 @@ impl esp_soc::SocBus for SocBus {
     fn irq_sources_of(&self, core: usize, line: u32) -> Vec<usize> { self.periph.sources_of(core, line + CLIC_EXT_OFFSET) }
     /// The card goes in the reference board's socket, on slot 0's IO MUX pins; firmware reaches
     /// it through slot 0 or, routing those pins through the GPIO matrix, slot 1.
+    fn sd_state(&self) -> Option<esp_periph::sdmmc::SdMediaState> {
+        self.periph.sdmmc.media_state().or_else(|| self.board.spi_sd_state())
+    }
+    fn set_sd_present(&mut self, present: bool) -> bool {
+        self.flush_ticks();
+        let spi = self.board.set_spi_sd_present(self.cycles, present);
+        let native = self.periph.sdmmc.set_media_present(present);
+        spi || native
+    }
     fn attach_sd_card(&mut self, image: Box<dyn esp_periph::sdmmc::SdStore>, config: esp_periph::sdmmc::SdCardConfig) -> Result<String, String> {
         let timed = config.timed_bus;
         let (image, spi) = if self.board.has_spi_sd_slot() {

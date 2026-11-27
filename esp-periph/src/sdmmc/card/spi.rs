@@ -29,13 +29,16 @@ pub struct SpiSdCard {
     phase: Phase,
     write_data: Vec<u8>,
     write_status: u8,
+    read_stats: super::SpiSdReadStats,
+    read_response_pending: bool,
 }
 
 impl SpiSdCard {
     pub fn new(card: SdCard) -> Self {
         Self { card, spi_mode: false, crc_enabled: false, command: [0; 6], command_len: 0,
                response: VecDeque::with_capacity(BLOCK + 5), phase: Phase::Command,
-               write_data: Vec::with_capacity(BLOCK + 2), write_status: 0 }
+               write_data: Vec::with_capacity(BLOCK + 2), write_status: 0,
+               read_stats: Default::default(), read_response_pending: false }
     }
 
     /// CS high releases MISO and discards partial packets. APP_CMD and programming
@@ -43,6 +46,7 @@ impl SpiSdCard {
     pub fn deselect(&mut self) {
         self.command_len = 0;
         self.response.clear();
+        self.read_response_pending = false;
         self.phase = Phase::Command;
         self.write_data.clear();
     }
@@ -53,6 +57,27 @@ impl SpiSdCard {
         self.spi_mode = false;
         self.crc_enabled = false;
         self.write_status = 0;
+    }
+
+    pub fn present(&self) -> bool { self.card.present() }
+    pub fn media_state(&self) -> super::SdMediaState {
+        super::SdMediaState { spi_reads: Some(self.read_stats), ..self.card.media_state() }
+    }
+    /// A host media change or a machine reset opens a new observation epoch.
+    pub fn reset_observation(&mut self) {
+        self.deselect();
+        self.read_stats = super::SpiSdReadStats {
+            reset_generation: self.read_stats.reset_generation.wrapping_add(1),
+            ..Default::default()
+        };
+    }
+    pub fn set_present(&mut self, present: bool) -> bool {
+        if self.present() != present {
+            self.power_off();
+            self.card.present = present;
+            self.reset_observation();
+        }
+        true
     }
 
     pub fn report(&self) -> String {
@@ -71,6 +96,7 @@ impl SpiSdCard {
         let r1 = self.r1();
         self.card.commands += 1;
         self.response.clear();
+        self.read_response_pending = false;
         // N_CR gap, or the stuff byte for CMD12 when interrupting a data transfer.
         self.response.push_back(0xff);
         if bad_crc {
@@ -134,6 +160,10 @@ impl SpiSdCard {
             (false, 17 | 18) => {
                 self.response.push_back(0);
                 self.queue_block(u64::from(arg), cmd == 18);
+                if self.read_response_pending {
+                    if cmd == 17 { self.read_stats.accepted_cmd17 += 1; }
+                    else { self.read_stats.accepted_cmd18 += 1; }
+                }
             }
             (false, 24 | 25) => {
                 self.response.push_back(0);
@@ -161,6 +191,7 @@ impl SpiSdCard {
         } else {
             self.card.blocks_read += 1;
             self.queue_data(&block);
+            self.read_response_pending = true;
             self.phase = if multi { Phase::Read { next: lba + 1 } } else { Phase::Command };
         }
     }
@@ -186,13 +217,18 @@ impl SpiSdCard {
     /// First byte already queued for the next clock. A GPIO SPI master
     /// samples individual bits before the byte of MOSI has arrived.
     pub fn pending_miso(&self, now_ns: u64) -> u8 {
+        if !self.present() { return 0xff; }
         self.response.front().copied().unwrap_or(if now_ns < self.card.busy_until { 0 } else { 0xff })
     }
 
     /// Shift one byte with CS low. Clocks advance the card even when the host discards MISO.
     pub fn exchange(&mut self, mosi: u8, now_ns: u64) -> u8 {
+        if !self.present() { return 0xff; }
         let had_response = !self.response.is_empty();
         let out = self.response.pop_front().unwrap_or(0xff);
+        if self.response.is_empty() && std::mem::take(&mut self.read_response_pending) {
+            self.read_stats.completed_blocks += 1;
+        }
         if !had_response && now_ns < self.card.busy_until { return 0; }
         if let Phase::Write { lba, multi, receiving } = self.phase {
             if had_response { return out; }

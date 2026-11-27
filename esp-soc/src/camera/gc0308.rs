@@ -44,6 +44,7 @@ impl Gc0308 {
     }
 
     pub fn set_camera_picture(&mut self, picture: Picture) -> Result<(), &'static str> { self.source.set_camera_picture(picture) }
+    pub fn set_test_pattern(&mut self, seed: Option<u32>) { self.source.set_test_pattern(seed); }
     pub fn camera_preview(&self, w: u32, h: u32) -> Option<Vec<u8>> { self.source.camera_preview(w, h) }
 
     pub fn camera_frame(&mut self) -> Option<(u32, u32, Arc<Vec<u8>>)> {

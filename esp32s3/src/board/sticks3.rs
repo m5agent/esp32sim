@@ -155,6 +155,9 @@ impl BoardModel for StickS3 {
     }
     fn display_version(&self) -> u64 { self.lcd.version() }
     fn display_frames(&self) -> u64 { self.lcd.lcd.frames }
+    fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
+        vec![("pmic", self.power.service_state()), ("imu", self.imu.borrow().service_state())]
+    }
     fn report(&self) -> String {
         format!("[sticks3] RAMWR={} pixels={} lcd_rail={} powered={} timer_wakes={} RMT46_frames={} RMT46_active_low={} last_nec={:?} gpio_i2c={}",
             self.display_frames(), self.lcd.lcd.pixels_written, self.lcd_powered, self.power.powered(),

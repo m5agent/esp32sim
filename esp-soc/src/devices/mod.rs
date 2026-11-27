@@ -28,6 +28,7 @@ pub mod imu_motion;
 pub mod ina226;
 pub mod ina3221;
 pub mod ip5306;
+pub mod tmp105;
 pub mod lepton;
 pub mod lm75b;
 pub mod ltr553;

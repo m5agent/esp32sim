@@ -30,6 +30,7 @@ fn from_bcd(b: u8) -> u8 { (b >> 4) * 10 + (b & 15) }
 fn bcd(n: u8) -> u8 { ((n / 10) << 4) | (n % 10) }
 
 impl Bm8563 {
+    pub fn registers(&self) -> &[u8] { &self.regs }
     pub fn new(hz: u64) -> Self {
         // A running, battery-backed RTC with a deterministic valid initial calendar (2024-01-01).
         let regs = [0, 0, 0, 0, 0, 1, 1, 1, 0x24, 0x80, 0x80, 0x80, 0x80, 0x80, 3, 0];

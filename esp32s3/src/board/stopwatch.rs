@@ -95,7 +95,9 @@ pub struct StopWatch {
 }
 
 impl StopWatch {
-    pub const WIDTH: usize = 468;
+    // Panel RAM writes can span 468 columns. The visible glass starts at
+    // controller column 6 and only exposes 466 of them.
+    pub const WIDTH: usize = 466;
     pub const HEIGHT: usize = 466;
     pub const X_OFFSET: u16 = 6;
 
@@ -268,6 +270,19 @@ impl BoardModel for StopWatch {
             "b" | "btn_b" => Some(PIN_STOPWATCH_BUTTON_B),
             _ => None,
         }
+    }
+    fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
+        use esp_soc::json::Json;
+        let panel = self.wiring.panel.lock().unwrap();
+        let rtc = self.rtc.borrow();
+        vec![
+            ("panel/controller", Json::object([("pixels_written", Json::counter(panel.panel.pixels_written)),
+                                              ("active", Json::Bool(panel.active)),
+                                              ("tear_enabled", Json::Bool(panel.panel.tear_enabled()))])),
+            ("rtc", Json::object([("registers", Json::register_bytes(rtc.registers().iter().copied())), ("irq", Json::Bool(rtc.irq()))])),
+            ("pmic", self.wiring.power.service_state()),
+            ("imu", self.imu.borrow().service_state()),
+        ]
     }
     fn report(&self) -> String {
         let off = !self.wiring.power.powered();

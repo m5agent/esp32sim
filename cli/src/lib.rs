@@ -51,6 +51,7 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!("  --trace-fn PREFIX, --break PC, --watch ADDR, --peek ADDR,N, --profile, --vcd F, --debug AREAS, --no-jit");
     eprintln!("                        debugging; --no-jit is the oracle when a result looks wrong");
     eprintln!("  --adc PIN, --adc-raw PIN=N   last ADC sample at exit / a 12-bit count into that pad");
+    eprintln!("  --grove tmp105       attach the 0x48 test sensor on Atom Echo or Basic v2.7");
     eprintln!("  --sd IMG, --sd-rw IMG an SD card, copy-on-write / write-through;");
     eprintln!("                        --sd-prg-us N, --sd-serial HEX for its programming time and serial");
     eprintln!("  --usb-host F          (P4, S3, S31) a USB host on the USB-OTG port running F; --sd-timing (P4) for timed SD");
@@ -155,7 +156,7 @@ pub struct Opts {
     pub mac: Option<[u8; 6]>, pub strap: Option<u32>, pub reset_cause: Option<u32>, pub efuse_regs: Option<String>, pub regs_init: Option<String>,
     /// `--sd IMAGE` (copy-on-write) or `--sd-rw IMAGE` (write-through): a card in the SD socket,
     /// with `--sd-prg-us` and `--sd-serial`
-    pub sd: Option<(String, bool)>, pub sd_prg_us: Option<u64>, pub sd_serial: Option<u32>, pub sd_timing: bool,
+    pub sd: Option<(String, bool)>, pub sd_prg_us: Option<u64>, pub sd_serial: Option<u32>, pub sd_timing: bool, pub sd_ejected: bool,
     /// `--usb-host FILE`: a USB host on the chip's USB-OTG port, running the commands in FILE
     pub usb_host: Option<String>,
     /// `--pcap FILE`: every Ethernet frame the WiFi station sends and receives, as a pcap
@@ -167,6 +168,7 @@ pub struct Opts {
     pub lora_peer: Option<(u16, u16)>,
     pub cap: Option<String>, pub cap_peer: Option<(u16, u16)>,
     pub board: String, pub wifi: Vec<String>, pub wifi_nearby: Vec<String>, pub ble_nearby: Vec<String>, pub ble: bool, pub ble_full: bool, pub ble_observe: bool, pub ble_scan: bool, pub net: String, pub hostfwd: Vec<String>, pub cam_image: Option<String>, pub cam_stream: Option<String>, pub cam_size: Option<String>, pub cam_fps: f64,
+    pub grove_tmp105: bool,
     pub spi2_timing: bool, pub measured_te: bool,
     /// `--imu-motion N`: scripted IMU motion mode for boards with an IMU model (0 at rest, 1 the 30 s handling script)
     pub imu_motion: Option<u32>,
@@ -176,6 +178,7 @@ pub struct Opts {
     /// `--uart-tcp HOST:PORT`, `--uart1-tcp HOST:PORT`: UART0 / UART1 bytes over a TCP socket (esptool's `socket://`)
     pub uart_tcp: Option<String>, pub uart1_tcp: Option<String>,
     pub service_fd: Option<i32>,
+    pub service_flash_out: Option<std::path::PathBuf>,
     pub console: Option<String>, pub console_prefix: bool, pub realtime: bool, pub web_port: Option<u16>, pub web_dir: Option<String>, pub no_reboot: bool,
     pub i2s_tone: Vec<String>,
     pub mic_wav: Vec<String>,
@@ -219,6 +222,7 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
             "--sd-serial" => o.sd_serial = Some(hex(&next(), "sd-serial")),
             "--usb-host" => o.usb_host = Some(next()),
             "--sd-timing" => o.sd_timing = true,
+            "--sd-ejected" => o.sd_ejected = true,
             "--mac" => { let v = next(); let b: Vec<u8> = v.split(':').filter_map(|x| u8::from_str_radix(x, 16).ok()).collect(); if b.len() != 6 { eprintln!("--mac wants xx:xx:xx:xx:xx:xx"); std::process::exit(2); } let mut m = [0u8; 6]; m.copy_from_slice(&b); o.mac = Some(m); }
             "--strap" => o.strap = Some(hex(&next(), "strap")),
             "--reset-cause" => o.reset_cause = Some(hex(&next(), "reset-cause")),
@@ -249,6 +253,10 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
                 if full { i += 1; o.ble_full = true; } else { o.ble = true; }
             },
             "--net" => { o.net = next(); o.net_given = true; }
+            "--grove" => {
+                if next() != "tmp105" { usage_error("--grove expects tmp105"); }
+                o.grove_tmp105 = true;
+            }
             "--cam-image" => o.cam_image = Some(next()),
             "--cam-stream" => o.cam_stream = Some(next()),
             "--cam-size" => o.cam_size = Some(next()),
@@ -266,6 +274,7 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
             "--console" => o.console = Some(next()),
             "--console-prefix" => o.console_prefix = true,
             "--realtime" => o.realtime = true,
+            "--service-flash-out" => o.service_flash_out = Some(next().into()),
             "--service-fd" => o.service_fd = Some(next().parse().expect("service socket descriptor")),
             "--web" => o.web_port = Some(next().parse().expect("port")),
             "--web-dir" => o.web_dir = Some(next()),
@@ -320,6 +329,11 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
         }
         i += 1;
     }
+    if o.grove_tmp105 && (!matches!(o.chip.as_str(), "esp32" | "lx6") ||
+        !matches!(o.board.as_str(), "m5stack-atom-echo" | "m5stack-basic-v27")) {
+        usage_error("--grove tmp105 requires a classic ESP32 Atom Echo or Basic v2.7");
+    }
+    if o.sd_ejected && o.sd.is_none() { usage_error("--sd-ejected requires --sd or --sd-rw"); }
     if !o.hostfwd.is_empty() && o.wifi.is_empty() { usage_error("--hostfwd requires --wifi"); }
     if o.pcap.is_some() && o.wifi.is_empty() && o.wifi_sta.is_none() { usage_error("--pcap requires --wifi or --wifi-sta"); }
     if let Some(spec) = &o.wifi_sta {
@@ -660,7 +674,11 @@ fn wifi_config(specs: &[String], net: &str, net_log: bool, hostfwd: &[String]) -
             _ => usage_error(&format!("--net: unknown option {kv:?} (epoch=UNIX_SECONDS)")),
         }
     }
-    let nat = mode == "nat" || mode == "user";
+    let nat = match mode {
+        "nat" | "user" => true,
+        "none" | "restricted" | "diagnostic" => false,
+        _ => usage_error("--net expects nat, user, none, restricted or diagnostic"),
+    };
     for cfg in &cfgs {
         eprintln!("[emu] virtual AP '{}' bssid {} channel {} ({})", cfg.ssid, esp_soc::wifi::mac_str(&cfg.bssid), cfg.channel, if cfg.psk.is_some() { "WPA2-PSK" } else { "open" });
     }
@@ -691,6 +709,9 @@ fn attach_wifi<B: SocBus>(bus: &mut B, o: &Opts, net_log: bool) {
     let mut cfgs = cfgs.into_iter();
     let first = cfgs.next().expect("at least one --wifi");
     bus.attach_wifi(first, nat).unwrap_or_else(|e| { eprintln!("--wifi: {e}"); std::process::exit(2) });
+    if o.net.split(',').next() == Some("diagnostic") {
+        if let Some(link) = bus.wifi_link_mut() { link.enable_diagnostics(); }
+    }
     for cfg in cfgs { bus.add_wifi_ap(cfg).unwrap_or_else(|e| { eprintln!("--wifi: {e}"); std::process::exit(2) }); }
 }
 
@@ -734,6 +755,9 @@ fn setup_esp32(o: &Opts) -> esp32::Machine {
     let board = if o.board == "atech14" { "none" } else { &o.board };
     m.bus.board = esp32::board::make_board(board).unwrap_or_else(|| usage_error(&format!("unknown classic ESP32 board '{board}' (none, bare, esp32dev, ttgo-tdisplay, cyd, ai-thinker-cam, ulanzi-tc001, m5stack-atom-lite, m5stack-atom-matrix, m5stack-atom-matrix-v11, m5stack-atomu, m5stack-atom-echo, m5stack-basic-v27, m5stack-core2, m5stack-core2-axp192, m5stack-stickc, m5stack-stickc-plus, m5stack-stickc-plus-se, m5stack-stickc-plus2, m5stack-m5stick, m5stack-stickt2)")));
     m.bus.attach_board_devices();
+    if o.grove_tmp105 && !m.bus.attach_grove_tmp105() {
+        usage_error("--grove tmp105: board does not expose a modeled Grove port");
+    }
     set_camera_image(&mut m.bus.board, o.cam_image.as_deref());
     if !o.wifi.is_empty() {
         let net_log = m.bus.debug.has("net");
@@ -1060,6 +1084,9 @@ fn prepare<S: Soc>(m: &mut Machine<S>, o: &Opts) -> String {
         let config = esp_periph::sdmmc::SdCardConfig { prg_ns: o.sd_prg_us.unwrap_or(0).saturating_mul(1000), serial: o.sd_serial, timed_bus: o.sd_timing, ..Default::default() };
         match m.bus.attach_sd_card(Box::new(image), config) { Ok(w) => eprintln!("[emu] SD card: {w}"), Err(e) => usage_error(&format!("--sd: {e}")) }
     }
+    if o.sd_ejected && !m.bus.set_sd_present(false) {
+        usage_error("--sd-ejected is unsupported by the selected SD socket");
+    }
     let mut ble_elf = esp_soc::elf::Elf::default();
     for p in &o.elfs {
         let data = std::fs::read(p).expect("elf");
@@ -1115,6 +1142,9 @@ fn prepare<S: Soc>(m: &mut Machine<S>, o: &Opts) -> String {
         if uart == 0 { m.console.mask &= !2; }
     }
     if let Some(p) = &o.regtrace { m.add_observer(Box::new(RegTrace::new(std::fs::File::create(p).expect("regtrace file"), o.regtrace_max, o.regtrace_from_pc))); }
+    if o.service_flash_out.is_some() && o.service_fd.is_none() {
+        usage_error("--service-flash-out requires --service-fd");
+    }
     if let Some(fd) = o.service_fd {
         #[cfg(unix)]
         {
@@ -1126,6 +1156,7 @@ fn prepare<S: Soc>(m: &mut Machine<S>, o: &Opts) -> String {
             // from the calling service, which must be an open Unix stream socket.
             let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
             m.web = Some(esp_soc::web::WebServer::service(socket).expect("service socket"));
+            m.host.service_flash_out = o.service_flash_out.clone();
             m.rt.enabled = true;
         }
         #[cfg(not(unix))]

@@ -137,7 +137,12 @@ impl<S: Soc> Machine<S> {
             let field = |key: &str| message.get(key).and_then(Json::scalar_text);
             let t = field("t").unwrap_or_default();
             match t.as_str() {
-                "service" if w.service => self.service_command(&w, &field),
+                "service" if w.service => {
+                    if !self.service_state_command(&w, &field) {
+                        self.service_command(&w, &field);
+                    }
+                    if self.max_cycles == 0 { return; }
+                }
                 "btn" => { let pin: u8 = field("pin").and_then(|x| x.parse().ok()).unwrap_or(0); let v = field("v").unwrap_or_default() == "1";
                            self.bus.gpio_set_input(pin, !v); *self.bus.irq_dirty() = true; }
                 "matrix-key" if self.bus.board_ref().accepts_command("key-edge") => {

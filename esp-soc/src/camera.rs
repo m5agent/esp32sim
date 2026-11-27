@@ -105,11 +105,18 @@ pub struct HostFrameSource {
     picture: Option<picture::Picture>,
     cached: Option<(FrameConfig, std::sync::Arc<Vec<u8>>)>,
     jpeg: Option<picture::Jpeg>,
+    test_pattern: Option<u32>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FrameConfig { w: u32, h: u32, format: picture::PixelFormat, window: Option<([u32; 4], u32, u32)>, flip: [bool; 2] }
 impl HostFrameSource {
     fn invalidate(&mut self) { self.cached = None; }
+    fn set_test_pattern(&mut self, seed: Option<u32>) {
+        if self.test_pattern != seed {
+            self.test_pattern = seed;
+            self.invalidate();
+        }
+    }
     pub fn set_camera_picture(&mut self, p: picture::Picture) -> Result<(), &'static str> {
         if !p.valid() { return Err("invalid camera picture or frame exceeds 8 MiB"); }
         self.picture = Some(p); self.invalidate(); Ok(())
@@ -138,6 +145,11 @@ impl HostFrameSource {
     fn oriented_frame(&mut self, w: u32, h: u32, format: picture::PixelFormat, window: Option<([u32; 4], u32, u32)>, flip: [bool; 2]) -> Option<(u32, u32, std::sync::Arc<Vec<u8>>)> {
         let config = FrameConfig { w, h, format, window, flip };
         if self.cached.as_ref().is_none_or(|(old, _)| *old != config) {
+            if let Some(seed) = self.test_pattern.filter(|_| format == picture::PixelFormat::Rgb565) {
+                let frame = std::sync::Arc::new(test_pattern_rgb565(w, h, seed));
+                self.cached = Some((config, frame.clone()));
+                return Some((w, h, frame));
+            }
             let black = picture::Picture { w: 1, h: 1, rgb: vec![0; 3] };
             let p = self.picture.as_ref().unwrap_or(&black);
             let cropped;
@@ -151,6 +163,24 @@ impl HostFrameSource {
     }
 }
 
+
+/// The service fixtures expect four color bands overlaid by a 40-pixel grid.
+/// The seed shifts both the band colors and the grid rows. The bytes are in
+/// RGB565 sensor wire order and follow the geometry the guest programmed.
+fn test_pattern_rgb565(w: u32, h: u32, seed: u32) -> Vec<u8> {
+    const BANDS: [u16; 4] = [0xe986, 0xede4, 0x2dea, 0x235d];
+    const GRID: [u8; 2] = 0xf7be_u16.to_be_bytes();
+    let mut frame = Vec::with_capacity((w * h * 2) as usize);
+    for y in 0..h {
+        let color = BANDS[((y * 4 / h + seed % 4) % 4) as usize].to_be_bytes();
+        let grid_row = (y + seed % 40) % 40 < 2;
+        for x in 0..w {
+            frame.extend_from_slice(if grid_row || x % 40 < 2 { &GRID } else { &color });
+        }
+    }
+    frame
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +190,17 @@ mod tests {
         assert!(sensor.start(false));
         for byte in reg.to_be_bytes().into_iter().chain([value]) { assert!(sensor.write(byte)); }
         sensor.stop();
+    }
+
+    #[test]
+    fn compatibility_pattern_preserves_wire_order_and_advances_past_four_bands() {
+        let frames: Vec<_> = (0..5).map(|seed| test_pattern_rgb565(160, 120, seed)).collect();
+        for (i, frame) in frames.iter().enumerate() {
+            assert_eq!(&frame[..2], &[0xf7, 0xbe]);
+            assert!(frames[..i].iter().all(|previous| previous != frame));
+        }
+        let interior = (160 * 3 + 2) * 2;
+        assert_eq!(&frames[0][interior..interior + 2], &[0xe9, 0x86]);
     }
 
     #[test]

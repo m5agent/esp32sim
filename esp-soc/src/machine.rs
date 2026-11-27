@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 
 mod modeled;
 mod web;
+mod service;
 
 #[derive(Clone, Debug)]
 pub enum ScriptAction { Gpio(u8, bool), Serial(String), Uart(usize, String), Stop, Touch(u16, u16, bool), Poke(u32, u32), TouchPad(u8, bool), Ble(String), Analog(u8, esp_periph::AnalogSource),
@@ -58,6 +59,8 @@ pub struct HostIo {
     tails: [Vec<u8>; 2],
     /// sockets carrying a UART's bytes both ways (`uart_tcp::UartTcp`)
     pub uart_tcp: Vec<crate::uart_tcp::UartTcp>,
+    /// The service-owned destination for a coherent Flash snapshot.
+    pub service_flash_out: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -330,6 +333,7 @@ impl<S: Soc> Machine<S> {
     /// re-initialised; SRAM, RTC memories, efuses and the RTC-domain registers survive, as on
     /// silicon. Returns the reset cause that the ROM will report.
     pub fn reboot(&mut self) -> u32 {
+        self.bus.board().reset_spi_sd_observation();
         // where core 0 was when the reset took effect (the C6 ROM prints it as `Saved PC`)
         let pc = self.cores[0].pc();
         self.bus.note_pc(pc);

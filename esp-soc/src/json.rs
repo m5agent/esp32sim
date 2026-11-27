@@ -12,6 +12,34 @@ pub enum Json {
 }
 
 impl Json {
+    pub fn object<const N: usize>(entries: [(&str, Json); N]) -> Self {
+        Self::Obj(entries.into_iter().map(|(key, value)| (key.into(), value)).collect())
+    }
+    /// Encode model data as JSON. Unavailable floating-point samples use null.
+    pub fn encode(&self) -> String {
+        match self {
+            Self::Null => "null".into(),
+            Self::Bool(value) => value.to_string(),
+            Self::Int(value) => value.to_string(),
+            Self::Float(value) if value.is_finite() => value.to_string(),
+            Self::Float(_) => "null".into(),
+            Self::Str(value) => format!(r#""{}""#, crate::web::json_escape(value)),
+            Self::Arr(values) => format!("[{}]", values.iter().map(Self::encode).collect::<Vec<_>>().join(",")),
+            Self::Obj(entries) => {
+                let fields = entries.iter().map(|(key, value)| {
+                    format!(r#""{}":{}"#, crate::web::json_escape(key), value.encode())
+                }).collect::<Vec<_>>();
+                format!("{{{}}}", fields.join(","))
+            }
+        }
+    }
+    pub fn register_bytes(bytes: impl IntoIterator<Item = u8>) -> Self {
+        Self::Arr(bytes.into_iter().map(|byte| Self::Int(i64::from(byte))).collect())
+    }
+    pub fn counter(value: u64) -> Self {
+        Self::Int(i64::try_from(value).unwrap_or(i64::MAX))
+    }
+
     pub fn get(&self, key: &str) -> Option<&Json> {
         match self { Self::Obj(m) => m.iter().find(|(k, _)| k == key).map(|(_, v)| v), _ => None }
     }

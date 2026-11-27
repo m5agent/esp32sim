@@ -15,12 +15,16 @@ pub(super) struct Camera {
     pub powered: bool,
     pub frames: u64,
     pub dimensions: (u32, u32),
+    pub auto_increment: bool,
+    pub frame_seed: u32,
+    has_picture: bool,
 }
 
 impl Camera {
     pub fn new(m12: bool) -> Self {
         let sensor = if m12 { Sensor::Ov3660(Ov3660::default()) } else { Sensor::Gc0308(Box::default()) };
-        Self { sensor, powered: false, frames: 0, dimensions: (0, 0) }
+        Self { sensor, powered: false, frames: 0, dimensions: (0, 0),
+               auto_increment: false, frame_seed: 0, has_picture: false }
     }
 
     pub fn address(&self) -> u8 {
@@ -32,7 +36,9 @@ impl Camera {
     }
 
     pub fn picture(&mut self, p: Picture) -> Result<(), &'static str> {
-        match &mut self.sensor { Sensor::Gc0308(d) => d.set_camera_picture(p), Sensor::Ov3660(d) => d.set_camera_picture(p) }
+        match &mut self.sensor { Sensor::Gc0308(d) => d.set_camera_picture(p), Sensor::Ov3660(d) => d.set_camera_picture(p) }?;
+        self.has_picture = true;
+        Ok(())
     }
 
     pub fn jpeg(&mut self, jpeg: Jpeg) -> Result<(), JpegError> {
@@ -45,7 +51,12 @@ impl Camera {
 
     pub fn frame(&mut self) -> Option<(u32, u32, Arc<Vec<u8>>)> {
         if !self.powered { return None; }
-        let frame = match &mut self.sensor { Sensor::Gc0308(d) => d.camera_frame(), Sensor::Ov3660(d) => d.camera_frame() }?;
+        let seed = (self.auto_increment || !self.has_picture).then_some(self.frame_seed);
+        let frame = match &mut self.sensor {
+            Sensor::Gc0308(d) => { d.set_test_pattern(seed); d.camera_frame() }
+            Sensor::Ov3660(d) => { d.set_test_pattern(seed); d.camera_frame() }
+        }?;
+        if self.auto_increment { self.frame_seed = self.frame_seed.wrapping_add(1); }
         self.frames += 1;
         self.dimensions = (frame.0, frame.1);
         Some(frame)
