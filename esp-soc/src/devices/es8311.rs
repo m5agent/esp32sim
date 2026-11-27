@@ -17,6 +17,7 @@ impl Es8311 {
     pub const ADDRESS: u8 = 0x18;
     pub fn new() -> Self { Self { regs: Rc::new(RefCell::new(Self::reset_regs())), ptr: 0, first: true } }
     pub fn i2c_port(&self) -> Self { Self { regs: self.regs.clone(), ptr: 0, first: true } }
+    pub fn power_loss(&self) { *self.regs.borrow_mut() = Self::reset_regs(); }
 
     fn reset_regs() -> [u8; 256] {
         let mut regs = [0; 256];

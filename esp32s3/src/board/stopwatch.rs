@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc, sync::{Arc, Mutex}, collections::BTreeSet};
+use std::{cell::{Cell, RefCell}, rc::Rc, sync::{Arc, Mutex}, collections::BTreeSet};
 
 use esp_periph::i2c::m5::{M5ioe1, M5ioe1State, M5pm1};
 use esp_soc::board::{BoardEdge, BoardModel, I2sCodecs, SpiPins, VirtualCycle};
@@ -27,12 +27,16 @@ struct PowerWiring {
     power: Pm1Wiring,
     expander: Arc<Mutex<M5ioe1State>>,
     touch: Arc<Mutex<TouchState>>,
+    codec: Es8311,
+    audio_powered: Cell<bool>,
 }
 
 impl PowerWiring {
     fn sync(&self) {
         let off = !self.power.powered();
         let expander = *self.expander.lock().expect("StopWatch expander state mutex poisoned");
+        let audio_powered = !off && expander.audio_rail;
+        if self.audio_powered.replace(audio_powered) && !audio_powered { self.codec.power_loss(); }
         let active = !off && expander.oled_rail && expander.oled_reset_high;
         let mut panel = self.panel.lock().expect("StopWatch panel mutex poisoned");
         if panel.active && !active {
@@ -45,6 +49,18 @@ impl PowerWiring {
             *self.touch.lock().expect("StopWatch touch mutex poisoned") = TouchState::default();
         }
     }
+}
+
+// The C152's Q5/Q6 isolate the ES8311 I2C branch when AU_L3B is off.
+struct AudioPort {
+    codec: Es8311,
+    wiring: Rc<PowerWiring>,
+}
+
+impl I2cDevice for AudioPort {
+    fn start(&mut self, read: bool) -> bool { self.wiring.audio_powered.get() && self.codec.start(read) }
+    fn write(&mut self, byte: u8) -> bool { self.wiring.audio_powered.get() && self.codec.write(byte) }
+    fn read(&mut self) -> u8 { if self.wiring.audio_powered.get() { self.codec.read() } else { 0xff } }
 }
 
 struct PowerDevice {
@@ -66,7 +82,6 @@ impl I2cDevice for PowerDevice {
 pub struct StopWatch {
     wiring: Rc<PowerWiring>,
     bus: I2cWiring,
-    codec: Es8311,
     motion: Arc<ImuMotion>,
     imu: Rc<RefCell<Bmi270>>,
     rtc: Rc<RefCell<Rx8130>>,
@@ -98,8 +113,9 @@ impl StopWatch {
             power: Pm1Wiring::new(2),
             expander: Default::default(),
             touch: Default::default(),
+            codec: Es8311::new(),
+            audio_powered: Cell::new(false),
         });
-        let codec = Es8311::new();
         let motion = Arc::new(ImuMotion::default());
         let imu = Rc::new(RefCell::new(Bmi270::new(motion.clone(), CPU_HZ).with_any_motion()));
         let rtc = Rc::new(RefCell::new(Rx8130::new(CPU_HZ)));
@@ -112,9 +128,9 @@ impl StopWatch {
             (0x15, Rc::new(RefCell::new(Cst820::new(wiring.touch.clone())))),
             (Rx8130::ADDRESS, rtc.clone()),
             (0x68, imu.clone()),
-            (Es8311::ADDRESS, Rc::new(RefCell::new(codec.i2c_port()))),
+            (Es8311::ADDRESS, Rc::new(RefCell::new(AudioPort { codec: wiring.codec.i2c_port(), wiring: wiring.clone() }))),
         ]);
-        Self { wiring, bus, codec, motion, imu, rtc, pm1_irq_high: true,
+        Self { wiring, bus, motion, imu, rtc, pm1_irq_high: true,
             cycle: 0, gpio_events: 0, vibration: BTreeSet::new(), motor_duty_since: (0, 0),
             external_port_routes: [false; 2], lcd_selected: false }
     }
@@ -165,10 +181,13 @@ impl BoardModel for StopWatch {
     fn i2c_devices(&mut self) -> Vec<(u8, u8, Box<dyn I2cDevice>)> { self.bus.ports() }
     fn i2s_codecs(&self) -> Option<I2sCodecs> {
         let expander = self.wiring.expander.lock().unwrap();
-        let mut codecs = self.codec.i2s_codecs(0, 1, 17, 15, 21, 16);
+        let mut codecs = self.wiring.codec.i2s_codecs(0, 1, 17, 15, 21, 16);
         codecs.mck = Some(18);
-        if !expander.audio_rail { codecs.mic_lanes = [false; 2]; }
-        if !expander.audio_rail || !expander.amp_enabled { codecs.speaker_gain = 0.0; }
+        // AU_L3B supplies the codec. The AW8737A uses VBUS_L0 and its own
+        // PYG10 shutdown input. Both stages must be active to emit PCM.
+        let audio_powered = self.wiring.audio_powered.get();
+        if !audio_powered { codecs.mic_lanes = [false; 2]; }
+        if !audio_powered || !expander.amp_enabled { codecs.speaker_gain = 0.0; }
         Some(codecs)
     }
     fn display(&self) -> Option<(u32, u32, Vec<u16>, u64)> {

@@ -114,6 +114,20 @@ def heard_tone(path, hz, tolerance, window_ms):
 
 
 def power_case(out, board, case, serial, report):
+    if board == "sticks3":
+        wire_lines = {"m5pm1-1": 16, "m5pm1-2": 18, "m5pm1-3": 19, "wakeup-2": 16}
+        if (case in wire_lines and "PM1 initialization successful" in serial and "unexpected nack" in serial
+                and re.search(r"L7set_pin\w*\(a2=0x1 a3=0x2f a4=0x30\)", report)
+                and "[i2c0] transfer without a bidirectional pin route" in report):
+            name = case.replace("-", "_")
+            raise DocsDefect(f"{name}.ino:{wire_lines[case]} assigns Wire/I2C0 to GPIO47/48. "
+                             "M5.update polls PM1 through M5GFX I2C1, which rewrites the same GPIO output selectors. "
+                             "The later Wire operation fails after the I2C1 remap.")
+        if (case == "wakeup-1" and "esp_sleep_enable_timer_wakeup(a2=0x4c4b40" in report
+                and "M5PM1_Class8powerOffEv(" in report and "powered=false timer_wakes=0" in report
+                and "esp_deep_sleep_start(" not in report):
+            raise DocsDefect("wakeup_1.ino:18 calls timerSleep(5). The pinned library arms the ESP RTC timer "
+                             "then cuts the ESP's supply through PM1 before entering deep sleep. No PM1 timer was armed.")
     if case in {"m5pm1-1", "m5pm1_m5ioe1-1", "wakeup-2"}:
         contains(serial, "PM1 initialization successful")
         require(re.search(r"timer_wakes=[1-9]", report), "missing PM1 timer-driven power return")
@@ -137,9 +151,11 @@ def power_case(out, board, case, serial, report):
         wav = out / (case + "-output.wav")
         require(all(heard_tone(wav, hz, 180, 10) for hz in (4000, 6000)), "audible phases missing")
         if heard_tone(wav, 10000, 180, 10):
-            raise DocsDefect("m5pm1_m5ioe1_6.ino:107–113 starts the speaker after disabling the audio rail. "
-                             "Its enable callback repowers the rail, and the capture contains the 10 kHz tone "
-                             "described as silent. Connector selects and programmed motor duty passed.")
+            require(re.search(r"_speaker_enabled_cb_stopwatch\w*\(a2=0x[0-9a-f]+ a3=0x1", report),
+                    "unexpected 10 kHz PCM without a trace of the firmware enabling the speaker")
+            raise DocsDefect("m5pm1_m5ioe1_6.ino:75–78 and :107–113 call tone() and begin() after turning off "
+                             "the amplifier or audio rail. The traced enable callback restores both before "
+                             "the 10 kHz PCM reaches the speaker. Connector selection and motor duty passed.")
         return "IOE1 selects UART0 and USB, drives PWM1, and gates both audio paths"
     require(case in {"wakeup", "wakeup-1"}, "missing power-case oracle")
     contains(report, "chip reset")
@@ -149,7 +165,7 @@ def power_case(out, board, case, serial, report):
 
 
 def verify(out, board, case):
-    allow_blank = case in {"buzzer", "speaker", "speaker-sd-wav", "wakeup-2", "rfid-1", "rfid-2",
+    allow_blank = case in {"buzzer", "speaker", "speaker-sd-wav", "wakeup-1", "wakeup-2", "rfid-1", "rfid-2",
                            "m5pm1-1", "m5pm1-2", "m5pm1_m5ioe1-1", "m5pm1_m5ioe1-2"}
     frame, serial, report = capture(out, board, case, screen=not allow_blank and not (case == "button" and board != "sticks3"))
     if case == "display" or case.startswith("quickstart-"):

@@ -83,6 +83,35 @@ fn factory_devices_and_active_low_button_inputs() {
 }
 
 #[test]
+fn codec_rail_and_amplifier_are_independent_speaker_gates() {
+    let mut board = StopWatch::new();
+    let mut devices = board.i2c_devices();
+    power_up(&mut devices);
+    let gain = |b: &StopWatch| b.i2s_codecs().unwrap().speaker_gain;
+    assert!(!device(&mut devices, 0x18).start(false));
+    update(&mut devices, 0x4f, 0x05, 4, 0);
+    assert_eq!(read(&mut devices, 0x18, 0xfd, 2), [0x83, 0x11]);
+    for (reg, value) in [(0, 0x80), (1, 0xb5), (0x0d, 1), (0x12, 0), (0x13, 0x10), (0x32, 0xbf)] {
+        write(&mut devices, 0x18, reg, value);
+    }
+    update(&mut devices, 0x4f, 0x04, 2, 0);
+    update(&mut devices, 0x4f, 0x14, 0, 2);
+    assert_eq!(gain(&board), 0.0);
+    update(&mut devices, 0x4f, 0x06, 2, 0);
+    assert_eq!(gain(&board), 1.0);
+    update(&mut devices, 0x4f, 0x06, 0, 2);
+    assert_eq!(gain(&board), 0.0);
+    assert_eq!(read(&mut devices, 0x18, 0, 1), [0x80]);
+    update(&mut devices, 0x4f, 0x06, 2, 0);
+    update(&mut devices, 0x4f, 0x05, 0, 4);
+    assert_eq!(gain(&board), 0.0);
+    assert!(!device(&mut devices, 0x18).start(false));
+    update(&mut devices, 0x4f, 0x05, 4, 0);
+    assert_eq!(read(&mut devices, 0x18, 0, 1), [0x1f]);
+    assert_eq!(gain(&board), 0.0);
+}
+
+#[test]
 fn firmware_power_sequence_gates_spi_and_preserves_full_window_stride() {
     let mut board = StopWatch::new();
     let mut devices = board.i2c_devices();

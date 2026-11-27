@@ -133,6 +133,22 @@ for image in "$firmware"/*/sketch.merged.bin; do
             fi
             ;;
     esac
+    elf="${image%.merged.bin}.elf"
+    if [[ -f "$elf" ]]; then
+        case "$board:$label" in
+            sticks3:wakeup-1)
+                flags+=(--elf "$elf" --debug i2c1 --trace-fn esp_sleep_enable_timer_wakeup
+                    --trace-fn esp_deep_sleep_start --trace-fn _ZN2m511M5PM1_Class8powerOffEv) ;;
+            sticks3:m5pm1-*|sticks3:wakeup-2)
+                flags+=(--elf "$elf" --debug i2c0,i2c1 --trace-fn _ZN4lgfx2v13i2cL7set_pin
+                    --trace-fn i2c_master_transmit --peek 0x60004610,2) ;;
+            stopwatch:m5pm1_m5ioe1-6)
+                flags+=(--elf "$elf" --debug i2c1 --trace-fn _ZN2m59M5Unified29_speaker_enabled_cb_stopwatchEPvb) ;;
+        esac
+        if [[ " ${flags[*]} " == *" --elf "* ]]; then
+            shasum -a 256 "$elf" >>"$out/inputs.sha256"
+        fi
+    fi
     run "$label" "$image" "$seconds" ${flags[@]+"${flags[@]}"}
     case "$label" in
         display|quickstart-*) run "$label-early" "$image" 1.5 ;;
