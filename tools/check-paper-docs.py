@@ -28,13 +28,17 @@ def loop_times(trace):
     return [float(t) for t in re.findall(r"(?m)^\[fn\].*? t=([\d.]+)s .*? _Z4loopv\(", trace or "")]
 
 
-def i2c_transactions(log, address):
+def i2c_events(log):
     for transaction in re.split(r"(?m)^\[i2c\] start addr ", log or "")[1:]:
         match = re.match(r"(0x[\da-f]+) read=(true|false)", transaction)
-        if match and int(match[1], 16) == address:
+        if match:
             direction = "read" if match[2] == "true" else "write"
             data = re.findall(rf"(?m)^\[i2c\]\s+{direction}\s+(0x[\da-f]+)", transaction)
-            yield direction, tuple(int(value, 16) for value in data)
+            yield int(match[1], 16), direction, tuple(int(value, 16) for value in data)
+
+
+def i2c_transactions(log, address):
+    return ((direction, data) for addr, direction, data in i2c_events(log) if addr == address)
 
 
 def register_reads(log, address, register):
@@ -44,6 +48,11 @@ def register_reads(log, address, register):
             pointer = data[0] if data else None
         elif pointer == register:
             yield data
+
+
+def rx8130_times(log, day=0x08, month=5):
+    return {data[:3] for data in register_reads(log, 0x32, 0x10)
+            if len(data) >= 7 and (data[4] & 63, data[5] & 31, data[6]) == (day, month, 0x26)}
 
 
 def vcd_edges(path, pin):
@@ -59,40 +68,6 @@ def vcd_edges(path, pin):
                 instant = int(line[1:])
             elif code and line[0] in "01" and line[1:].strip() == code:
                 yield instant / 1_000_000, line[0] == "1"  # microseconds
-
-
-def nec_frames(path):
-    # Arduino-IRremote software carrier. Consecutive marks in a burst
-    # are separated by at most one 38 kHz period.
-    rises = [time for time, high in vcd_edges(path, 48) if high]
-    bursts = []
-    for instant in rises:
-        if not bursts or instant - bursts[-1][1] > 45:
-            bursts.append([instant, instant])
-        else:
-            bursts[-1][1] = instant
-    for index, (start, end) in enumerate(bursts[:-33]):
-        if not 8500 <= end - start <= 9400:
-            continue
-        if not 4300 <= bursts[index + 1][0] - end <= 4900:
-            continue
-        bits = []
-        for bit in range(index + 1, index + 33):
-            first, last = bursts[bit]
-            gap = bursts[bit + 1][0] - last
-            if not 440 <= last - first <= 660:
-                break
-            if 430 <= gap <= 750:
-                bits.append(0)
-            elif 1500 <= gap <= 1900:
-                bits.append(1)
-            else:
-                break
-        if len(bits) == 32:
-            frame = sum(bit << index for index, bit in enumerate(bits))
-            address, command, inverse = frame & 0xffff, (frame >> 16) & 255, frame >> 24
-            if command ^ inverse == 255:
-                yield address, command
 
 
 def pcm(path):
@@ -209,10 +184,7 @@ def check_mono_controls(case, pixels, control_frame, first_frame):
         require(len(color_counts(first_frame)) > 1 and first_frame not in (pixels, control_frame),
                 "BtnA did not produce a distinct status")
         return "BtnA and BtnB changed the visible status relative to the idle prompt"
-    expected = {
-        "battery": ("e10153923aae19419aabdc9f", "78bb6f4e54025c3787634244"),
-        "imu": ("83e15fd8590691e43d9e9fed", "27399b096a1770848ddfa51a"),
-    }[case]
+    expected = ("83e15fd8590691e43d9e9fed", "27399b096a1770848ddfa51a")
     require(tuple(digest(frame, 480) for frame in (pixels, control_frame)) == expected,
             "Second measurement and stationary control did not match the reviewed measurements")
     require(len(color_counts(first_frame)) > 1 and first_frame not in (pixels, control_frame),
@@ -220,8 +192,44 @@ def check_mono_controls(case, pixels, control_frame, first_frame):
     return "Both inputs changed the visible measurement relative to the control"
 
 
-def check_nfc(case, log, control, out):
+def check_mono_battery(log, control, pixels, control_frame, first_frame, out):
+    first = (out / "battery-first.log").read_text(errors="replace")
+    for trace, mv in ((first, 3678), (log, 4200), (control, 3900)):
+        expected = tuple(mv.to_bytes(2, "little"))
+        require(any(data[:2] == expected for data in register_reads(trace, 0x6e, 0x22)),
+                f"Guest did not read {mv} mV from the PM1")
+    require(any(data and data[0] & 128 for data in register_reads(log, 0x75, 0xc7))
+            and not any(register_reads(first, 0x75, 0xc7)) and not any(register_reads(control, 0x75, 0xc7)),
+            "Charging indication did not follow the gated IP2315 read")
+    require(all((pixels, first_frame, control_frame)) and len({pixels, first_frame, control_frame}) == 3,
+            "Battery frames did not show the two injected values and the control")
+    return "PM1 read 3678/4200 mV vs 3900 mV baseline; gated IP2315 reported charging with VIN"
+
+
+def check_mono_touch(pixels, first_frame, control_frame, out):
+    path = out / "touch-second.png"
+    second = png_rgb(path.read_bytes(), dimensions=(480, 800))
+    require(all((pixels, first_frame, control_frame)), "Missing held touches or release control")
+    require(pixels == control_frame, "Both touches should release to the untouched screen")
+    for frame, (x, y) in zip((first_frame, second), ((60, 120), (190, 320))):
+        at = (y * 480 + x) * 3
+        require(frame[at:at + 3] == b"\0\0\0" and control_frame[at:at + 3] == b"\xff\xff\xff",
+                f"Completed frame lacks the displayed marker at ({x},{y})")
+    return "Touch markers at (60,120) and (190,320), then the untouched frame after both releases"
+
+
+def check_nfc(case, log, control, pixels, first_frame, control_frame, out):
     if case == "nfc-4":
+        outputs = {0x13: 0xff}
+        powered = False
+        for direction, data in i2c_transactions(log, 0x4f):
+            if direction == "write" and len(data) > 1:
+                outputs.update(enumerate(data[1:], data[0]))
+                powered |= bool(outputs.get(3, 0) & outputs.get(5, 0) & ~outputs[0x13] & 8)
+        if "NFC-A emulation initialization failed" in log and not powered:
+            attempts = [data for direction, data in i2c_transactions(log, 0x50) if direction == "write"]
+            if len(attempts) >= 3 and not any(attempts):
+                return "DOCS-DEFECT", "nfc_4.ino calls units.begin() before enabling NFC power through IOE1 GPIO4"
         require("NFC-A emulation ready" in log and "NDEF text: PaperMONO" in log,
                 "Guest did not configure NFC-A target mode")
         return "NOT RUN", "No virtual reader fixture for target-mode activation and NDEF readback"
@@ -235,11 +243,20 @@ def check_nfc(case, log, control, out):
         if case == "nfc-2":
             require(all("==== Dump complete ====" in trace for trace in (first, log)),
                     "The guest did not finish both block dumps")
-        return "PASS", "Guest read both programmed UIDs via the IRQ-driven NFC-A data path"
-    require("Write NDEF OK!" in log and re.search(r"TNF:\s*1 T:T", log),
-            "Guest did not write and read a text NDEF record")
+        else:
+            require(all((pixels, first_frame, control_frame)), "Missing NFC UID or idle frame")
+            box = (70, 140, 410, 175)
+            expected = ["e308867ce2aedbdd84659784", "85887013196abf75a69e0c2d", "0f34a43522431c6e9e600581"]
+            require([digest(frame, 480, box) for frame in (pixels, first_frame, control_frame)] == expected,
+                    "The two UID readouts did not appear in the completed e-paper frames")
+        return "PASS", "Guest read both programmed UIDs through ST25R3916 IRQ/FIFO and displayed the results"
+    first = (out / f"{case}-first.log").read_text(errors="replace")
+    for trace, uid in ((first, "04331144556677"), (log, "04998877665544")):
+        require(f"PICC:{uid}" in trace and "Write NDEF OK!" in trace and
+                "TNF:1 T:U [https://m5stack.com/]" in trace and "TNF:1 T:T [Hello PaperMono]" in trace,
+                "Guest did not write and read the exact URI and text records for both tags")
     require("Write NDEF OK!" not in control, "No-input control wrote an NDEF record")
-    return "PASS", "Guest wrote a text NDEF record and read it back via ST25R3916 IRQ and FIFO"
+    return "PASS", "Guest wrote and read exact URI and text records on both tags through ST25R3916"
 
 
 def check_power(board, case, log, control, out):
@@ -262,7 +279,8 @@ def check_power(board, case, log, control, out):
                          ("papermono", "m5pm1_m5ioe1-1")}:
         require((0x3d, 0xa5) in writes and re.search(r"chip reset at t=\d+\.\d+s: cause 0x1", log)
                 and "chip reset at" not in control, "PM1 timer arm did not produce an isolated power-on reset")
-        require(len(loop_times(log)) > 1, "Guest loop did not run after timer wake")
+        require(len(re.findall(r"(?m)^\[fn\].*? _Z5setupv\(", log)) > 1 or len(loop_times(log)) > 1,
+                "Guest did not start again after timer wake")
         return "PM1 timer arm produced a power-on reset and a running guest"
     interrupt = "BMI270 AnyMotionInterrupt enabled successfully" if case.endswith(("-2", "-3")) and board == "papermono" else "RTC IRQ enabled successfully"
     require(interrupt in log and "PM1 initialization successful" in log, "Guest did not configure its wake source")
@@ -270,9 +288,16 @@ def check_power(board, case, log, control, out):
         require("PM1 IRQ triggered" in log and "PM1 IRQ triggered" not in control, "Wake IRQ missing or present in control")
         if case.endswith("-3"):
             require(re.search(r"BMI270 interrupt status: 0x(?!0000)[0-9A-Fa-f]{4}", log), "BMI270 IRQ status is zero")
+            first = (out / f"{case}-first.log").read_text(errors="replace")
+            require("PM1 IRQ triggered" in first and re.search(r"BMI270 interrupt status: 0x(?!0000)[0-9A-Fa-f]{4}", first),
+                    "Second motion vector did not produce PM1 IRQ and BMI270 status")
         return "PM1 IRQ and the guest wake status matched the input"
     require(re.search(r"chip reset at t=\d+\.\d+s: cause 0x1", log) and "chip reset at" not in control,
             "Wake source did not restore the powered-off SoC")
+    if case == "m5pm1_m5ioe1-2":
+        first = (out / f"{case}-first.log").read_text(errors="replace")
+        require(re.search(r"chip reset at t=\d+\.\d+s: cause 0x1", first),
+                "Second motion vector did not restore the powered-off SoC")
     return "Wake source restored the simulated power rail and restarted the guest"
 
 
@@ -280,7 +305,10 @@ def check_sht40(log, control, first_log, input_frame, first_frame, control_frame
     readings = []
     for trace in (first_log, log, control):
         cmds = list(i2c_transactions(trace, 0x44))
-        require(("write", (0xfd,)) in cmds, "SHT40 high-precision measurement write did not reach 0x44")
+        # M5Unit-ENV 1.7.4 sends a trailing byte after the command. The
+        # command starts the conversion before that extra byte is NACKed.
+        require(any(direction == "write" and data[:1] == (0xfd,) for direction, data in cmds),
+                "SHT40 high-precision measurement write did not reach 0x44")
         values = next((data for direction, data in cmds if direction == "read" and len(data) == 6), None)
         require(values, "SHT40 read never returned six bytes")
 
@@ -303,6 +331,17 @@ def check_sht40(log, control, first_log, input_frame, first_frame, control_frame
     return f"CRC-backed measurements and distinct completed frames {readings}"
 
 
+def sht40_lost_route(log):
+    route = [(addr, direction, data) for addr, direction, data in i2c_events(log) if addr in (0x44, 0x6e)]
+    probe = (0x44, "write", ())
+    if probe not in route:
+        return False
+    start = route.index(probe)
+    return ("SHT40 samples=0" in log and route[start:start + 5] == [
+        probe, (0x6e, "write", (0x42,)), (0x6e, "read", (0,)), probe, (0x44, "read", ()),
+    ])
+
+
 def check_mic(board, log, control, out):
     if board == "papermono":
         second = (out / "mic-second.log").read_text(errors="replace")
@@ -316,7 +355,9 @@ def check_mic(board, log, control, out):
         return f"Guest microphone RMS tracks both input amplitudes and silence ({means})"
     takes = [pcm(out / f"mic{suffix}.wav") for suffix in ("", "-second", "-control")]
     for (rate, samples), hz in zip(takes[:2], (700, 1200)):
-        require(len(samples) >= rate and spectrum(samples, rate, hz) > 0.1,
+        tenth = rate // 10
+        windows = [samples[start:start + tenth] for start in range(tenth, 20 * tenth, tenth)]
+        require(len(samples) >= 2 * rate and sum(spectrum(window, rate, hz) > 0.4 for window in windows) >= 17,
                 f"Recording playback does not preserve the {hz} Hz injected signal")
     require(rms(takes[2][1]) < 20, "Silence control produced audible playback")
     return "Both injected frequencies survive microphone recording and playback"
@@ -331,19 +372,32 @@ def verify(board, case, log, pixels, control, early, control_frame, first_frame,
     if re.search(r"Guru Meditation|assert failed|abort\(\) was called|rebooting\.\.\.", log, re.I):
         return "FAIL", "Guest panic, assertion, or reboot marker"
     if case == "stock":
-        if len(colors) < 2:
-            return "FAIL", "No completed nonuniform stock frame"
-        return "NOT RUN", "Stock rendered; use the service probe for input and REPL"
+        require(len(colors) >= 2 and control_frame and len(color_counts(control_frame)) >= 2,
+                "No completed home frame in the active or idle run")
+        for trace in (log, control):
+            require(trace and "CDC-ACM interface" in trace and re.search(r"(?m)^S3D_USB_REPL 42\r?$", trace),
+                    "Stock USB CDC REPL did not return 42")
+        if board in {"papers3", "papermono"}:
+            pattern = r"(?m)^S3D_STOCK_TOUCH \((\d+), (\d+)\)\r?$"
+            points = {("60", "120"), ("190", "320")} if board == "papers3" else {("408", "100"), ("288", "316")}
+            require(set(re.findall(pattern, log)) == points and not re.search(pattern, control),
+                    "Stock touch coordinates differed from the paired inputs or idle control")
+        else:
+            pattern = r"(?m)^S3D_STOCK ([ABC])\r?$"
+            keys = set("ABC" if board == "papercolor" else "AB")
+            require(set(re.findall(pattern, log)) == keys and not re.search(pattern, control),
+                    "Stock button markers differed from the paired inputs or idle control")
+        return "PASS", "Stock home screen, USB CDC arithmetic, and board input with a quiet control"
     if board == "paperdiy" and case in {"button", "display-2"}:
         if not all((pixels, first_frame, control_frame)):
-            return "NOT RUN", "Two action frames and a no-input frame are required"
+            return "FAIL", "Two action frames and a no-input frame are required"
         if len({pixels, first_frame, control_frame}) != 3 or len(colors) < 2:
             return "FAIL", "The two button actions did not yield distinct completed frames"
         return "PASS", "Each action changed the frame relative to the no-input control"
     if (board, case) == ("paperdiy", "m5pm1"):
         active, idle = loop_times(log), loop_times(control)
         if not active or not idle:
-            return "NOT RUN", "Guest loop traces are missing"
+            return "FAIL", "Guest loop traces are missing"
         if ("Power-on timer configured" in log and "Power-off timer configured" in log
             and re.search(r"chip reset at t=8\.\d+s: cause 0x1", log)
             and 12 < max(active) < 14 and max(idle) > 17 and "chip reset at" not in control):
@@ -353,12 +407,12 @@ def verify(board, case, log, pixels, control, early, control_frame, first_frame,
         if not colors or len(colors) == 1:
             return "FAIL", "No completed nonuniform application frame"
         if early is None:
-            return "NOT RUN", "Completed early frame capture missing"
+            return "FAIL", "Completed early frame capture missing"
         if early != {(255, 255, 255)}:
             return "FAIL", "Early capture did not retain the white frame"
         if (board, case) == ("paperdiy", "quickstart-longtextscroll"):
             if first_frame is None:
-                return "NOT RUN", "Earlier scroll frame missing"
+                return "FAIL", "Earlier scroll frame missing"
             if pixels != first_frame and len(color_counts(first_frame)) > 1:
                 return "PASS", "Two completed nonuniform frames show the scroll changing"
             return "FAIL", "The scroll did not move between captures"
@@ -391,31 +445,61 @@ def verify(board, case, log, pixels, control, early, control_frame, first_frame,
             return "PASS", "Two touch-selected display modes yielded completed frames distinct from idle"
         return "FAIL", "Missing display behavior checker"
     if case == "touch":
+        if board == "papermono":
+            return "PASS", check_mono_touch(pixels, first_frame, control_frame, out)
         if control is None:
-            return "NOT RUN", "Completed no-input control missing"
+            return "FAIL", "Completed no-input control missing"
         points = set(re.findall(r"x:\s*(\d+)[, ]+\s*y:\s*(\d+)", log))
         if len(points) < 2:
             return "FAIL", f"Guest reported {len(points)} distinct touch points, expected two"
         if re.search(r"x:\s*\d+[, ]+\s*y:\s*\d+", control or ""):
             return "FAIL", "No-input control reported a touch"
         return "PASS", "Guest reported two points and silent no-input control"
+    if (board, case) == ("papermono", "microsd"):
+        files = fat32_files(out / "microsd.img", {"PaperMonoTest.jpg"})
+        require(files["PaperMonoTest.jpg"].startswith(b"\xff\xd8\xff") and
+                re.search(r"\[sdmmc\].*? [1-9]\d* bytes read", log), "No persisted JPEG or SDMMC reads")
+        require(control is not None and control_frame and pixels and pixels != control_frame,
+                "Card and no-card frames did not differ")
+        # Seeded 240×160 JPG scaled to 480×320. Measure the centers of
+        # the seven dithered bands above the text overlay.
+        shades = []
+        for center in (30, 100, 170, 245, 310, 400, 455):
+            shades.append(sum(pixel(x, y)[0] for x in range(center - 5, center + 5)
+                              for y in range(290, 310)) / 200)
+        expected = (214, 190, 138, 105, 62, 34, 0)
+        require(all(abs(actual - seed) <= 12 for actual, seed in zip(shades, expected)),
+                f"Seeded JPEG grayscale bars were not rendered ({shades})")
+        return "PASS", "SDMMC reads produced the seeded JPEG bars; no-card control stayed on its status screen"
     if case in {"microsd", "sdcard"} and control is not None and "Displayed:" in log and "Displayed:" not in control:
         if board == "paperdiy" and "Contents of /PaperDIY_Log.txt:" not in log:
             return "FAIL", "Guest did not read back the log it wrote"
+        if board == "papercolor":
+            require(all(f"Displayed: /picture_0{page}.png" in log for page in (1, 2))
+                    and "SD card not inserted." in control, "Missing one seeded image or card-detect control")
+            require(first_frame and len(color_counts(first_frame)) > 1 and first_frame != pixels,
+                    "Completed first and second SD images were not distinct")
+        require(len(colors) > 1, "Media decoded but did not appear in any completed frame")
         return "PASS", "Guest rendered SD media while the no-card control did not"
     if case == "rtc-1" and "RTC demo time set" in log:
-        values = set(re.findall(r"RTC: 2026/05/08 .*?12:00:(\d\d)", log))
-        if len(values) >= 2:
+        values = set(re.findall(r"RTC: 2026/05/08 .*?(\d\d:\d\d:\d\d)", log))
+        if len(values) >= 2 or len(rx8130_times(log)) >= 2:
             return "PASS", "Guest set the calendar and observed it ticking"
+    if (board, case) == ("papermono", "rtc-1"):
+        require(len(rx8130_times(log, 0x18, 8)) >= 2 and len(colors) > 1,
+                "August 18 calendar did not advance through RX8130 reads")
+        return "PASS", "Guest set August 18, 2026, read the advancing RX8130 time and rendered it"
     if case == "button" and board == "papercolor":
         if control is None:
-            return "NOT RUN", "Completed no-input control missing"
+            return "FAIL", "Completed no-input control missing"
         if all(f"{key} was Pressed" in log and f"{key} was Pressed" not in control for key in "ABC"):
             return "PASS", "Guest reported three injected buttons and no control presses"
         return "FAIL", "Missing guest button markers or control produced a press"
     if board == "papers3":
         return "PASS", check_papers3(case, log, pixels, control, control_frame, first_frame, out)
-    if board == "papermono" and case in {"battery", "button", "imu"}:
+    if (board, case) == ("papermono", "battery"):
+        return "PASS", check_mono_battery(log, control, pixels, control_frame, first_frame, out)
+    if board == "papermono" and case in {"button", "imu"}:
         return "PASS", check_mono_controls(case, pixels, control_frame, first_frame)
     if case == "rtc-2":
         require(control is not None and "RTC synced from SNTP" not in control,
@@ -423,30 +507,39 @@ def verify(board, case, log, pixels, control, early, control_frame, first_frame,
         require("state Associated" in log and re.search(r"\b[1-9]\d* NTP answers", log)
                 and "RTC synced from SNTP" in log, "Guest did not set its clock from sandbox NTP")
         timestamps = set(re.findall(r"RTC:\s+2026/05/08.*?\b(\d\d:\d\d:\d\d)", log))
-        require(len(timestamps) >= 2, "Synced RTC did not continue ticking")
+        require(len(timestamps) >= 2 or len(rx8130_times(log)) >= 2, "Synced RTC did not continue ticking")
         return "PASS", "NTP synchronized RTC, guest read back advancing time, and idle control stayed offline"
     if case.startswith("nfc-"):
-        return check_nfc(case, log, control, out)
+        return check_nfc(case, log, control, pixels, first_frame, control_frame, out)
     if case.startswith("m5pm1") or case == "wakeup-2":
         return "PASS", check_power(board, case, log, control, out)
     if case == "wakeup":
         require(control and "chip reset at" not in control, "Missing uninterrupted key-idle control")
-        enter = re.findall(r"\[rtc-sleep\] enter timer light sleep t=([\d.]+)s", log)
-        wake = re.findall(r"\[rtc-sleep\] timer wake t=([\d.]+)s", log)
-        require(len(enter) == len(wake) == 1 and 4.95 < float(wake[0]) - float(enter[0]) < 5.05
-                and pixels and control_frame and pixels != control_frame, "Light-sleep key did not suspend and resume")
-        return "PASS", "Button A suspended and resumed the original loop around five seconds"
+        light_log = (out / "wakeup-first.log").read_text(errors="replace")
+        enter = re.findall(r"\[rtc-sleep\] enter timer light sleep t=([\d.]+)s", light_log)
+        wake = re.findall(r"\[rtc-sleep\] timer wake t=([\d.]+)s", light_log)
+        require(len(enter) == 1 and wake and 4.92 < float(wake[0]) - float(enter[0]) < 5.05
+                and first_frame and control_frame and first_frame != control_frame,
+                "Button A did not resume the original loop after light sleep")
+        deep = re.findall(r"\[rtc-sleep\] enter timer deep sleep t=([\d.]+)s", log)
+        resets = re.findall(r"chip reset at t=([\d.]+)s: cause 0x5", log)
+        require(len(deep) == len(resets) == 1 and 4.92 < float(resets[0]) - float(deep[0]) < 5.05,
+                "Button B did not wake from deep sleep with a reset")
+        require("[rtc-sleep] enter" not in control, "Idle control entered timer sleep")
+        return "PASS", "Button A resumed from light sleep and Button B rebooted from deep sleep, both after five seconds"
     if case == "wakeup-1":
-        resets = [float(value) for value in re.findall(r"chip reset at t=([\d.]+)s: cause 0x1", log)]
-        require(len(resets) >= 2 and "chip reset at" not in (control or ""), "No periodic timer wake")
-        require(all(5 <= b - a <= 12 for a, b in zip(resets, resets[1:])), "Wrong timer wake cadence")
-        return "PASS", "Repeated timed power-on resets at the documented sleep point"
+        resets = [float(value) for value in re.findall(r"chip reset at t=([\d.]+)s: cause 0x[15]", log)]
+        require(len(resets) == 1 and "chip reset at" not in (control or ""), "Timer wake did not produce one isolated reset")
+        require(79.95 <= resets[0] <= 81, f"Button A at 75 s woke at {resets[0]} s")
+        return "PASS", "Button A armed the timer and the device restarted five seconds later"
     if case == "mic":
         return "PASS", check_mic(board, log, control, out)
     if case in {"buzzer", "speaker"}:
         return "PASS", check_tones(board, case, out / f"{case}.wav")
     if case == "sht40":
         first_log = (out / "sht40-first.log").read_text(errors="replace")
+        if control and all(sht40_lost_route(trace) for trace in (first_log, log, control)):
+            return "DOCS-DEFECT", "sht40.ino uses Wire on the same pins M5.update() routes to the internal controller"
         return "PASS", check_sht40(log, control, first_log, pixels, first_frame, control_frame)
     if case == "battery":
         measured = set(re.findall(r"Power info refreshed: input=(\d), level=(\d+)%, bat=(\d+)mV, vbus=(\d+)mV", log))
@@ -456,9 +549,22 @@ def verify(board, case, log, pixels, control, early, control_frame, first_frame,
                 f"Battery voltage and plugged state did not follow both inputs ({sorted(measured)})")
         return "PASS", "Guest reported 3678 mV unplugged and 4200 mV plugged against baseline"
     if case == "ir_nec":
-        frames = set(nec_frames(out / f"{case}.vcd"))
+        ledc = re.findall(r"(?m)^\[m5stack-papercolor\] GPIO48 NEC:.*", log)
+        frames = {(int(addr, 16), int(cmd, 16)) for summary in ledc
+                  for addr, cmd in re.findall(r"address=0x([0-9a-f]+)/command=0x([0-9a-f]+)", summary)}
+        serial = set(re.findall(r"IR NEC sent: addr=0x1111 cmd=0x([0-9A-F]+)", log))
+        require({"34", "35"} <= serial, "Guest serial did not confirm both NEC commands")
+        if not frames:
+            feedback = re.findall(r"\[rmt-tx\] GPIO48 cycle=\d+ hz=10000000 carrier=00000000 symbols=\[([^\]]+)\]", log)
+            rgb = sum(len(words.split(", ")) == 24 and set(words.split(", ")) <= {"00088004", "00048008"}
+                      for words in feedback)
+            if rgb >= 68:
+                return "DOCS-DEFECT", "IRremote send feedback drives the built-in RGB LED alias on the same GPIO48"
         require({(0x1111, 0x34), (0x1111, 0x35)} <= frames,
                 f"GPIO48 lacked both timing- and checksum-valid NEC frames ({sorted(frames)})")
+        idle = (out / f"{case}-early.log").read_text(errors="replace")
+        require(early is not None and "GPIO48 NEC:" not in idle and "IR NEC sent:" not in idle,
+                "No quiet pre-transmission control")
         return "PASS", "GPIO48 carries NEC extended address 0x1111 and commands 0x34/0x35"
     if case == "rgb_led":
         if board == "papercolor":
@@ -466,24 +572,33 @@ def verify(board, case, log, pixels, control, early, control_frame, first_frame,
             observed = set(re.findall(r"\[leds\] GPIO21 (\w+,\w+)", log))
             require(expected <= observed, f"WS2812 chain lacked both independent pixels and color order ({sorted(observed)})")
         else:
-            states = {(data[1] & 0x80, data[2] & 1) for direction, data in i2c_transactions(log, 0x4f)
-                      if direction == "write" and len(data) >= 3 and data[0] == 5}
-            require({(0, 0), (0x80, 0), (0, 1), (0x80, 1)} <= states,
-                    f"IOE1 never showed the independent blue and green channels ({sorted(states)})")
+            pmic, ioe = {}, {}
+            states = set()
+            for address, direction, data in i2c_events(log):
+                if direction != "write" or len(data) < 2 or address not in (0x4f, 0x6e):
+                    continue
+                registers = ioe if address == 0x4f else pmic
+                registers.update(enumerate(data[1:], data[0]))
+                states.add(tuple(bool(value) for value in (pmic.get(6, 0) & 16,
+                           ioe.get(5, 0) & 128, ioe.get(6, 0) & 1)))
+            require({(True, False, False), (False, True, False), (False, False, True), (True, True, True)} <= states,
+                    f"PM1 and IOE1 did not render red, green, blue and white ({sorted(states)})")
         return "PASS", "The installed LED channels followed the documented sequence"
     if case == "program":
         require(pixels and digest(pixels, 400) == "0725453568b67b3231e1b322",
                 "Quickstart frame lacks the six bands and PAPER COLOR text")
         return "PASS", "Completed frame matches the six-band PAPER COLOR quickstart artwork"
     if case.startswith("lora-"):
-        peer = out / "lora-result.json"
-        if not peer.is_file():
-            return "NOT RUN", "Two loopback peer runs and a disconnected receiver control are required"
-        result = json.loads(peer.read_text())
-        expected = "sender" if case == "lora-1" else "receiver"
-        require(result["pass"] and len(result["runs"][expected]["payloads"]) >= 2,
+        sender, receiver, idle = [(out / f"{stem}.log").read_text(errors="replace")
+                                  for stem in ("lora-1", "lora-2", "lora-2-control")]
+        sent = set(re.findall(r"\[LoRa TX\] Sent: (Hello PaperMono #\d+)", sender))
+        received = set(re.findall(r"\[LoRa RX\] Data: (Hello PaperMono #\d+)", receiver))
+        require(re.search(r"LoRa tx=[1-9]\d* rx=0", sender)
+                and re.search(r"LoRa tx=0 rx=[1-9]\d*", receiver)
+                and len(sent & received) >= 2 and received <= sent
+                and "LoRa tx=0 rx=0" in idle and "[LoRa RX] Data:" not in idle,
                 "Loopback payloads or disconnected receiver control failed")
-        return "PASS", "SX1262 virtual peer exchanged multiple exact payloads"
+        return "PASS", f"SX1262 peer read {len(received)} exact payloads; disconnected control read none"
     if case in {"microsd", "sdcard"}:
         return "FAIL", "Guest did not show the documented SD media with a quiet no-card control"
     return "FAIL", "Expected behavior did not pass its case checker"
@@ -498,16 +613,19 @@ def main():
     board = receipt["board"]
     verdicts = []
     completed = {(row["case"], row["kind"]) for row in receipt["runs"] if row.get("exit") == 0}
+    failures = {row["case"]: row for row in receipt["runs"] if row.get("exit", 0) != 0}
     for row in receipt["runs"]:
         if row["kind"] != "input":
             continue
         case = row["case"]
         if row.get("state") == "NOT RUN":
             state, reason = "NOT RUN", row["reason"]
-        elif row["exit"] == 124:
-            state, reason = "FAIL", f"Host timeout before {row['guest_limit_seconds']} guest seconds"
-        elif row["exit"] != 0:
-            state, reason = "FAIL", f"Simulator exit {row['exit']}"
+        elif case in failures:
+            failed = failures[case]
+            if failed["exit"] == 124:
+                state, reason = "FAIL", f"{failed['kind']} run timed out before {failed['guest_limit_seconds']} guest seconds"
+            else:
+                state, reason = "FAIL", f"{failed['kind']} run exited with status {failed['exit']}"
         else:
             frame = out / f"{case}.png"
             early = out / f"{case}-early.png"

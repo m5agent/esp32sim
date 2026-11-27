@@ -38,7 +38,7 @@ impl I2cDevice for Sht40 {
         let us = match byte {
             0xfd => 8_300,
             0xf6 => 4_500,
-            0xe0 => 1_700,
+            0xe0 => 1_600,
             0x89 => 1_000,
             0x94 => { self.ready_at = u64::MAX; return true; }
             _ => return false,

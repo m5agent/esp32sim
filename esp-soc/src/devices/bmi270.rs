@@ -14,7 +14,7 @@
 //!   (0x2 "init_err" when the file was incomplete). The driver checks exactly that value.
 //! - The feature engine's configuration pages (FEAT_PAGE 0x2F selects a page of 16 bytes at
 //!   0x30-0x3F) are kept as plain memory, which is all `bmi270_init` and the sensor-config calls
-//!   need (they read-modify-write feature words; no feature actually runs).
+//!   need for register configuration. The optional any-motion output uses page 1.
 //! - ACC_CONF 0x40 / ACC_RANGE 0x41 / GYR_CONF 0x42 / GYR_RANGE 0x43 and PWR_CTRL 0x7D
 //!   (aux bit 0, gyr bit 1, acc bit 2, temp bit 3) are kept. Data registers 0x0C-0x11 (accel x,
 //!   y, z) and 0x12-0x17 (gyro x, y, z) are little-endian two's complement in the configured
@@ -41,6 +41,7 @@ const STATUS: usize = 0x03;
 const DATA_AUX: usize = 0x04;
 const DATA_ACC: usize = 0x0c;
 const SENSORTIME: usize = 0x18;
+const INT_STATUS_0: usize = 0x1c;
 const INT_STATUS_1: usize = 0x1d;
 const INTERNAL_STATUS: usize = 0x21;
 const TEMPERATURE: usize = 0x22;
@@ -55,7 +56,10 @@ const AUX_IF_CONF: usize = 0x4c;
 const AUX_RD_ADDR: usize = 0x4d;
 const AUX_WR_ADDR: usize = 0x4e;
 const AUX_WR_DATA: usize = 0x4f;
+const INT1_IO_CTRL: usize = 0x53;
+const INT1_MAP_FEAT: usize = 0x56;
 const INT_MAP_DATA: usize = 0x58;
+const ANY_MOTION: u8 = 0x40;
 const INIT_CTRL: u8 = 0x59;
 const INIT_ADDR_0: usize = 0x5b;
 const INIT_ADDR_1: usize = 0x5c;
@@ -66,6 +70,13 @@ const PWR_CTRL: usize = 0x7d;
 const CMD: u8 = 0x7e;
 
 struct AuxBmm150 { mag: Bmm150 }
+
+#[derive(Default)]
+struct AnyMotion {
+    reference: Option<[f64; 3]>,
+    samples_above_threshold: u16,
+    next_sample: u64,
+}
 
 pub struct Bmi270 {
     regs: [u8; 256],
@@ -78,6 +89,7 @@ pub struct Bmi270 {
     first: bool,
     motion: Arc<ImuMotion>,
     aux: Option<Box<AuxBmm150>>,
+    sampled_motion: Option<AnyMotion>,
     sample: Option<([f64; 3], [f64; 3])>,
     /// Rate of `motion.cycle` (ticks per second of guest time).
     clock_hz: u64,
@@ -91,7 +103,7 @@ pub struct Bmi270 {
 impl Bmi270 {
     pub fn new(motion: Arc<ImuMotion>, clock_hz: u64) -> Self {
         let mut d = Bmi270 { regs: [0; 256], pages: [[0; 16]; 8], config: vec![0; BMI270_CONFIG_SIZE], config_bytes: 0,
-                             ptr: 0, first: true, motion, aux: None, sample: None, clock_hz, resets: 0, any_motion: false, motion_at: None, pulse_end: None };
+                             ptr: 0, first: true, motion, aux: None, sampled_motion: None, sample: None, clock_hz, resets: 0, any_motion: false, motion_at: None, pulse_end: None };
         d.reset();
         d
     }
@@ -99,6 +111,10 @@ impl Bmi270 {
     pub fn with_aux_bmm150(mut self, mag: Bmm150) -> Self {
         self.aux = Some(Box::new(AuxBmm150 { mag }));
         self.regs[AUX_DEV_ID] = 0x20;
+        self
+    }
+    pub fn with_sampled_any_motion(mut self) -> Self {
+        self.sampled_motion = Some(AnyMotion::default());
         self
     }
     /// Enable the Bosch standard-image any-motion feature (bmi270.c page 1, 0x0c).
@@ -162,15 +178,58 @@ impl Bmi270 {
         self.pages = [[0; 16]; 8];
         self.motion_at = None;
         self.pulse_end = None;
+        if let Some(motion) = &mut self.sampled_motion { *motion = AnyMotion::default(); }
         self.config_bytes = 0;
     }
     pub fn initialized(&self) -> bool { self.regs[INTERNAL_STATUS] & 0x0f == 0x01 }
     fn seconds(&self) -> f64 { self.motion.cycle.load(Relaxed) as f64 / self.clock_hz as f64 }
+    fn current_sample(&self) -> ([f64; 3], [f64; 3]) {
+        self.sample.unwrap_or_else(|| {
+            if self.motion.mode.load(Relaxed) != 0 { motion_script_screen(self.seconds()) }
+            else { ([0.0, 0.0, 1.0], [0.0; 3]) }
+        })
+    }
+
+    /// Advance the BST-BMI270-DS000 §4.8.2 any-motion feature and read INT1.
+    pub fn motion_int1(&mut self) -> Option<bool> {
+        let active_high = self.regs[INT1_IO_CTRL] & 2 != 0;
+        let now = self.motion.cycle.load(Relaxed);
+        let [lo, hi, threshold_lo, threshold_hi] = self.pages[1][12..16].try_into().unwrap();
+        let enabled = threshold_hi & 0x80 != 0 && hi & 0xe0 != 0 && self.regs[PWR_CTRL] & 4 != 0;
+        let motion = self.sampled_motion.as_mut()?;
+        if !enabled {
+            *motion = AnyMotion::default();
+            self.regs[INT_STATUS_0] &= !ANY_MOTION;
+        } else if now >= motion.next_sample {
+            motion.next_sample = now.saturating_add(self.clock_hz / 50);
+            let accel = self.current_sample().0;
+            let motion = self.sampled_motion.as_mut()?;
+            let threshold = f64::from(u16::from_le_bytes([threshold_lo, threshold_hi]) & 0x7ff) / 2048.0;
+            let duration = (u16::from_le_bytes([lo, hi]) & 0x1fff).max(1);
+            let reference = *motion.reference.get_or_insert(accel);
+            let exceeds = (0..3).any(|axis| hi & (0x20 << axis) != 0 && (accel[axis] - reference[axis]).abs() > threshold);
+            if !exceeds {
+                motion.samples_above_threshold = 0;
+                self.regs[INT_STATUS_0] &= !ANY_MOTION;
+            } else {
+                motion.samples_above_threshold = motion.samples_above_threshold.saturating_add(1);
+                if motion.samples_above_threshold >= duration {
+                    self.regs[INT_STATUS_0] |= ANY_MOTION;
+                    motion.reference = Some(accel);
+                }
+            }
+        }
+        if self.regs[INT1_IO_CTRL] & 8 != 0 {
+            let detected = self.regs[INT_STATUS_0] & self.regs[INT1_MAP_FEAT] & ANY_MOTION != 0;
+            Some(detected == active_high)
+        } else {
+            None
+        }
+    }
+
     /// Sample the outputs, sensortime and status for a read.
     fn latch(&mut self) {
-        let (accel, gyro) = self.sample.unwrap_or_else(|| {
-            if self.motion.mode.load(Relaxed) != 0 { motion_script_screen(self.seconds()) } else { ([0.0, 0.0, 1.0], [0.0; 3]) }
-        });
+        let (accel, gyro) = self.current_sample();
         let pwr = self.regs[PWR_CTRL];
         // ACC_RANGE bits 1:0: +-2/4/8/16 g -> 16384 >> range LSB/g; GYR_RANGE bits 2:0:
         // +-2000/1000/500/250/125 dps -> 16.4 << range LSB/dps (datasheet 5.2, ACC_RANGE/GYR_RANGE).
@@ -254,7 +313,7 @@ impl Bmi270 {
                     // The whole file must be there for the feature engine to start.
                     let ok = self.config_bytes >= BMI270_CONFIG_SIZE;
                     self.regs[INTERNAL_STATUS] = if ok { 0x01 } else { 0x02 };
-                    if ok && self.any_motion {
+                    if ok && (self.any_motion || self.sampled_motion.is_some()) {
                         // Standard feature defaults: XYZ enabled, 5 samples at 50 Hz,
                         // threshold 0xaa/2048 g. Feature enable remains clear.
                         self.pages[1][12..].copy_from_slice(&[5, 0xe0, 0xaa, 0]);

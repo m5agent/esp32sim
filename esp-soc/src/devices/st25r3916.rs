@@ -37,6 +37,7 @@ pub struct St25r3916 {
     halted: bool,
     selected: bool,
     type2: [u8; 80],
+    type2_capability_container: bool,
     passive: [u8; 15],
     target_status: u8,
     external_field: bool,
@@ -47,10 +48,15 @@ impl Default for St25r3916 {
     fn default() -> Self {
         Self { registers: [[0; 64]; 2], fifo: VecDeque::new(), phase: Phase::Header,
                uid: Vec::new(), tag_present: false, classic: None, pending: None, fifo_tail_bits: 0, halted: false, selected: false, type2: [0; 80],
+               type2_capability_container: false,
                passive: [0; 15], target_status: 0, external_field: false, target_reply: None, uid_reads: 0 }
     }
 }
 impl St25r3916 {
+    pub fn with_type2_capability_container() -> Self {
+        Self { type2_capability_container: true, ..Self::default() }
+    }
+
     pub fn reset(&mut self) {
         self.registers = [[0; 64]; 2];
         self.fifo.clear();
@@ -74,6 +80,9 @@ impl St25r3916 {
             if let &[a, b, c, d, e, f, g] = uid.as_slice() {
                 self.type2[..12].copy_from_slice(&[a, b, c, 0x88 ^ a ^ b ^ c, d, e, f, g,
                                                    d ^ e ^ f ^ g, 0x48, 0, 0]);
+                if self.type2_capability_container {
+                    self.type2[12..17].copy_from_slice(&[0xe1, 0x10, 0x06, 0, 0xfe]);
+                }
             }
             self.uid = uid;
         }

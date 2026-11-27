@@ -1147,7 +1147,13 @@ impl SocBus {
             for pin in esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux).output_pins(RMT_SIG_OUT0 + ch as u32) {
                 let old = if self.debug.has("leds") { self.board.leds().map(|(_, updates)| updates) } else { None };
                 self.board.rmt_frame(pin, &bits);
-                if let Some((tick_hz, symbols)) = raw { self.board.rmt_symbols(pin, tick_hz, symbols); }
+                if let Some((tick_hz, symbols)) = raw {
+                    self.board.rmt_symbols(pin, tick_hz, symbols);
+                    if self.debug.has("rmt-symbols") {
+                        eprintln!("[rmt-tx] GPIO{pin} cycle={} hz={tick_hz} carrier={:08x} symbols={symbols:08x?}",
+                            self.cycles, channel.carrier);
+                    }
+                }
                 if let Some((pixels, _)) = old.and_then(|old| self.board.leds().filter(|(_, updates)| *updates != old)) {
                     let rgb: Vec<_> = pixels.iter().map(|&[r, g, b]| format!("{r:02x}{g:02x}{b:02x}")).collect();
                     eprintln!("[leds] GPIO{pin} {}", rgb.join(","));
