@@ -181,6 +181,14 @@ impl Bmi270 {
         if let Some(motion) = &mut self.sampled_motion { *motion = AnyMotion::default(); }
         self.config_bytes = 0;
     }
+    pub fn service_state(&self) -> crate::json::Json {
+        use crate::json::Json;
+        let (accel, gyro) = self.current_sample();
+        let vec3 = |sample: [f64; 3]| Json::Arr(sample.into_iter().map(Json::Float).collect());
+        Json::object([("initialized", Json::Bool(self.initialized())),
+                      ("accel_g", vec3(accel)), ("gyro_dps", vec3(gyro))])
+    }
+
     pub fn initialized(&self) -> bool { self.regs[INTERNAL_STATUS] & 0x0f == 0x01 }
     fn seconds(&self) -> f64 { self.motion.cycle.load(Relaxed) as f64 / self.clock_hz as f64 }
     fn current_sample(&self) -> ([f64; 3], [f64; 3]) {

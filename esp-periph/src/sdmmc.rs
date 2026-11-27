@@ -16,7 +16,7 @@
 //! and the auto-stop's ACD come when the bits are through at the slot's card clock and width,
 //! from `advance`, which the chip calls at `next_event_ns`.
 pub mod card;
-pub use card::{FileStore, MemStore, SdCard, SdCardConfig, SdStore, SpiSdCard};
+pub use card::{FileStore, MemStore, SdCard, SdCardConfig, SdMediaState, SdStore, SpiSdCard};
 use crate::device::{Device, WriteEffect};
 use crate::regram::RegRam;
 use emu_core::Fault;
@@ -55,6 +55,9 @@ pub enum SdDataError {
 /// protocol's terms and knows nothing about the host's registers or DMA. `now` is emulated time
 /// in nanoseconds.
 pub trait SdDevice {
+    fn present(&self) -> bool { true }
+    fn media_state(&self) -> Option<SdMediaState> { None }
+    fn set_media_present(&mut self, _present: bool) -> bool { false }
     /// A command on CMD and the device's answer.
     fn command(&mut self, now: u64, cmd: u8, arg: u32) -> Result<SdResponse, SdCmdError>;
     /// The next `buf.len()` bytes of the data phase the last command started (card to host),
@@ -331,6 +334,10 @@ impl Sdmmc {
 
     /// Attach a device; returns its index for `route`.
     pub fn attach(&mut self, dev: Box<dyn SdDevice>) -> usize { self.devices.push(dev); self.devices.len() - 1 }
+    pub fn media_state(&self) -> Option<SdMediaState> { self.devices.iter().find_map(|device| device.media_state()) }
+    pub fn set_media_present(&mut self, present: bool) -> bool {
+        self.devices.iter_mut().any(|device| device.set_media_present(present))
+    }
     /// `--debug sdmmc` is on.
     pub fn logging(&self) -> bool { self.log }
 
@@ -353,7 +360,7 @@ impl Sdmmc {
 
     fn device(&mut self, slot: usize) -> Option<&mut Box<dyn SdDevice>> {
         let i = (*self.route.get(slot)?)?;
-        self.devices.get_mut(i)
+        self.devices.get_mut(i).filter(|device| device.present())
     }
 
     /// Carry out what the last register write started.

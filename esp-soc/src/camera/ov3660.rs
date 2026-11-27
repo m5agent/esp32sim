@@ -23,6 +23,7 @@ impl Ov3660 {
     fn size(&self) -> (u32, u32) { (self.word(0x3808), self.word(0x380a)) }
     pub fn set_camera_picture(&mut self, p: Picture) -> Result<(), &'static str> { self.source.set_camera_picture(p) }
     pub fn set_camera_jpeg(&mut self, jpeg: Jpeg) -> Result<(), JpegError> { self.source.set_camera_jpeg(jpeg, self.size()) }
+    pub fn set_test_pattern(&mut self, seed: Option<u32>) { self.source.set_test_pattern(seed); }
     pub fn camera_preview(&self, w: u32, h: u32) -> Option<Vec<u8>> { self.source.camera_preview(w, h) }
     pub fn jpeg_enabled(&self) -> bool { self.reg(0x3821) & 0x20 != 0 }
 

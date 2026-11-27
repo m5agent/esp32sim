@@ -229,7 +229,7 @@ const lcdRaw = document.createElement('canvas');
 let lcdRotation = 0;
 // what the panel header says once a frame has arrived, and the rotation that reads upright for a
 // board's usual firmware (the T-Display is used landscape, MADCTL MV|MX: its top is the glass's right edge)
-const PANEL_TEXT = { cyd: 'ILI9341 320×240 over SPI, XPT2046 touch — click the screen to tap', 'waveshare-c6-lcd147': 'ST7789 172×320 over SPI2 + GDMA', 'ttgo-tdisplay': 'ST7789 135×240 over VSPI', 'ulanzi-tc001': '256 WS2812, 32×8, on GPIO 32 via RMT', stopwatch: 'CO5300 468×466 QSPI · CST820 touch' };
+const PANEL_TEXT = { cyd: 'ILI9341 320×240 over SPI, XPT2046 touch — click the screen to tap', 'waveshare-c6-lcd147': 'ST7789 172×320 over SPI2 + GDMA', 'ttgo-tdisplay': 'ST7789 135×240 over VSPI', 'ulanzi-tc001': '256 WS2812, 32×8, on GPIO 32 via RMT', stopwatch: 'CO5300 466×466 QSPI · CST820 touch' };
 const PANEL_ROTATE = { 'ttgo-tdisplay': 270 };
 // One LED is one pixel of the 32×8 matrix: the canvas itself is drawn 16× (512×128), since the
 // workbench shows a canvas at its own size and CSS scaling alone would leave the clock 32×8

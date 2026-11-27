@@ -2,9 +2,20 @@
 //! ESP-IDF v5.5.4 components/soc/esp32/include/soc/soc.h:170-199 gives memory bounds.
 //! Flash MMU behavior and the ROM integrity payload mapping are inferred from ROM execution.
 use crate::periph::{Peripherals, PERIPH_BASE, PERIPH_END};
-use esp_periph::{Device, Rng};
+use esp_periph::{Device, Rng, i2c::I2cDevice};
+use esp_soc::devices::tmp105::Tmp105;
+use std::{cell::RefCell, rc::Rc};
 use esp_periph::gdma::{DescriptorWalk, DmaDescriptorFault};
 use xtensa_lx7::bus::{Bus, Fault};
+
+struct GroveTmp105 { pins: (u8, u8), device: Rc<RefCell<Tmp105>> }
+
+impl I2cDevice for GroveTmp105 {
+    fn pins(&self) -> Option<(u8, u8)> { Some(self.pins) }
+    fn start(&mut self, read: bool) -> bool { self.device.borrow_mut().start(read) }
+    fn write(&mut self, byte: u8) -> bool { self.device.borrow_mut().write(byte) }
+    fn read(&mut self) -> u8 { self.device.borrow_mut().read() }
+}
 
 pub const DRAM_LOW: u32 = 0x3ffa_e000;
 pub const DRAM_HIGH: u32 = 0x4000_0000;
@@ -431,6 +442,20 @@ impl SocBus {
         }
         Some((w, h, frame))
     }
+    /// Attach the same external TMP105 to either controller routed to Grove A.
+    pub fn attach_grove_tmp105(&mut self) -> bool {
+        let pins = match self.board.name() {
+            "m5stack-atom-echo" => (26, 32),
+            "m5stack-basic-v27" => (21, 22),
+            _ => return false,
+        };
+        let device = Rc::new(RefCell::new(Tmp105::new(0)));
+        for controller in &mut self.periph.i2c {
+            controller.attach(Tmp105::ADDRESS, Box::new(GroveTmp105 { pins, device: device.clone() }));
+        }
+        true
+    }
+
     pub fn attach_board_devices(&mut self) {
         self.irq_dirty = true;
         if let Some(atom) = crate::board::atom::AtomKind::from_name(self.board.name()) {

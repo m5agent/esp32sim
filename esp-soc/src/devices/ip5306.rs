@@ -18,6 +18,8 @@ impl Default for Ip5306 {
     fn default() -> Self {
         let mut regs = [0; 0x25];
         regs[0] = 0xbe;
+        regs[1] = 0x05;
+        regs[0x20..=0x23].copy_from_slice(&[0x02, 0x54, 0x01, 0x20]);
         Self { regs, pointer: None, selecting: true, gauge: 0x0f, charging: false, full: false, supply: None }
     }
 }
@@ -30,7 +32,10 @@ impl Ip5306 {
     }
 
     pub fn supply(&mut self, millivolts: u16, usb: bool) {
-        let full = millivolts >= 4200 + u16::from((self.regs[0x22] >> 2) & 3) * 100;
+        let charge = self.regs[0x22];
+        let target = [4200, 4300, 4350, 4400][usize::from((charge >> 2) & 3)]
+            + 14 * u16::from(charge & 3);
+        let full = millivolts >= target;
         let bars = match millivolts { 4000.. => 4, 3800.. => 3, 3650.. => 2, 3450.. => 1, _ => 0 };
         self.set_battery(bars, usb && millivolts != 0 && !full, full);
         self.supply = Some((millivolts, usb));
@@ -59,7 +64,20 @@ impl I2cDevice for Ip5306 {
             self.pointer = Some(byte);
             self.selecting = false;
         } else if let Some(reg @ (0..=2 | 6 | 0x20..=0x24)) = self.pointer {
-            self.regs[usize::from(reg)] = byte;
+            // Reserved fields keep their reset values through guest writes.
+            let mask = match reg {
+                0 => 0x37,
+                1 => 0xe5,
+                2 => 0x1c,
+                0x20 => 0x03,
+                0x21 => 0xdc,
+                0x22 => 0x0f,
+                0x23 => 0x20,
+                0x24 => 0x1f,
+                _ => 0xff,
+            };
+            let value = &mut self.regs[usize::from(reg)];
+            *value = (*value & !mask) | (byte & mask);
             if let Some((mv, usb)) = self.supply.filter(|_| reg == 0x22) {
                 self.supply(mv, usb);
             }
@@ -99,6 +117,21 @@ mod tests {
         dev.start(false); dev.write(0); dev.write(0);
         assert!(!dev.output_on());
         assert_eq!(read_at(&mut dev, 0x72), 4);
+    }
+
+    #[test]
+    fn basic_firmware_writes_preserve_reserved_bits_and_no_cell_is_not_charging() {
+        let mut dev = Ip5306::default();
+        assert_eq!(read_at(&mut dev, 0x22), 1);
+        for (reg, write, expected) in [(0, 0x31, 0xb9), (0x24, 0xc1, 1), (0x22, 9, 9)] {
+            dev.start(false);
+            dev.write(reg);
+            dev.write(write);
+            assert_eq!(read_at(&mut dev, reg), expected);
+        }
+        assert_eq!(read_at(&mut dev, 0x70), 0);
+        assert_eq!(read_at(&mut dev, 0x71), 0);
+        assert_eq!(read_at(&mut dev, 0x78), 0xff);
     }
 
     #[test]

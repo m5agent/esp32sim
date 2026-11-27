@@ -177,8 +177,27 @@ impl BoardModel for Tab5 {
         Some(I2sCodecs { port: 0, mic_port: 0, bck: 27, ws: 29, mck: Some(30), dout: 26, din: 28,
                         speaker_gain: if enabled { 1.0 } else { 0.0 }, mic_lanes: self.mic.borrow().lanes() })
     }
+    fn service_state(&self) -> Vec<(&'static str, esp_soc::json::Json)> {
+        use esp_soc::json::Json;
+        let rtc = self.rtc.borrow();
+        vec![
+            ("rtc", Json::object([("registers", Json::register_bytes(rtc.registers().iter().copied())), ("irq", Json::Bool(rtc.irq()))])),
+            ("imu", self.imu.borrow().service_state()),
+            ("panel/controller", Json::object([
+                ("scans", Json::counter(self.scans)), ("reads", Json::counter(self.reads)),
+                ("sleeping", Json::Bool(self.sleeping)), ("on", Json::Bool(self.on)),
+            ])),
+        ]
+    }
     fn has_spi_sd_slot(&self) -> bool { true }
     fn uses_spi_pins(&self) -> bool { self.sd_spi.is_some() }
+    fn reset_spi_sd_observation(&mut self) {
+        if let Some(card) = self.sd_spi.as_mut() { card.reset_observation(); }
+    }
+    fn spi_sd_state(&self) -> Option<esp_periph::sdmmc::SdMediaState> { self.sd_spi.as_ref().map(esp_periph::sdmmc::SpiSdCard::media_state) }
+    fn set_spi_sd_present(&mut self, _cycle: VirtualCycle, present: bool) -> bool {
+        self.sd_spi.as_mut().is_some_and(|card| card.set_present(present))
+    }
     fn insert_spi_sd(&mut self, card: esp_periph::sdmmc::SdCard) {
         self.sd_spi = Some(esp_periph::sdmmc::SpiSdCard::new(card));
     }

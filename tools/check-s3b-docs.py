@@ -27,7 +27,7 @@ CASES = {
                     mic quickstart-bargraph rtc-1 rtc-2 speaker touch-1 touch-2 vibration""",
 }
 # The CLI enlarges panels narrower than 200 pixels for its PNG output.
-SIZE = {"cardputer": (240, 135), "dial": (240, 240), "sticks3": (405, 720), "stopwatch": (468, 466)}
+SIZE = {"cardputer": (240, 135), "dial": (240, 240), "sticks3": (405, 720), "stopwatch": (466, 466)}
 FAULT = re.compile(r"Guru Meditation|Interrupt wdt timeout|assert failed|Backtrace:|stack smashing", re.I)
 
 

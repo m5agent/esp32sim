@@ -94,6 +94,13 @@ pub trait BoardModel {
     /// Board-wired SPI card socket, if present. Other boards use the SoC's SDMMC slots.
     fn has_spi_sd_slot(&self) -> bool { false }
     fn insert_spi_sd(&mut self, _card: esp_periph::sdmmc::SdCard) {}
+    /// Host observations of modeled devices, with canonical paths relative to /board.
+    fn service_state(&self) -> Vec<(&'static str, crate::json::Json)> { Vec::new() }
+    /// Enable a deterministic advancing camera fixture on boards that have one.
+    fn set_camera_auto_increment(&mut self, _enabled: bool) -> bool { false }
+    fn reset_spi_sd_observation(&mut self) {}
+    fn spi_sd_state(&self) -> Option<esp_periph::sdmmc::SdMediaState> { None }
+    fn set_spi_sd_present(&mut self, _cycle: VirtualCycle, _present: bool) -> bool { false }
     /// Opt in to UART route decoding and receive polling. Cached by `attach_board_devices`.
     fn uses_uart_pins(&self) -> bool { false }
     /// A completed UART byte, with the routing and baud at the FIFO write. Console output is
