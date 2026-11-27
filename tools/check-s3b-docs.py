@@ -246,9 +246,13 @@ def verify(out, board, case):
 def verify_stock(out, board):
     home, *_ = capture(out, board, "stock-home")
     active, *_ = capture(out, board, "stock-input")
-    require(changed(home, active) > 50, "stock UI did not respond to control input")
     _, serial, report = capture(out, board, "stock-repl", screen=False)
     require(re.search(r"(?<!\d)7303(?!\d)", serial + report), "no USB REPL result")
+    if board == "dial":
+        require(re.findall(r"^DIAL BUTTON ([01])\s*$", serial, re.M) == ["1", "0", "1"],
+                "stock guest did not read the rotary button's idle, down and released levels")
+        return "home frame and USB REPL arithmetic, with the rotary button read by the stock guest"
+    require(changed(home, active) > 50, "stock UI did not respond to control input")
     return "home frame, input-driven state change, and USB REPL arithmetic result"
 
 

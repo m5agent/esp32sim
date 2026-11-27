@@ -165,10 +165,19 @@ if [[ -n ${S3B_STOCK_IMAGE:-} && ( -z ${S3B_CASES:-} || " $S3B_CASES " == *" sto
         stopwatch) printf '%s\n' '5.0 touch 234 440 1' '5.4 touch 234 440 0' '6.0 press a 150' >"$out/stock.txt" ;;
     esac
     printf 'attach\ncdc 3000\ncdc 3000 \003\ncdc 3000 print(10+7293)\n' >"$out/stock-usb.txt"
+    repl_flags=()
+    if [[ "$board" == dial ]]; then
+        printf '%s\n' '10.0 press button 1500' >"$out/stock-repl-input.txt"
+        for n in 1 2 3; do
+            printf '%s\n' 'cdc 1000 print("DIAL BUTTON", __import__("machine").Pin(42).value())' >>"$out/stock-usb.txt"
+        done
+        repl_flags=(--script "$out/stock-repl-input.txt")
+        shasum -a 256 "$out/stock-repl-input.txt" >>"$out/inputs.sha256"
+    fi
     shasum -a 256 "$out/stock.txt" "$out/stock-usb.txt" >>"$out/inputs.sha256"
     run stock-home "$S3B_STOCK_IMAGE" 7
     run stock-input "$S3B_STOCK_IMAGE" 7 --script "$out/stock.txt"
-    run stock-repl "$S3B_STOCK_IMAGE" 18 --usb-host "$out/stock-usb.txt"
+    run stock-repl "$S3B_STOCK_IMAGE" 18 --usb-host "$out/stock-usb.txt" ${repl_flags[@]+"${repl_flags[@]}"}
 fi
 result=0
 python3 "$(dirname "$0")/check-s3b-docs.py" "$board" "$out" >"$out/verdicts.md" || result=$?
