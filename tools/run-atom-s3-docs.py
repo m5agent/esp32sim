@@ -113,8 +113,15 @@ def main():
         {"source": args.source, "board": args.board, "variant": args.variant,
          "selected_cases": list(selected), "binary_sha256": sha(args.binary), "rom_sha256": sha(args.rom)}, indent=2) + "\n")
     stock = args.out / "usb-repl.txt"
-    poll_button = ('import time\nfor _ in range(48):\n'
-                   " M5.update(); print('ATOM_BTN', int(M5.BtnA.isPressed())); time.sleep_ms(100)")
+    initialize = "import time"
+    sample = "M5.update(); print('ATOM_BTN', int(M5.BtnA.isPressed()))"
+    if args.board in {"atoms3r-cam", "atoms3r-m12"}:
+        # The schematic connects USER_BUT to G41. These firmware builds may
+        # leave the generic M5Unified BtnA object disabled.
+        initialize += "; from machine import Pin; button=Pin(41,Pin.IN)"
+        sample = "print('ATOM_BTN', 1-button.value())"
+    poll_button = f"{initialize}\nfor _ in range(48):\n {sample}; time.sleep_ms(100)"
+
     stock.write_text(
         "attach 8000\ncdc 4500\ncdc 100 \x03\n"
         'cdc 1000 import M5; print("ATOM_BOARD", M5.getBoard())\n'
@@ -137,7 +144,7 @@ def main():
                     port = s.getsockname()[1]
                 opts = ("--cam-image", str(dst), "--wifi", "ssid=yourssid,psk=yourpasswd",
                         "--hostfwd", f"tcp:127.0.0.1:{port}-:80", "--realtime", "--pwm", "21")
-                run(args, f"{case}-{suffix}", fw, 14, opts, stream_port=port)
+                run(args, f"{case}-{suffix}", fw, 8, opts, stream_port=port)
         elif case in ("imu", "mic"):
             for suffix in IMU:
                 script = IMU[suffix] if case == "imu" else "5 press btn 180\n"

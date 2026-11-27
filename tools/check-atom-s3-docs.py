@@ -2,6 +2,7 @@
 """Check artifacts from run-atom-s3-docs.py. Requires ffmpeg for image decoding."""
 import argparse
 import ast
+from hashlib import sha256
 from array import array
 import json
 from pathlib import Path
@@ -148,23 +149,32 @@ def report(directory):
             found = tone(samples, rate, (4000, 7000)) if rate else set()
             rows.append(result(case, found == {4000, 7000}, f"I2S PCM has expected tones {sorted(found)}"))
         elif case == "quickstart-camera":
-            means, counts = [], []
+            means, counts, sizes, digests = [], [], [], []
             for variant in ("still", "a", "b"):
                 capture = directory / f"{case}-{variant}.http"
                 data = capture.read_bytes() if capture.is_file() else b""
                 images = re.findall(b"\xff\xd8.+?\xff\xd9", data, re.S)
                 counts.append(len(images))
+                digests.append([sha256(jpeg).hexdigest() for jpeg in images[:2]])
                 if not images:
                     means.append(b"")
                     continue
                 image = capture.with_suffix(".jpg")
                 image.write_bytes(images[0])
                 means.append(rgb(image, 1))
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_entries", "stream=width,height",
+                     "-of", "csv=p=0:s=x", str(image)], capture_output=True, text=True)
+                sizes.append(probe.stdout.strip())
             black, red, green = means
             ok = min(counts) >= 2 and len(black) == len(red) == len(green) == 3
             if ok:
                 ok = max(black) < 45 and red[0] > max(red[1:]) + 40 and green[1] > max(green[0], green[2]) + 40
-            rows.append(result(case, ok, f"guest HTTP JPEG counts {counts}, RGB means {[list(v) for v in means]}"))
+            geometry = "1600x1200" if board == "atoms3r-m12" else "320x240"
+            ok = ok and sizes == [geometry] * 3
+            rows.append(result(case, ok,
+                               f"guest HTTP JPEG counts {counts}, sizes {sizes}, RGB means {[list(v) for v in means]}"))
+            rows[-1]["frame_sha256"] = digests
         elif case == "stock":
             id_ok = re.search(rf"^ATOM_BOARD {BOARD_ID[board]}\s*$", serial, re.M)
             states = re.findall(r"^ATOM_BTN ([01])\s*$", serial, re.M)
