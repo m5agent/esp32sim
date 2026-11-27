@@ -253,7 +253,9 @@ impl<S: Soc> Machine<S> {
                     true
                 } else { false }
             }
-            ("pwrkey" | "battery" | "imu" | "als" | "key", _) => self.bus.board_command(&op, &args),
+            ("usb-report", bytes) if matches!(bytes.len(), 3 | 8) => self.bus.board_command(&op, &args),
+            ("pwrkey" | "battery" | "imu" | "als" | "key" | "key-edge" |
+             "contact" | "usb-hid" | "usb-unplug", _) => self.bus.board_command(&op, &args),
             _ => false,
         };
         *self.bus.irq_dirty() = true;

@@ -548,6 +548,11 @@ impl<R: crate::Revision> CoSim<R> {
     }
 
     fn collect_p4_console(&mut self) {
+        // Forward each physical console through the service before draining
+        // its buffers for the CLI's combined output.
+        if self.p4.web.as_ref().is_some_and(esp_soc::web::WebServer::is_service) {
+            self.p4.drain_console();
+        }
         for (bit, backlog) in [(1, std::mem::take(&mut self.p4.console.usb)), (2, std::mem::take(&mut self.p4.console.uart0))] {
             if self.cfg.p4_console & bit != 0 { self.p4_console.extend_from_slice(&backlog); }
         }
