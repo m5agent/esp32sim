@@ -14,7 +14,7 @@
 //!   AUX bus), 0x51 BM8563, 0x23 LTR553, 0x36 AW88298, 0x40 ES7210, 0x21 GC0308 (SCCB).
 //! - Touch INT -> AW9523 P1_2 -> AW9523 INTN -> GPIO 21 (active low). M5GFX only reads the touch
 //!   controller while GPIO 21 is low and clears INTN by reading AW9523 input registers 0x00/0x01.
-use super::soft_i2c::{SoftI2c, SoftOp};
+use super::{soft_i2c::{SoftI2c, SoftOp}, stackchan::{StackChan, IR_RX, IR_TX}};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -24,6 +24,7 @@ use esp_periph::sdmmc::{SdCard, SpiSdCard};
 use esp_soc::board::{BoardEdge, BoardModel, I2sCodecs, SpiPins, VirtualCycle};
 use esp_soc::camera::Gc0308;
 use esp_soc::picture::Picture;
+use esp_soc::devices::aw9523::Aw9523;
 use esp_soc::devices::{aw88298::Aw88298, es7210::Es7210};
 use esp_soc::devices::{Axp2101, Bm8563, Bmi270, Bmm150, DcsPanel, Ft5x06, Ft5x06Points, Ltr553, AXP2101_ADDRESS, BM8563_ADDRESS, BMI270_ADDRESS, FT5X06_ADDRESS, LTR553_ADDRESS};
 use esp_soc::devices::imu_motion::ImuMotion;
@@ -45,81 +46,9 @@ pub const CORES3_LCD_H: usize = 240;
 const LCD_RDDID: u8 = 0x04;
 const LCD_ID: [u8; 3] = [0xe3, 0, 0];
 
-/// AW9523B 16-bit IO expander, register map from the AW9523B datasheet (V1.1, section 9):
-/// 0x00/0x01 input P0/P1, 0x02/0x03 output, 0x04/0x05 direction (1 = input), 0x06/0x07 interrupt
-/// enable (0 = enabled), 0x10 ID (0x23), 0x11 global control, 0x12/0x13 LED mode, 0x7F soft reset.
-/// INTN is low while an enabled input differs from the value last read from its input register.
-pub struct Aw9523 {
-    pub regs: [u8; 256],
-    /// levels driven onto pins configured as inputs, by the board (bit 8+n = P1_n)
-    pub external: u16,
-    /// input values the firmware last read (reading 0x00/0x01 latches a port)
-    pub latched: u16,
-    ptr: u8,
-    first: bool,
-}
-
-impl Default for Aw9523 { fn default() -> Self { Self::new() } }
-
-impl Aw9523 {
-    pub const ADDRESS: u8 = 0x58;
-    const P0_TF_SW: u16 = 1 << 4;
-    pub const P1_LCD_RST: u16 = 1 << 9;
-    pub const P1_TOUCH_INT: u16 = 1 << 10;
-
-    pub fn new() -> Self {
-        let mut a = Aw9523 { regs: [0; 256], external: 0xffff, latched: 0, ptr: 0, first: true };
-        a.reset();
-        a
-    }
-    fn reset(&mut self) {
-        self.regs = [0; 256];
-        self.regs[0x04] = 0xff;
-        self.regs[0x05] = 0xff;
-        self.regs[0x10] = 0x23;
-        self.regs[0x12] = 0xff;
-        self.regs[0x13] = 0xff;
-        self.latched = self.inputs();
-    }
-    fn word(&self, lo: usize) -> u16 { u16::from_le_bytes([self.regs[lo], self.regs[lo + 1]]) }
-    /// Output latch (`0x02/0x03`).
-    pub fn outputs(&self) -> u16 { self.word(0x02) }
-    /// Pin levels: driven outputs, board-driven inputs.
-    pub fn inputs(&self) -> u16 {
-        let dir = self.word(0x04);
-        (self.outputs() & !dir) | (self.external & dir)
-    }
-    /// INTN asserted (low).
-    pub fn intn_low(&self) -> bool {
-        let enabled = !self.word(0x06) & self.word(0x04);
-        (self.inputs() ^ self.latched) & enabled != 0
-    }
-    /// Whether the LCD reset line (P1_1, active low) is released.
-    pub fn lcd_reset_released(&self) -> bool { self.outputs() & Self::P1_LCD_RST != 0 || self.word(0x04) & Self::P1_LCD_RST != 0 }
-}
-
-impl I2cDevice for Aw9523 {
-    fn start(&mut self, read: bool) -> bool { if !read { self.first = true; } true }
-    fn write(&mut self, b: u8) -> bool {
-        if self.first { self.ptr = b; self.first = false; return true; }
-        match self.ptr {
-            0x00 | 0x01 | 0x10 => {}
-            0x7f => if b == 0x00 { self.reset(); },
-            p => self.regs[p as usize] = b,
-        }
-        self.ptr = self.ptr.wrapping_add(1);
-        true
-    }
-    fn read(&mut self) -> u8 {
-        let v = match self.ptr {
-            0x00 => { let i = self.inputs(); self.latched = (self.latched & 0xff00) | (i & 0x00ff); i as u8 }
-            0x01 => { let i = self.inputs(); self.latched = (self.latched & 0x00ff) | (i & 0xff00); (i >> 8) as u8 }
-            p => self.regs[p as usize],
-        };
-        self.ptr = self.ptr.wrapping_add(1);
-        v
-    }
-}
+const AW_TF_SW: u16 = 1 << 4;
+const AW_LCD_RST: u16 = 1 << 9;
+const AW_TOUCH_INT: u16 = 1 << 10;
 
 /// Everything on the internal bus plus the panel, behind one lock so that the expander's
 /// LCD reset and touch interrupt act on the devices they are wired to.
@@ -146,17 +75,17 @@ pub struct Cores3Hw {
 impl Cores3Hw {
     fn sync(&mut self) {
         // CoreS3 K128 schematic v1.0: AW_RST is driven by AW9523 P0_2.
-        self.amp.set_reset_released(self.aw9523.outputs() & !self.aw9523.word(0x04) & (1 << 2) != 0);
+        self.amp.set_reset_released(self.aw9523.outputs() & !self.aw9523.directions() & (1 << 2) != 0);
         let backlight = self.pmic.backlight_on();
         if backlight != self.backlight { self.panel_version += 1; self.backlight = backlight; }
-        let in_reset = !self.aw9523.lcd_reset_released();
+        let in_reset = ((self.aw9523.outputs() | self.aw9523.directions()) & AW_LCD_RST) == 0;
         if in_reset && !self.lcd_in_reset {
             self.panel.reset(); self.panel_version += 1; self.lcd_id_offset = None;
         }
         self.lcd_in_reset = in_reset;
         let touched = self.points.lock().expect("CoreS3 touch mutex poisoned").iter().any(Option::is_some);
         let ext = self.aw9523.external;
-        self.aw9523.external = if touched { ext & !Aw9523::P1_TOUCH_INT } else { ext | Aw9523::P1_TOUCH_INT };
+        self.aw9523.external = if touched { ext & !AW_TOUCH_INT } else { ext | AW_TOUCH_INT };
     }
     // Sch_M5_CoreS3_v1.0 sheets 1 and 5 connect ALDO4 to VDD_3V3_SD.
     // M5Unified 0.3.0 Power_Class.inl enables ALDO4 (0x90 bit 3) and sets it to 3.3 V
@@ -229,6 +158,7 @@ pub struct Cores3 {
     edges: Vec<BoardEdge>,
     pub gpio_events: u64,
     pub spi_bytes: u64,
+    stackchan: Option<StackChan>,
 }
 
 impl Default for Cores3 { fn default() -> Self { Self::new() } }
@@ -247,7 +177,15 @@ impl Cores3 {
             lcd_in_reset: true, lcd_id_offset: None, panel_version: 0, sd: None,
         };
         Cores3 { hw: Rc::new(RefCell::new(hw)), soft: SoftI2c::idle(), sda_release: false, imu, lcd_cs_low: false, sd_cs_low: false, cycle: 0, int_level: true, powered: true,
-                 edges: Vec::new(), gpio_events: 0, spi_bytes: 0 }
+                 edges: Vec::new(), gpio_events: 0, spi_bytes: 0, stackchan: None }
+    }
+
+    pub fn stackchan() -> Self {
+        let mut board = Self::new();
+        let base = StackChan::new();
+        board.hw.borrow_mut().others.extend(base.ports());
+        board.stackchan = Some(base);
+        board
     }
 
     fn addresses(&self) -> Vec<u8> {
@@ -302,7 +240,23 @@ impl Cores3 {
 }
 
 impl BoardModel for Cores3 {
-    fn name(&self) -> &'static str { "m5stack-cores3" }
+    fn name(&self) -> &'static str {
+        if self.stackchan.is_some() { "m5stack-stackchan" } else { "m5stack-cores3" }
+    }
+    fn uses_uart_pins(&self) -> bool { self.stackchan.is_some() }
+    fn uart_tx(&mut self, cycle: u64, route: esp_soc::uart::UartRoute, byte: u8) {
+        if let Some(base) = &mut self.stackchan { base.uart_tx(cycle, route, byte); }
+    }
+    fn uart_rx(&mut self, cycle: u64) -> Vec<esp_soc::uart::UartInput> {
+        self.stackchan.as_mut().map_or_else(Vec::new, |base| base.uart_rx(cycle))
+    }
+    fn observes_ledc(&self) -> bool { self.stackchan.is_some() }
+    fn ledc_output_at(&mut self, cycle: u64, pwm: &dyn Fn(u8) -> Option<(f64, u32)>) {
+        if let Some(level) = self.stackchan.as_mut().and_then(|base| base.pwm_ir(cycle, pwm(IR_TX))) {
+            self.edges.push(BoardEdge { cycle, pin: IR_RX, level });
+        }
+    }
+    fn leds(&self) -> Option<(&[[u8; 3]], u64)> { self.stackchan.as_ref().map(StackChan::leds) }
     fn gpio_changes(&mut self, changes: &[(u8, bool)]) {
         let mut hw = self.hw.borrow_mut();
         for &(pin, level) in changes {
@@ -322,6 +276,10 @@ impl BoardModel for Cores3 {
         if !changes.is_empty() { self.gpio_changes(changes); }
         let level = |pin: u8| enabled >> pin & 1 == 0 || output >> pin & 1 != 0;
         let (scl, sda) = (level(PIN_CORES3_I2C_SCL), level(PIN_CORES3_I2C_SDA));
+        let ir = enabled & (1 << IR_TX) != 0 && output & (1 << IR_TX) != 0;
+        if let Some(level) = self.stackchan.as_mut().and_then(|base| base.gpio_ir(cycle, ir)) {
+            self.edges.push(BoardEdge { cycle, pin: IR_RX, level });
+        }
         let sd_cs_low = !level(PIN_CORES3_SD_CS);
         if self.sd_cs_low && !sd_cs_low {
             if let Some(sd) = &mut self.hw.borrow_mut().sd { sd.deselect(); }
@@ -366,7 +324,7 @@ impl BoardModel for Cores3 {
         let mut hw = self.hw.borrow_mut();
         hw.sd = Some(Box::new(SpiSdCard::new(card)));
         // TF_SW has a pull-up and closes to ground on insertion (schematic sheet 5).
-        hw.aw9523.external &= !Aw9523::P0_TF_SW;
+        hw.aw9523.external &= !AW_TF_SW;
     }
     fn spi_transfer_pins(&mut self, host: u8, pins: SpiPins, tx: &[u8], rx_len: usize) -> Vec<u8> {
         if pins.sclk & (1 << PIN_SPI_SCLK) == 0 { return vec![0xff; rx_len]; }
@@ -417,7 +375,11 @@ impl BoardModel for Cores3 {
     }
     fn set_imu_motion(&mut self, mode: u32) -> bool { self.imu.mode.store(mode, std::sync::atomic::Ordering::Relaxed); true }
     fn imu_motion(&self) -> u32 { self.imu.mode.load(std::sync::atomic::Ordering::Relaxed) }
-    fn input_levels(&self) -> Vec<(u8, bool)> { vec![(PIN_CORES3_I2C_INT, self.int_level)] }
+    fn input_levels(&self) -> Vec<(u8, bool)> {
+        let mut levels = vec![(PIN_CORES3_I2C_INT, self.int_level)];
+        if self.stackchan.is_some() { levels.push((IR_RX, true)); }
+        levels
+    }
     fn touch(&mut self, x: u16, y: u16, down: bool) {
         {
             let mut hw = self.hw.borrow_mut();
@@ -430,11 +392,13 @@ impl BoardModel for Cores3 {
     fn soc_powered(&self) -> Option<bool> { Some(self.hw.borrow().pmic.powered()) }
     fn next_deadline(&self) -> Option<VirtualCycle> {
         let hw = self.hw.borrow();
-        hw.rtc.next_deadline().into_iter().chain(hw.pmic.next_deadline()).min()
+        hw.rtc.next_deadline().into_iter().chain(hw.pmic.next_deadline())
+            .chain(self.stackchan.as_ref().and_then(StackChan::deadline)).min()
     }
     fn advance_to(&mut self, cycle: VirtualCycle) {
         self.cycle = self.cycle.max(cycle);
         let mut hw = self.hw.borrow_mut();
+        if let Some(base) = &mut self.stackchan { base.advance(self.cycle); }
         hw.rtc.advance_to(self.cycle);
         hw.pmic.advance_to(self.cycle);
         // CoreS3 schematic v1.0: BM8563 INT pulls down the AXP_WAKEUP net at AXP2101 IRQ.
@@ -456,9 +420,14 @@ impl BoardModel for Cores3 {
         drop(hw);
         self.update_int();
     }
-    fn accepts_command(&self, verb: &str) -> bool { matches!(verb, "pwrkey" | "battery" | "imu" | "als") }
+    fn accepts_command(&self, verb: &str) -> bool {
+        matches!(verb, "pwrkey" | "battery" | "imu" | "als") || self.stackchan.is_some() && StackChan::accepts_command(verb)
+    }
     fn board_command(&mut self, cycle: VirtualCycle, verb: &str, args: &[&str]) -> bool {
         self.advance_to(cycle);
+        if StackChan::accepts_command(verb) {
+            return self.stackchan.as_mut().is_some_and(|base| base.command(verb, args));
+        }
         let mut hw = self.hw.borrow_mut();
         let flag = |s: &str| match s { "0" => Some(false), "1" => Some(true), _ => None };
         match (verb, args) {
@@ -513,6 +482,7 @@ impl BoardModel for Cores3 {
                 hw.pmic.powered(), hw.pmic.backlight_mv(), hw.pmic.off_cause(), hw.pmic.last_off, hw.pmic.on_cause(), hw.pmic.last_on,
                 hw.rtc.control2(), hw.rtc.last_timer_expiry);
         if let Some(sd) = &hw.sd { report += &format!("\n{}; ALDO4 {}", sd.report(), if hw.sd_powered() { "on" } else { "off" }); }
+        if let Some(base) = &self.stackchan { report += &format!("\n{}", base.report()); }
         report
     }
 }
@@ -536,10 +506,10 @@ mod sd_tests {
         let cmd0 = [0x40, 0, 0, 0, 0, 0x95];
         let exchange = |b: &mut Cores3, pins, tx: &[u8], rx| b.spi_transfer_pins(2, pins, tx, rx);
         assert_eq!(exchange(&mut board, pins, &[], 2), [0xff; 2]);
-        assert_ne!(board.hw.borrow().aw9523.inputs() & Aw9523::P0_TF_SW, 0);
+        assert_ne!(board.hw.borrow().aw9523.inputs() & AW_TF_SW, 0);
 
         board.insert_spi_sd(SdCard::new(Box::new(MemStore(vec![0; 512 << 10]))).unwrap());
-        assert_eq!(board.hw.borrow().aw9523.inputs() & Aw9523::P0_TF_SW, 0);
+        assert_eq!(board.hw.borrow().aw9523.inputs() & AW_TF_SW, 0);
         let mut pmic = board.i2c_devices().into_iter().find(|&(bus, addr, _)| bus == 0 && addr == AXP2101_ADDRESS).unwrap().2;
         exchange(&mut board, pins, &cmd0, 0);
         assert_eq!(exchange(&mut board, pins, &[], 2), [0xff; 2]);

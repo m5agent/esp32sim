@@ -1,6 +1,5 @@
 //! M5Stack Tab5 display/touch and internal I²C wiring (M5GFX 0.3.0, board_detect/m5/esp32p4*).
-use crate::tab5_aux::Ina226;
-use esp_soc::devices::rx8130::Rx8130;
+use esp_soc::devices::{ina226::Ina226, pi4ioe5v6408::Pi4ioe5v6408, rx8130::Rx8130};
 use esp_periph::i2c::{I2cDevice, Reg8Device};
 use esp_soc::board::{BoardEdge, I2sCodecs, SpiPins, VirtualCycle};
 use esp_soc::devices::es7210::Es7210;
@@ -88,8 +87,8 @@ pub struct Tab5 {
     backlight: Option<(f64, u32)>,
     mic: Rc<RefCell<Es7210>>,
     dac: Rc<RefCell<Reg8Device>>,
-    rails: Rc<RefCell<Reg8Device>>,
-    charger: Rc<RefCell<Reg8Device>>,
+    rails: Rc<RefCell<Pi4ioe5v6408>>,
+    charger: Rc<RefCell<Pi4ioe5v6408>>,
     rtc: Rc<RefCell<Rx8130>>,
     powered: bool,
     power_off_line: bool,
@@ -106,18 +105,17 @@ impl Tab5 {
         let contacts = Points::default();
         // The two PI4IOE5V6408s retain direction and output latches across
         // transactions, including when the guest switches from bit-bang to I2C1.
-        let pi4io = || Reg8Device::new("pi4ioe5v6408", &[(1, 0xa0), (7, 0xff), (0xb, 0xff)]);
-        let rails = Rc::new(RefCell::new(pi4io()));
-        let charger = Rc::new(RefCell::new(pi4io()));
-        charger.borrow_mut().regs[0x0f] = 1 << 6;
+        let rails = Rc::new(RefCell::new(Pi4ioe5v6408::default()));
+        let charger = Rc::new(RefCell::new(Pi4ioe5v6408::default()));
+        charger.borrow_mut().set_input(6, Some(true));
         let rtc = Rc::new(RefCell::new(Rx8130::new(crate::periph::CPU_HZ)));
-        let battery = Rc::new(RefCell::new(Ina226::new()));
+        let battery = Rc::new(RefCell::new(Ina226::new(crate::periph::CPU_HZ, 5000, true, 7400, -120)));
         let mic = Rc::new(RefCell::new(Es7210::new()));
         // ES8388 control registers used by M5Unified 0.3.0's Tab5 speaker callback.
         // Reset starts with CHIPPOWER/DACPOWER down and DACCONTROL3 muted.
         let dac = Rc::new(RefCell::new(Reg8Device::new("es8388", &[(2, 0xc3), (4, 0xc0), (25, 4)])));
         let mut bus = vec![(0x43, DevicePort(rails.clone())), (0x44, DevicePort(charger.clone())),
-                           (Rx8130::ADDRESS, DevicePort(rtc.clone())), (Ina226::ADDRESS, DevicePort(battery.clone())),
+                           (Rx8130::ADDRESS, DevicePort(rtc.clone())), (0x41, DevicePort(battery.clone())),
                            (Es7210::ADDRESS, DevicePort(mic.clone())), (0x10, DevicePort(dac.clone()))];
         let motion = Arc::<ImuMotion>::default();
         let imu = Rc::new(RefCell::new(Bmi270::new(motion.clone(), crate::periph::CPU_HZ)));
@@ -164,7 +162,7 @@ impl BoardModel for Tab5 {
         // routes the ES8388 and ES7210 to opposite directions of I2S0.
         // PI4IOE5V6408 DS40583: DIR=1 selects an output, HIZ=1 disconnects it.
         // ES8388 rev. 5.0 §6.1.3: only the DAC power-down bits gate playback.
-        let enabled = rails.regs[3] & 2 != 0 && rails.regs[5] & 2 != 0 && rails.regs[7] & 2 == 0 &&
+        let enabled = rails.driven_high() & 2 != 0 &&
                       dac.regs[2] & 0x55 == 0 && dac.regs[4] & 0xc0 == 0 && dac.regs[4] & 0x3c != 0 &&
                       dac.regs[25] & 4 == 0;
         Some(I2sCodecs { port: 0, mic_port: 0, bck: 27, ws: 29, mck: Some(30), dout: 26, din: 28,
@@ -227,13 +225,14 @@ impl BoardModel for Tab5 {
         self.motion.cycle.store(cycle, std::sync::atomic::Ordering::Relaxed);
         let mut rtc = self.rtc.borrow_mut();
         rtc.advance(cycle);
+        self.battery.borrow_mut().advance(cycle);
         let rtc_irq = rtc.irq();
         drop(rtc);
         // Tab5 schematic: IOE 0x44 P4 (PWROFF_PLUSE) and U30 nIRQ feed the
         // standby power supervisor U28 through its nINT_STAT_TRIG network.
         // Model the observed power latch at the line transitions.
         let ioe = self.charger.borrow();
-        let power_off = ioe.regs[3] & ioe.regs[5] & !ioe.regs[7] & 0x10 != 0;
+        let power_off = ioe.driven_high() & 0x10 != 0;
         drop(ioe);
         if self.powered && power_off && !self.power_off_line {
             self.powered = false;
@@ -264,7 +263,7 @@ impl BoardModel for Tab5 {
             self.battery.borrow_mut().supply(mv, ma);
             // M5Unified Tab5: IOE1 P6 reads the IP2326's active-low charging output.
             let mut charger = self.charger.borrow_mut();
-            charger.regs[0x0f] = charger.regs[0x0f] & !(1 << 6) | (u8::from(*charging == "0") << 6);
+            charger.set_input(6, Some(*charging == "0"));
             return true;
         }
         if let ("imu", [ax, ay, az, gx, gy, gz]) = (verb, args) {

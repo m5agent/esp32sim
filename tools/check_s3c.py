@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""Evaluate controller traces, firmware output and framebuffer from an S3-C run."""
+
+import argparse
+import ast
+from collections import Counter
+from hashlib import sha256
+import json
+from pathlib import Path
+import re
+import struct
+import zlib
+
+from check_cores3 import audio, bmp_mirrored_rgb565, changed, fat32_files, region, require, text
+
+
+def png(path, width, height):
+    blob = path.read_bytes()
+    require(blob.startswith(b"\x89PNG\r\n\x1a\n"), "invalid PNG")
+    at = 8
+    data = bytearray()
+    while at < len(blob):
+        size, name = struct.unpack_from(">I4s", blob, at)
+        content = blob[at + 8:at + 8 + size]
+        require(zlib.crc32(name + content) == struct.unpack_from(">I", blob, at + 8 + size)[0],
+                "invalid PNG CRC")
+        at += size + 12
+        if name == b"IHDR":
+            require(content == struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0),
+                    f"display dimensions differ from {width}x{height}")
+        if name == b"IDAT":
+            data.extend(content)
+    pixels = zlib.decompress(data)
+    stride = 1 + 3 * width
+    require(len(pixels) == stride * height and not any(pixels[::stride]), "unexpected RGB8 scanlines")
+    return b"".join(pixels[off + 1:off + stride] for off in range(0, len(pixels), stride))
+
+
+def capture(root, label, size):
+    row = json.loads((root / f"{label}.json").read_text())
+    require(row["status"] == 0, f"{label} runtime exited {row['status']}")
+    serial = (root / f"{label}.log").read_text(errors="replace")
+    log = (root / f"{label}.err").read_text(errors="replace")
+    require("stop: Halted" in log, f"{label} did not reach the requested horizon")
+    require(not re.search(r"Guru Meditation|assert failed|panic'ed|abort\(\) was called", serial),
+            f"{label} firmware panicked")
+    return serial, log, png(root / f"{label}.png", *size)
+
+
+def field(log, name):
+    match = re.search(rf"\b{re.escape(name)}=(0x[0-9a-f]+|\d+)\b", log)
+    require(match, f"missing board observation {name}")
+    return int(match[1], 0)
+
+
+def modes(frame):
+    return Counter(zip(frame[0::3], frame[1::3], frame[2::3]))
+
+
+def plc_button_rows(screen):
+    row = 240 * 3
+    return b"".join(screen[y * row:y * row + 130 * 3] for y in range(8, 32))
+
+
+def plc(root, case, serial, log, frame):
+    if case == "input_output-1":
+        require("Write Relay 3 to ON" in serial and "Write Relay 3 to OFF" in serial and
+                field(log, "relay-states") & 0x8001 == 0x8001, "missing guest-driven all-on/all-off relay states")
+        return "guest toggled all four modeled relay outputs"
+    if case == "input_output-2":
+        require(all(f"Input: {pattern}" in serial for pattern in
+                    ("0, 0, 0, 0, 0, 0, 0, 0", "1, 0, 0, 0, 0, 0, 0, 1", "0, 0, 0, 1, 0, 0, 0, 1")),
+                "isolated inputs did not round-trip through AW9523")
+        return "zero-input control and two mapped AW9523 input patterns"
+    if case == "sensor":
+        require(all(marker in serial for marker in ("Temp: 25.00", "Temp: -6.25", "Temp: 38.12",
+                                                   "Power: 11.80", "Power: 15.38", "Io: 0.30", "Io: 0.70")),
+                "missing default or one of the injected INA226 and LM75B readings")
+        return "three distinct LM75B and INA226 readings via guest I2C"
+    if case == "rtc":
+        values = re.findall(r"Time: 2077/3/7 11:45:(\d+)", serial)
+        require(len(set(values)) >= 3, "calendar set/read or progression missing")
+        return "guest set RX8130 calendar and read advancing time"
+    if case == "rgb_led":
+        require(field(log, "rgb-seen") & 0x97 == 0x97, "missing off, red, green, blue or white")
+        return "all five requested GPIO-expander RGB states"
+    if case == "quickstart-display":
+        require(len(modes(frame)) >= 3 and re.search(r"StamPLC: [1-9]\d* RAMWR, [1-9]\d* pixels", log),
+                "display drawing missing")
+        return "multicolor drawing over ST7789 SPI within the 240×135 crop"
+    if case == "button":
+        _, _, control = capture(root, case + "-control", (240, 135))
+        require(changed(frame, control) >= 200, "three front key actions did not change guest framebuffer")
+        require(sha256(plc_button_rows(frame)).hexdigest() ==
+                "39876955805868aac729e75e117413ed6ec7b8ebcdf1d661384891a390babf0c"
+                and not any(plc_button_rows(control)), "button A/B/C text rows missing")
+        return "guest rendered all three button labels compared with the untouched screen"
+    if case == "buzzer":
+        marker = re.search(r"StamPLC LEDC buzzer \(Hz, us\): (\[[^\n]*\])", log)
+        require(marker, "GPIO44 LEDC report missing")
+        tones = ast.literal_eval(marker[1])
+        for hz in (523, 659, 880):
+            require(any(abs(frequency - hz) <= 2 and 47_000 <= micros <= 54_000
+                        for frequency, micros in tones), f"GPIO44 tone {hz} Hz / 50 ms missing")
+        return "GPIO44 LEDC produced 523, 659 and 880 Hz tones at 50 ms"
+    if case == "can":
+        require(">> Message queued for transmission" in serial and "<< Message received" in serial and
+                "ID is 43691" in serial and "Data: 0 1 2 3 4 5 6 7" in serial,
+                "guest CAN TX/ACK and peer payload not observed")
+        return "TWAI TX and extended-ID peer reply with eight matching payload bytes"
+    if case == "modbus-1":
+        require(field(log, "modbus-echoes") == 3 and field(log, "relays") == 2,
+                "peer coil requests, all three CRC-valid echoes and relay output did not agree")
+        return "three Modbus master writes echoed over UART with mapped relay changes"
+    if case == "modbus-2":
+        require(all(marker in serial for marker in ("Relay 0 ON", "Relay 3 OFF", "Temperature: 27.50",
+                                                    "Bus Voltage: 12.50", "Shunt Current: 0.25")),
+                "missing guest Modbus coil or input-register data")
+        return "guest slave-peer exchange on RS485 including coils and input registers"
+    if case == "sd_card":
+        require("SD card write success" in serial and "Hello, World! Count:" in serial and
+                re.search(r"\[sd-spi\].* [1-9]\d* blocks written", log), "missing SD guest file round trip")
+        control_serial, _, _ = capture(root, case + "-control", (240, 135))
+        require("SD card write success" not in control_serial, "no-SD control unexpectedly wrote a file")
+        return "SPI SD guest writes and reads test.txt, with no-media control"
+    return None
+
+
+def stack(root, case, serial, log, frame):
+    if case in ("rgb", "quickstart-rgb"):
+        require(field(log, "rgb-updates") >= 5 and field(log, "rgb-colors") & 0x17 == 0x17,
+                "missing independent colors from PY32 RGB refresh")
+        return "PY32 RGB565 LED refresh observed across the twelve pixels"
+    if case == "display":
+        require(len(modes(frame)) > 100, "multicolored drawing missing")
+        return "guest-drawn multicolor circles and rectangles"
+    if case in ("battery", "imu", "ltr553"):
+        _, _, alternative = capture(root, case + "-alternate", (320, 240))
+        _, _, control = capture(root, case + "-control", (320, 240))
+        require(min(changed(frame, control), changed(alternative, control), changed(frame, alternative)) > 30,
+                "one injected value did not alter the guest screen")
+        if case == "battery":
+            text(frame, (0, 48, 240, 120), "7.62 V and 129.97 mA", "e93f13dde839f8a287a453e7")
+            text(alternative, (0, 48, 240, 120), "6.85 V and 289.93 mA", "7c85424470ab65c2de7c928f")
+            return "two injected INA226 voltage and load readings on LCD"
+        if case == "imu":
+            text(frame, (0, 20, 170, 145), "first accelerometer/gyro vector", "afbe3ee6116ccd2672185363")
+            text(alternative, (0, 20, 170, 145), "second accelerometer/gyro vector", "a53103a133ed153aaf81b17b")
+            return "two distinct BMI270 accelerometer and gyro readings on LCD"
+        text(frame, (25, 106, 290, 133), "PS:321 / ALS:750", "f25b27bf7a5e7d83dbf2bc10")
+        text(alternative, (25, 106, 290, 133), "PS:1456 / ALS:2185", "2373668e3d4544cf6837e1f1")
+        return "two distinct LTR553 ranges and a no-stimulus control"
+    if case == "button":
+        _, _, control = capture(root, case + "-control", (320, 240))
+        text(frame, (85, 75, 235, 108), "Btn PWR in red", "41f349b8c87d6799dcadc65e")
+        require(changed(frame, control) > 100, "no change after pressing PMIC button")
+        return "AXP2101 PMIC key produces rendered Btn PWR"
+    if case == "touch":
+        _, _, alternative = capture(root, case + "-alternate", (320, 240))
+        _, _, control = capture(root, case + "-control", (320, 240))
+        text(frame, (65, 180, 260, 215), "X:100 / Y:120", "f539d8e80d4187463654a36c")
+        text(alternative, (65, 180, 260, 215), "X:240 / Y:40", "05121e4afe69ccf4d50de01e")
+        text(frame, (0, 70, 320, 105), "none after release", "5fcf5edfb604f4b013c4106c")
+        require(not any(region(control, 65, 180, 260, 215)), "coordinate text present in no-touch control")
+        return "two touchscreen positions delivered through FT6336 and released"
+    if case == "touchsensor":
+        _, _, alternative = capture(root, case + "-alternate", (320, 240))
+        _, _, control = capture(root, case + "-control", (320, 240))
+        text(frame, (0, 16, 230, 33), "Was clicked", "24c65d9346bc3e1707aa4271")
+        text(alternative, (0, 16, 260, 33), "Was swiped forward", "6bc4d95772b8f8e820c0f383")
+        text(alternative, (0, 32, 230, 47), "Was clicked after swipe", "44735f8e248080e5f199a403")
+        require(not any(region(control, 0, 16, 230, 47)), "idle head pads generated a gesture")
+        return "SI12T click and forward swipe rendered, with idle control"
+    if case == "rtc":
+        require("state Associated" in log and re.search(r"[1-9]\d* NTP answers", log),
+                "virtual AP association or NTP exchange missing")
+        require(len(modes(frame)) > 1, "RTC display did not render")
+        return "guest associates with virtual AP, consumes NTP and draws clock"
+    if case == "camera":
+        _, alt_log, alt = capture(root, case + "-alternate", (320, 240))
+        require(changed(frame, alt) > 1000 and all(re.search(r"camera: [1-9]\d* VSYNCs, 0 frames with dropped data", report)
+                                                       for report in (log, alt_log)), "missing camera DMA delivery or distinct frames")
+        for label, captured in ((case, frame), (case + "-alternate", alt)):
+            require(captured == bmp_mirrored_rgb565((root / f"{label}-input.bmp").read_bytes()),
+                    f"{label} framebuffer differs from expected mirrored RGB565")
+        return "two distinct camera frames with VSYNC and zero dropped data"
+    if case == "servo-2":
+        angles = re.findall(r"StackChan servo-angle: yaw=(-?[\d.]+) pitch=(-?[\d.]+)", log)
+        require(angles == [("0.000", "45.000"), ("90.000", "45.000")] and field(log, "servo-reads") > 0,
+                f"expected two guest-driven angles and servo responses, got {angles}")
+        return "top touch drives 45° pitch and then 90° yaw using serial servos"
+    if case == "servo-1":
+        angles = re.findall(r"StackChan servo-angle: yaw=(-?[\d.]+) pitch=(-?[\d.]+)", log)
+        require(len(angles) == 2 and angles[0] == ("0.000", "0.000") and
+                all(abs(float(angle) - 40) <= 1 for angle in angles[1]) and
+                re.search(r"StackChan: .*\byaw=40\.000 pitch=40\.000\b", log) and
+                field(log, "servo-reads") > 0 and field(log, "servo-writes") > 0,
+                f"Set Home / Go Home did not restore the saved encoder positions: {angles}")
+        return "touch saves two SCSCL encoder positions and restores them after displacement"
+    if case == "ir_nec":
+        require(field(log, "ir") >= 2 and "Received: protocol=NEC, addr=0x0000, cmd=0x55" in serial and
+                "Received: protocol=NEC, addr=0x0001, cmd=0x56" in serial, "missing two decoded IR transmissions")
+        return "GPIO carrier delivered two valid NEC frames"
+    if case == "nfc-1":
+        control, baseline, _ = capture(root, case + "-control", (320, 240))
+        require(field(log, "nfc-selections") >= 2 and field(baseline, "nfc-selections") == 0 and
+                all(f"==== Dump {uid} " in serial for uid in ("04A1B2C3D4E5F6", "0456ABCD123456")) and
+                "PICC NOT exists" in control and "==== Dump" not in control,
+                "guest did not identify and reactivate both NFC-A tags with the no-tag control")
+        return "guest identifies and reactivates two Type 2 tags, with a no-tag control"
+    if case == "nfc-3":
+        idle_serial, idle_log, _ = capture(root, case + "-control", (320, 240))
+        active = re.findall(r"(?m)^([OIRA])\r?$", serial)
+        require(active == ["O", "I", "R", "A", "O"] and "Emulation:MIFARE Ultralight" in serial
+                and "NFC auto response: [44, 00]" in log
+                and "NFC guest response: [04, 34, 56, ee, 78, 9a, bc, de, 80, a3, 00, 00, e1, 10, 06, 00," in log
+                and "NFC guest response: [03, 25, 91, 01, 0d, 55, 04, 6d, 35, 73, 74, 61, 63, 6b, 2e, 63," in log
+                and not re.search(r"(?m)^[IRA]\r?$", idle_serial) and "NFC guest response:" not in idle_log,
+                "field state or two NFC-A memory readbacks differ")
+        return "virtual NFC reader selects the firmware tag and checks two NDEF memory reads"
+    if case in ("nfc-4", "nfc-6"):
+        control, _, _ = capture(root, case + "-control", (320, 240))
+        require(all(f"PICC:{uid} MIFARE Classic" in serial for uid in ("04314253", "04765432"))
+                and "PICC:" not in control, "both Classic tag values and idle control were not observed")
+        if case == "nfc-4":
+            require("VERIFY:OK" in serial and "Verify OK" in serial and "CLEAR" in serial,
+                    "authenticated Classic block/sector write, readback and clear did not complete")
+            return "two authenticated Classic tags with single-block and cross-sector write/readback"
+        require("==== Increment done" in serial and serial.count("==== Decrement done") == 2
+                and serial.count("==== To be normal block") == 2 and "Can NOT increment" in serial,
+                "Classic value decrement, conditional increment and restoration did not complete")
+        return "two Classic value block flows demonstrate decrement, increment denial and permitted increment"
+    if case == "nfc-5":
+        require("Data format is NOT NDEF" in serial and "Write NDEF OK!" in serial
+                and "https://m5stack.com/" in serial and field(log, "nfc-selections") >= 3,
+                "blank tag, NDEF write and URI readback did not all reach the guest")
+        return "guest formats and writes a synthetic Type 2 tag, then reads the NDEF URI"
+    if case in ("sdcard", "pic"):
+        disk = root / f"sd-{case}.img"
+        stem = "cores3_test_picture" if case == "sdcard" else "TestPicture"
+        names = [f"{stem}01.png", f"{stem}02.png"]
+        if case == "sdcard":
+            names.append("WriteTest.txt")
+        files = fat32_files(disk, names)
+        if case == "sdcard":
+            require(files.get("WriteTest.txt") == b"Hello, world! \nSD card write success! \n",
+                    "guest did not write the expected test file")
+        matches = []
+        for name in names[:2]:
+            fixture = root / name
+            fixture.write_bytes(files[name])
+            matches.append(frame == png(fixture, 320, 240))
+        require(any(matches), "LCD does not match either documented SD image")
+        return "file reads are visible in the framebuffer and use SPI SD"
+    if case in ("speaker", "wav", "mic"):
+        _, tones = audio(root / f"{case}.wav")
+        require(tones, "audio output contains no non-silent PCM")
+        if case == "mic":
+            _, control_tones = audio(root / "mic-control.wav")
+            _, alternate_tones = audio(root / "mic-alternate.wav")
+            require(not control_tones and any(abs(tone[3] - 733) < 2 for tone in tones) and
+                    any(abs(tone[3] - 548) < 2 for tone in alternate_tones),
+                    "mic did not round-trip both fixture frequencies and silence")
+            return "I²S mic recording played back distinct 733 Hz and 548 Hz signals, with silence control"
+        if case == "speaker":
+            require(any(abs(tone[3] - 10_000) < 60 for tone in tones) and
+                    any(abs(tone[3] - 4000) < 60 for tone in tones), f"documented tones missing: {tones}")
+            return "I²S speaker emitted both documented frequency bands"
+        if case == "wav":
+            require("Segmented playback completed!" in serial and any(abs(tone[3] - 440) < 4 for tone in tones)
+                    and any(abs(tone[3] - 660) < 4 for tone in tones), "fixture completion or frequencies missing")
+            return "SD WAV decoded and played at both fixture frequencies"
+        return None
+    if case == "wakeup":
+        _, asleep, blank = capture(root, case + "-sleep", (320, 240))
+        require(not any(blank) and "powered=false" in asleep and "on_cause=0x02" in log and
+                log.count("chip reset at") == 1 and len(modes(frame)) > 1, "RTC wake did not restore a powered display")
+        return "display sleeps and resumes once following RTC power wake"
+    return None
+
+
+def check_matrix(board, root, cases, selected=None):
+    size = (240, 135) if board == "stamplc" else (320, 240)
+    verdicts = {}
+    items = [(row["case"], row) for row in cases] + [("stock", {})]
+    for case, row in items:
+        if selected and case not in selected:
+            continue
+        if board == "stamplc" and case == "display" and not (root / f"{case}.json").exists():
+            result = ("DOCS-DEFECT", "Pinned display.md line 7 snippet calls Display as a field")
+        elif not (root / f"{case}.json").exists():
+            result = ("NOT RUN", "no receipt for this firmware")
+        else:
+            try:
+                serial, log, frame = capture(root, case, size)
+                if case == "stock":
+                    if board == "stamplc":
+                        logo = b"".join(frame[720*y:720*y+234] for y in range(16))
+                        require(sha256(logo).hexdigest().startswith("caa452d567e6e90bdbc13e2e"),
+                                "stock UIFlow2 StamPLC home header missing")
+                    else:
+                        text(frame, (0, 0, 99, 22), "UIFlow2 home header", "7ad4bb4fc1c4581ac66271c8")
+                    require(re.search(r"(?m)^S3C_REPL_OK\r?$", serial) and "script done" in log,
+                            "stock USB-OTG CDC-ACM REPL marker missing")
+                    reason = "stock UIFlow2 home visible after input and USB CDC REPL round-tripped"
+                elif case == "nfc-2":
+                    require("Please put the PICC and click BtnA" in serial and field(log, "nfc-selections") == 0
+                            and log.count("Touch(45, 239") == 4, "BtnA fixture did not reach the documented touch limit")
+                    verdicts[case] = {
+                        "status": "DOCS-DEFECT",
+                        "reason": ("Pinned nfc.md line 205 snippet leaves touch-button height at zero. "
+                                   "BtnA requires raw y ≥ 240 and StackChan's FT6336 range ends at 239."),
+                        "expected": row.get("expected"),
+                    }
+                    print(f"{case:17} DOCS-DEFECT {verdicts[case]['reason']}")
+                    continue
+                else:
+                    reason = (plc if board == "stamplc" else stack)(root, case, serial, log, frame)
+                result = ("PASS", reason) if reason else ("NOT RUN", "behavioral assertion pending")
+            except (OSError, KeyError, ValueError, struct.error, zlib.error) as error:
+                result = ("FAIL", str(error))
+        verdicts[case] = {"status": result[0], "reason": result[1], "expected": row.get("expected")}
+        print(f"{case:17} {result[0]:11} {result[1]}")
+    (root / "verdicts.json").write_text(json.dumps(verdicts, indent=2) + "\n")
+    return int(any(item["status"] in ("FAIL", "NOT RUN") for item in verdicts.values()))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("board", choices=("stamplc", "stackchan"))
+    parser.add_argument("out", type=Path)
+    parser.add_argument("inventory", type=Path)
+    args = parser.parse_args()
+    cases = [row for row in json.loads(args.inventory.read_text())["cases"] if row["device"] == args.board]
+    raise SystemExit(check_matrix(args.board, args.out, cases))

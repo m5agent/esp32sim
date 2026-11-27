@@ -30,6 +30,9 @@ use esp_soc::devices::soft_i2c;
 mod spi_lcd;
 
 pub mod stopwatch;
+mod stamplc;
+mod stamplc_modbus;
+mod stackchan;
 pub mod waveshare_amoled18;
 pub mod waveshare_cam;
 pub mod waveshare_lcd4b;
@@ -58,6 +61,8 @@ pub fn make_board(name: &str) -> Option<Board> {
         "cardputer" | "m5stack-cardputer" => Some(Box::new(cardputer::Cardputer::new())),
         "cardputer-adv" | "m5stack-cardputer-adv" => Some(Box::new(CardputerAdv::new())),
         "dial" | "m5stack-dial" => Some(Box::new(dial::Dial::new())),
+        "stackchan" | "m5stack-stackchan" => Some(Box::new(Cores3::stackchan())),
+        "stamplc" | "m5stack-stamplc" => Some(Box::new(stamplc::StamPlc::new())),
         "cores3" | "m5stack-cores3" => Some(Box::new(Cores3::new())),
         "waveshare-cam" | "waveshare" => Some(Box::new(WaveshareCam::new())),
         "waveshare-lcd4b" | "lcd4b" => Some(Box::new(WaveshareLcd4b::new())),

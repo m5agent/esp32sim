@@ -1,5 +1,5 @@
 //! UART: TX to the host console, RX from it through the 128-byte receive FIFO; the transmit
-//! side reads as idle (its FIFO count is 0 and TXFIFO_EMPTY/TX_DONE stay raised). The register
+//! side reads as idle. TXFIFO_EMPTY stays raised, while S3 half-duplex mode latches TX_DONE. The register
 //! map differs a little between the chips — field widths, where rxfifo_rst sits — so the chip
 //! crate picks a [`UartLayout`].
 use std::collections::VecDeque;
@@ -17,7 +17,7 @@ const INT_RXFIFO_OVF: u32 = 1 << 4;
 /// with no idle delay: raised while the FIFO holds bytes, so the driver's ISR drains them.
 const INT_RXFIFO_TOUT: u32 = 1 << 8;
 const INT_TX_DONE: u32 = 1 << 14;
-/// TXFIFO_EMPTY and TX_DONE: always true here, so INT_CLR cannot take them down.
+/// Ordinary UART transmit completes immediately. RS485 clears TX_DONE between sends.
 const INT_ALWAYS: u32 = INT_TXFIFO_EMPTY | INT_TX_DONE;
 
 /// What differs between the chips' UART register maps (IDF `uart_reg.h` per chip).
@@ -36,17 +36,18 @@ pub struct UartLayout {
     pub autobaud_regs: u32,
     /// UART core clock the ROM runs the detector on when it is not in CLK_CONF (0x78), as on the C6 (PCR); 0 = CLK_CONF.
     pub autobaud_clock_hz: u32,
+    pub rs485_conf: Option<u32>,
 }
 impl UartLayout {
-    pub const S3: UartLayout = UartLayout { thrhd_mask: 0x3ff, rxfifo_rst: 1 << 17, rxfifo_cnt_mask: 0x3ff, autobaud_en: 1 << 27, autobaud_regs: 0x28, autobaud_clock_hz: 0 };
-    pub const C3: UartLayout = UartLayout { thrhd_mask: 0x1ff, rxfifo_rst: 1 << 17, rxfifo_cnt_mask: 0x3ff, autobaud_en: 1 << 27, autobaud_regs: 0x28, autobaud_clock_hz: 0 };
-    pub const C6: UartLayout = UartLayout { thrhd_mask: 0xff, rxfifo_rst: 1 << 22, rxfifo_cnt_mask: 0xff, autobaud_en: 1 << 19, autobaud_regs: 0x7c, autobaud_clock_hz: 40_000_000 };
+    pub const S3: UartLayout = UartLayout { thrhd_mask: 0x3ff, rxfifo_rst: 1 << 17, rxfifo_cnt_mask: 0x3ff, autobaud_en: 1 << 27, autobaud_regs: 0x28, autobaud_clock_hz: 0, rs485_conf: Some(0x4c) };
+    pub const C3: UartLayout = UartLayout { thrhd_mask: 0x1ff, rxfifo_rst: 1 << 17, rxfifo_cnt_mask: 0x3ff, autobaud_en: 1 << 27, autobaud_regs: 0x28, autobaud_clock_hz: 0, rs485_conf: None };
+    pub const C6: UartLayout = UartLayout { thrhd_mask: 0xff, rxfifo_rst: 1 << 22, rxfifo_cnt_mask: 0xff, autobaud_en: 1 << 19, autobaud_regs: 0x7c, autobaud_clock_hz: 40_000_000, rs485_conf: None };
 }
 
 // ------------------------------------------------------------------ UART
-pub struct Uart { pub tx_out: Vec<u8>, pub int_raw: u32, pub int_ena: u32, layout: UartLayout, rx: VecDeque<u8>, ram: RegRam, edges: u32, queue: VecDeque<u8>, credit: u64 }
+pub struct Uart { pub tx_out: Vec<u8>, pub int_raw: u32, pub int_ena: u32, layout: UartLayout, rx: VecDeque<u8>, ram: RegRam, edges: u32, queue: VecDeque<u8>, credit: u64, rs485: bool }
 impl Uart {
-    pub fn new(layout: UartLayout) -> Self { Uart { tx_out: Vec::new(), int_raw: INT_ALWAYS, int_ena: 0, layout, rx: VecDeque::new(), ram: RegRam::new(), edges: 0, queue: VecDeque::new(), credit: 0 } }
+    pub fn new(layout: UartLayout) -> Self { Uart { tx_out: Vec::new(), int_raw: INT_ALWAYS, int_ena: 0, layout, rx: VecDeque::new(), ram: RegRam::new(), edges: 0, queue: VecDeque::new(), credit: 0, rs485: false } }
     /// Bytes from the host into the receive FIFO; what does not fit is dropped and flagged RXFIFO_OVF.
     pub fn host_input(&mut self, data: &[u8]) {
         if self.autobaud_on() { self.edges = self.edges.saturating_add(9 * data.len() as u32).min(0x3ff); }
@@ -183,9 +184,24 @@ impl Uart {
     }
     pub fn write(&mut self, off: u32, v: u32) {
         match off {
-            0x0 => self.tx_out.push(v as u8),
+            0x0 => {
+                self.tx_out.push(v as u8);
+                self.int_raw |= INT_TX_DONE;
+            }
             0xc => self.int_ena = v,
-            0x10 => { self.int_raw &= !v | INT_ALWAYS; self.refresh_rx_full(); }
+            0x10 => {
+                self.int_raw &= !v | if self.rs485 { INT_TXFIFO_EMPTY } else { INT_ALWAYS };
+                self.refresh_rx_full();
+            }
+            reg if Some(reg) == self.layout.rs485_conf => {
+                // ESP-IDF v5.4.2 esp32s3/soc/uart_reg.h: RS485_CONF.EN is bit zero.
+                let enabled = v & 1 != 0;
+                if enabled != self.rs485 {
+                    self.rs485 = enabled;
+                    if enabled { self.int_raw &= !INT_TX_DONE; } else { self.int_raw |= INT_TX_DONE; }
+                }
+                self.ram.write(off, v);
+            }
             0x20 => {
                 if v & self.layout.rxfifo_rst != 0 { self.rx.clear(); }
                 let ab = self.layout.autobaud_en;
@@ -196,6 +212,9 @@ impl Uart {
             _ => self.ram.write(off, v),
         }
     }
+    /// IDF v5.4.2 uart_enable_tx_write_fifo uses active-low SW_RTS for half-duplex DE.
+    pub fn rs485_transmitting(&self) -> bool { self.rs485 && self.ram.read(0x20) & (1 << 6) == 0 }
+
     pub fn irq(&self) -> bool { self.int_raw & self.int_ena != 0 }
 }
 impl Device for Uart {
@@ -248,6 +267,22 @@ impl EnaLatency {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rs485_transmit_done_is_latched_until_cleared() {
+        let mut uart = Uart::new(UartLayout::S3);
+        assert_eq!(uart.read(4) & INT_TX_DONE, INT_TX_DONE);
+        uart.write(0x4c, 1);
+        assert!(uart.rs485_transmitting());
+        assert_eq!(uart.read(4) & INT_TX_DONE, 0);
+        uart.write(0xc, INT_TX_DONE);
+        uart.write(0, 0x42);
+        assert!(uart.irq());
+        uart.write(0x10, INT_TX_DONE);
+        assert!(!uart.irq());
+        uart.write(0x20, 1 << 6);
+        assert!(!uart.rs485_transmitting());
+    }
+
     #[test]
     fn classic_baud_uses_its_divider_and_clock_source() {
         let mut u = Uart::new(UartLayout::S3);

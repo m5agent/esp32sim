@@ -339,6 +339,7 @@ fn new_uart() -> Uart {
         autobaud_en: 0,
         autobaud_regs: 0,
         autobaud_clock_hz: 0,
+        rs485_conf: None,
     });
     // S31 v6.1 uart_reg.h defaults.
     for (off, value) in [

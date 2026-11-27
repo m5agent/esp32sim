@@ -912,6 +912,7 @@ impl Peripherals {
             autobaud_en: 0, // the classic chip has its own detector (ClassicUart)
             autobaud_regs: 0,
             autobaud_clock_hz: 0,
+            rs485_conf: None,
         };
         let mut gpio = ClassicGpio::new();
         gpio.gpio.strap = 0x13; // normal SPI-fast-flash boot, with ROM messages enabled
