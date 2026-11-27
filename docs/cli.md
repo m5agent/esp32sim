@@ -209,6 +209,11 @@ UI's audio stream and reports sample counts/peak (how to check sound without lis
 
 See [AtomS3 family profiles](atom-s3.md) for board variants, input scripts and the documentation runner.
 
+### M5Stack e-paper boards
+
+See [M5Stack S3 e-paper boards](m5-paper.md) for board names, memory
+profiles, timed frame publication and the PaperMono loopback option.
+
 ### CoreS3 power inputs
 
 On `m5stack-cores3`, `pwrkey <ms>` holds the AXP2101 power key for the specified

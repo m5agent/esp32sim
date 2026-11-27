@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 const TX_DONE: u16 = 0x0001;
 const RX_DONE: u16 = 0x0002;
 const TIMEOUT: u16 = 0x0200;
+// RadioLib SX126x::findChip probes the Semtech internal version string.
+const VERSION_REGISTER: u16 = 0x0320;
+const VERSION_PREFIX: &[u8; 6] = b"SX1261";
 
 pub struct Sx1262 {
     registers: BTreeMap<u16, u8>,
@@ -48,6 +51,11 @@ impl Sx1262 {
         channel
     }
     fn register(&self, addr: u16) -> u8 {
+        if let Some(&byte) = addr.checked_sub(VERSION_REGISTER)
+            .and_then(|offset| VERSION_PREFIX.get(usize::from(offset)))
+        {
+            return byte;
+        }
         self.registers.get(&addr).copied().unwrap_or(match addr {
             0x0740 => 0x14, 0x0741 => 0x24, 0x08ac => 0x94, _ => 0,
         })
@@ -141,6 +149,16 @@ mod tests {
         let reply = data.iter().map(|&b| chip.exchange(b)).collect();
         chip.deselect(now, 1);
         reply
+    }
+
+    #[test]
+    fn radio_lib_reads_version_through_spi() {
+        let mut chip = Sx1262::default();
+        chip.reset(0);
+        let mut command = [0; 20];
+        command[..3].copy_from_slice(&[0x1d, 0x03, 0x20]);
+        let reply = spi(&mut chip, 1000, &command);
+        assert_eq!(&reply[4..10], b"SX1261");
     }
 
     #[test]

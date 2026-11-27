@@ -91,7 +91,7 @@ fn stopwatch_shutdown_is_observable_only_after_system_command() {
 #[test]
 fn reattaching_pmic_clears_shutdown_without_changing_host_inputs() {
     let state = Arc::new(Mutex::new(M5pm1State {
-        battery_mv: 4150, charging: true, power_off_requested: false,
+        battery_mv: 4150, charging: true, ..Default::default()
     }));
     let mut device = M5pm1::new(state.clone());
     write(&mut device, 0x0c, &[0xa1]);
@@ -101,6 +101,29 @@ fn reattaching_pmic_clears_shutdown_without_changing_host_inputs() {
     assert_eq!(read(&mut device, 0x22, 2), 4150u16.to_le_bytes());
     assert_eq!(read(&mut device, 0x12, 1), [0]);
     assert_eq!(read(&mut device, 0x06, 1), [0x17]);
+}
+
+#[test]
+fn pmic_power_timer_runs_while_soc_is_off() {
+    let state = Arc::new(Mutex::new(M5pm1State::default()));
+    let mut device = M5pm1::with_power_timer(state.clone(), 1000);
+    state.lock().unwrap().advance_power_timer(2000);
+    write(&mut device, 0x38, &[3, 0, 0, 0, 0x0b, 0xa5]);
+    write(&mut device, 0x0c, &[0xa1]);
+    {
+        let mut state = state.lock().unwrap();
+        assert_eq!(state.power_deadline(), Some(5000));
+        state.advance_power_timer(4999);
+        assert!(state.power_off_requested);
+        state.advance_power_timer(5000);
+        assert!(!state.power_off_requested);
+    }
+    write(&mut device, 0x38, &[3, 0, 0, 0, 0x0c, 0x00]);
+    state.lock().unwrap().advance_power_timer(8000);
+    assert!(!state.lock().unwrap().power_off_requested);
+    write(&mut device, 0x3d, &[0xa5]);
+    state.lock().unwrap().advance_power_timer(11000);
+    assert!(state.lock().unwrap().power_off_requested);
 }
 
 #[test]

@@ -29,6 +29,10 @@ mod sticks3;
 use esp_soc::devices::soft_i2c;
 mod spi_lcd;
 
+mod paper_i2c;
+mod paper_parallel;
+mod paper_spi;
+pub use paper_spi::PaperSpi;
 pub mod stopwatch;
 mod stamplc;
 mod stamplc_modbus;
@@ -57,6 +61,10 @@ pub fn make_board(name: &str) -> Option<Board> {
         "atech14" | "atech" => Some(Box::new(Atech14::new())),
         "none" | "bare" => Some(Box::new(NoBoard)),
         "sticks3" | "m5stack-sticks3" => Some(Box::new(sticks3::StickS3::new())),
+        "paperdiy" | "m5stack-paperdiy" => Some(Box::new(paper_parallel::PaperParallel::new(true))),
+        "papers3" | "m5stack-papers3" => Some(Box::new(paper_parallel::PaperParallel::new(false))),
+        "papermono" | "m5stack-papermono" => Some(Box::new(PaperSpi::mono(None).ok()?)),
+        "papercolor" | "m5stack-papercolor" => Some(Box::new(PaperSpi::color())),
         "stopwatch" | "m5stack-stopwatch" => Some(Box::new(StopWatch::new())),
         "cardputer" | "m5stack-cardputer" => Some(Box::new(cardputer::Cardputer::new())),
         "cardputer-adv" | "m5stack-cardputer-adv" => Some(Box::new(CardputerAdv::new())),

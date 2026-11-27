@@ -22,7 +22,7 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!();
     eprintln!("  --rom F               the chip's mask ROM ELF; default: $ESP32SIM_ROM_DIR, then ~/.espressif/tools/esp-rom-elfs/*/");
     eprintln!("                        (Espressif's, not in the tarball: tools/fetch-rom-elfs.sh DIR downloads all of them)");
-    eprintln!("  --board NAME          board model (S3: atech14, waveshare-lcd4b, waveshare-amoled18-v2, waveshare-cam, stopwatch, m5stack-cores3, m5stack-stamplc, m5stack-stackchan, m5stack-cardputer, m5stack-cardputer-adv, m5stack-dial, m5stack-sticks3, none;");
+    eprintln!("  --board NAME          board model (S3: atech14, waveshare-lcd4b, waveshare-amoled18-v2, waveshare-cam, stopwatch, m5stack-cores3, m5stack-stamplc, m5stack-stackchan, m5stack-cardputer, m5stack-cardputer-adv, m5stack-dial, m5stack-sticks3, m5stack-paperdiy, m5stack-papers3, m5stack-papermono, m5stack-papercolor, none;");
     eprintln!("                        m5stack-atoms3[-lite|-gc9107], m5stack-atoms3u, m5stack-atoms3r[-gc9107|-cam|-m12], m5stack-atom-echos3r;");
     eprintln!("                        C6: waveshare-c6-lcd147, xiao-esp32c6, none; P4: waveshare-p4-lcd35, m5stack-tab5, m5stack-tab5-st7123, none; S31: mosaico, none;");
     eprintln!("                        classic: ttgo-tdisplay, cyd, ulanzi-tc001, ai-thinker-cam, esp32dev, none)");
@@ -31,6 +31,7 @@ fn help(chip: &str, code: i32) -> ! {
     eprintln!("  --console usb|uart0|both|none   which consoles to print (uart0 shows the ROM and bootloader)");
     eprintln!("  --cap NAME            Cardputer-ADV accessory: lora1262, lora868 or cc1101");
     eprintln!("  --cap-peer IN:OUT     CAP packet link, bound and connected to IPv4 loopback UDP ports");
+    eprintln!("  --lora-peer IN:OUT   PaperMono virtual LoRa peer over loopback UDP");
     eprintln!("  --imu-motion N        scripted IMU motion: 0 at rest, 1 the 30 s tilt/flip/shake script (amoled18-v2, m5stack-cardputer-adv, mosaico)");
     eprintln!("  --wifi ssid=…,psk=…   a virtual access point with DHCP, DNS, NTP and NAT to the host network");
     eprintln!("  --wifi-sta ssid=…,psk=…   a virtual station that joins the guest's own access point (not the P4)");
@@ -162,6 +163,7 @@ pub struct Opts {
     pub wifi_sta: Option<String>,
     /// whether `--net` was given, which `--wifi-sta` refuses: it configures `--wifi`'s network
     pub net_given: bool,
+    pub lora_peer: Option<(u16, u16)>,
     pub cap: Option<String>, pub cap_peer: Option<(u16, u16)>,
     pub board: String, pub wifi: Vec<String>, pub wifi_nearby: Vec<String>, pub ble_nearby: Vec<String>, pub ble: bool, pub ble_full: bool, pub ble_observe: bool, pub ble_scan: bool, pub net: String, pub hostfwd: Vec<String>, pub cam_image: Option<String>, pub cam_stream: Option<String>, pub cam_size: Option<String>, pub cam_fps: f64,
     pub spi2_timing: bool, pub measured_te: bool,
@@ -223,12 +225,13 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
             "--regs-init" => o.regs_init = Some(next()),
             "--board" => o.board = next(),
             "--cap" => o.cap = Some(next()),
-            "--cap-peer" => {
-                o.cap_peer = next().split_once(':').and_then(|(local, remote)| {
+            flag @ ("--cap-peer" | "--lora-peer") => {
+                let ports = next().split_once(':').and_then(|(local, remote)| {
                     let (local, remote) = (local.parse().ok()?, remote.parse().ok()?);
                     (local != 0 && remote != 0 && local != remote).then_some((local, remote))
                 });
-                if o.cap_peer.is_none() { usage_error("--cap-peer: expected two distinct, nonzero UDP ports IN:OUT"); }
+                if ports.is_none() { usage_error(&format!("{flag}: expected two distinct, nonzero UDP ports IN:OUT")); }
+                if flag == "--lora-peer" { o.lora_peer = ports; } else { o.cap_peer = ports; }
             }
             "--spi2-timing" => o.spi2_timing = true,
             "--measured-te" => o.measured_te = true,
@@ -361,6 +364,10 @@ pub fn run_cli(default_chip: &str) {
     let mut o = parse(&args, default_chip);
     if o.cam_stream.is_some() != o.cam_size.is_some() { usage_error("--cam-stream and --cam-size must be supplied together"); }
     validate_timing(&o).unwrap_or_else(|e| usage_error(&e));
+    if o.lora_peer.is_some() && (!matches!(o.chip.as_str(), "s3" | "esp32s3")
+        || !matches!(o.board.as_str(), "papermono" | "m5stack-papermono") || o.cooja || o.coproc.is_some()) {
+        usage_error("--lora-peer requires a standalone PaperMono session");
+    }
     if o.cap_peer.is_some() && o.cap.is_none() { usage_error("--cap-peer requires --cap"); }
     if o.cap.is_some() && (!matches!(o.chip.as_str(), "s3" | "esp32s3") ||
         !matches!(o.board.as_str(), "cardputer-adv" | "m5stack-cardputer-adv") || o.cooja || o.coproc.is_some()) {
@@ -544,8 +551,10 @@ fn setup_s3(o: &Opts) -> esp32s3::Machine {
     let mut m = esp32s3::machine(o.mac.unwrap_or([0x44, 0x1b, 0xf6, 0x75, 0xdc, 0xe0]));
     m.bus.board = if let Some(cap) = &o.cap {
         Box::new(esp32s3::board::CardputerAdv::new().with_cap(cap, o.cap_peer).unwrap_or_else(|e| usage_error(&e)))
+    } else if let Some(peer) = o.lora_peer {
+        Box::new(esp32s3::board::PaperSpi::mono(Some(peer)).unwrap_or_else(|e| usage_error(&format!("--lora-peer: {e}"))))
     } else {
-        esp32s3::board::make_board(&o.board).unwrap_or_else(|| { eprintln!("unknown board '{}' (atech14, waveshare-cam, waveshare-lcd4b, waveshare-amoled18-v2, stopwatch, m5stack-cores3, m5stack-stamplc, m5stack-stackchan, m5stack-cardputer, m5stack-cardputer-adv, m5stack-dial, m5stack-sticks3, m5stack-atoms3[-lite|-gc9107], m5stack-atoms3u, m5stack-atoms3r[-gc9107|-cam|-m12], m5stack-atom-echos3r, none)", o.board); std::process::exit(2) })
+        esp32s3::board::make_board(&o.board).unwrap_or_else(|| { eprintln!("unknown board '{}' (atech14, waveshare-cam, waveshare-lcd4b, waveshare-amoled18-v2, stopwatch, m5stack-cores3, m5stack-stamplc, m5stack-stackchan, m5stack-cardputer, m5stack-cardputer-adv, m5stack-dial, m5stack-sticks3, m5stack-paperdiy, m5stack-papers3, m5stack-papermono, m5stack-papercolor, m5stack-atoms3[-lite|-gc9107], m5stack-atoms3u, m5stack-atoms3r[-gc9107|-cam|-m12], m5stack-atom-echos3r, none)", o.board); std::process::exit(2) })
     };
     if o.measured_te {
         assert_eq!(m.bus.board.name(), "waveshare-amoled18-v2", "--measured-te requires the AMOLED V2 board");
@@ -563,8 +572,10 @@ fn setup_s3(o: &Opts) -> esp32s3::Machine {
     set_camera_image(&mut m.bus.board, o.cam_image.as_deref());
     set_imu_motion(m.bus.board.as_mut(), o);
     m.bus.periph.lcd_cam.frame_cycles = (esp32s3::periph::CPU_HZ as f64 / o.cam_fps) as u64;
-    let stopwatch = matches!(m.bus.board.name(), "stopwatch" | "m5stack-cores3" | "m5stack-stackchan");
-    let flash_mb = o.flash_mb.unwrap_or(if stopwatch { 16 } else { 8 });
+    let large_flash = matches!(m.bus.board.name(),
+        "stopwatch" | "m5stack-cores3" | "m5stack-stackchan" | "m5stack-paperdiy"
+        | "m5stack-papers3" | "m5stack-papermono" | "m5stack-papercolor");
+    let flash_mb = o.flash_mb.unwrap_or(if large_flash { 16 } else { 8 });
     let atom_pico = matches!(m.bus.board.name(), "m5stack-atoms3r" | "m5stack-atoms3r-gc9107" |
         "m5stack-atoms3r-cam" | "m5stack-atoms3r-m12" | "m5stack-atom-echos3r");
     if atom_pico {
@@ -576,7 +587,7 @@ fn setup_s3(o: &Opts) -> esp32s3::Machine {
     let psram_mb = o.psram_mb.unwrap_or(match m.bus.board.name() {
         "m5stack-cardputer" | "m5stack-cardputer-adv" | "m5stack-dial" | "m5stack-stamplc" | "m5stack-atoms3" | "m5stack-atoms3-gc9107" | "m5stack-atoms3-lite" | "m5stack-atoms3u" => 0,
         "m5stack-sticks3" => 8,
-        _ if stopwatch || atom_pico => 8,
+        _ if large_flash || atom_pico => 8,
         _ => 2,
     });
     if flash_mb != 8 { m.bus.set_flash_size(flash_mb << 20); }

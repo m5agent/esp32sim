@@ -104,6 +104,11 @@ impl LcdCam {
     pub fn irq(&self) -> bool { self.int_raw & self.int_ena != 0 }
     /// LCD RGB mode running: LCD_START (USER bit 27) with LCD_RGB_MODE_EN (CTRL bit 31).
     pub fn lcd_running(&self) -> bool { self.lcd_user & (1 << 27) != 0 && self.lcd_ctrl & (1 << 31) != 0 }
+    pub fn lcd_i80_started(&self) -> bool {
+        self.clock_enabled && (self.lcd_clock >> 29) & 3 != 0
+            && self.lcd_ctrl & (1 << 31) == 0
+            && self.lcd_user & ((1 << 27) | (1 << 28)) == 1 << 27
+    }
     /// (active width, active height, bytes per pixel, CPU cycles per frame) from the timing registers.
     pub fn lcd_geometry(&self) -> (u32, u32, u32, u64) {
         // the registers hold (value - 1): lcd_ll_set_horizontal/vertical_timing
@@ -281,6 +286,7 @@ pub struct Peripherals {
     pub gdma: Gdma,
     pub i2s0: I2s,
     pub i2s1: I2s,
+    pub(crate) buzzer_dc: f32,
     pub rmt: Rmt,
     pub io_mux: RegRam,
     /// register RAM behind unmodelled blocks, first-touch logging, pc attribution
@@ -385,6 +391,22 @@ impl DeviceSet for Peripherals {
 impl Peripherals {
     /// CPU cycles since this peripheral set was built.
     pub(crate) fn clock_cycles(&self) -> u64 { self.clock.cycles() }
+
+    pub(crate) fn advance_rtc_sleep(&mut self, cycles: u64) {
+        let rtc = &mut self.rtc;
+        self.clock.advance(&Self::CLOCKS, cycles, |domain, ticks| {
+            if domain == ClockDomain::RtcSlow {
+                rtc.slow_ticks += ticks;
+                // RTC_CNTL_WDT_PAUSE_IN_SLP on the S3.
+                if rtc.ram.read(0x98) & (1 << 9) == 0 { rtc.wdt_tick(ticks); }
+            }
+        });
+    }
+
+    pub(crate) fn rtc_timer_cycles(&self, ticks: u64) -> u64 {
+        let divider = CPU_HZ / RTC_SLOW_HZ;
+        ticks.saturating_mul(divider).saturating_sub(self.clock.cycles() % divider)
+    }
     pub fn new(mac: [u8; 6]) -> Self {
         Peripherals {
             usb: UsbSerialJtag::new(CPU_HZ), uart: [Uart::new(UartLayout::S3), Uart::new(UartLayout::S3), Uart::new(UartLayout::S3)], systimer: Systimer::new(),
@@ -393,7 +415,7 @@ impl Peripherals {
             i2c: [crate::i2c::I2c::new(), crate::i2c::I2c::new()], lcd_cam: LcdCam::new(), spi2: GpSpi::new().diverting_dma_rx(), spi3: GpSpi::with_host(3).diverting_dma_rx(), pcnt: Pcnt::new(PcntLayout::S3), wifi: WifiMac::new(CPU_HZ), fe: FeIq { word: 0 },
             aes: Aes::new(), rsa: Rsa::new(), sha: Sha::new(), wdev: Wdev::new(), i2c_mst: I2cMst::new(), gdma: Gdma::new(), i2s0: I2s::new(CPU_HZ), i2s1: I2s::new(CPU_HZ), rmt: Rmt::new(CPU_HZ),
             io_mux: RegRam::new(), misc: Misc::new(), fake_reads: std::env::var("ESP_EMU_FAKE_READ").ok().map(|v| v.split(',').filter_map(|e| { let mut p = e.split(':'); let a = u32::from_str_radix(p.next()?.trim_start_matches("0x"), 16).ok()?; let o = u32::from_str_radix(p.next().unwrap_or("0").trim_start_matches("0x"), 16).ok()?; let m = u32::from_str_radix(p.next().unwrap_or("ffffffff").trim_start_matches("0x"), 16).ok()?; Some((a, (o, m))) }).collect()).unwrap_or_default(),
-            clock: Self::new_clock(),
+            clock: Self::new_clock(), buzzer_dc: f32::from(i16::MIN),
             spi_exec: false, last_status: [0; 4], intmatrix_dirty: false,
             usb_otg: Self::new_usb_otg(), sdmmc: Box::new(Sdmmc::new(SdmmcLayout::Esp32)), sd_cycle_base: 0, twai: Default::default(),
         }
@@ -505,6 +527,11 @@ impl Peripherals {
     }
 
     pub fn write32(&mut self, addr: u32, v: u32) {
+        // RTC_CNTL_INT_CLR is W1C. The raw RTC bits are firmware-polled.
+        if addr == 0x6000_804c {
+            self.rtc.ram.write(0x44, self.rtc.ram.read(0x44) & !v);
+            return;
+        }
         if let Some(off) = self.usb_fifo_offset(addr) {
             self.usb_otg.write(off, v);
             self.refresh_optional(USB_OTG_BLOCK);

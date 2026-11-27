@@ -43,6 +43,15 @@ impl SpiPins {
     }
 }
 
+/// LCD_CAM I80 outputs after GPIO matrix routing. Each signal is a GPIO mask.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LcdI80Pins {
+    pub data: [u64; 16],
+    pub write: u64,
+    pub select: u64,
+    pub width: u8,
+}
+
 /// I2S transducers wired to the same clock pins. PCM levels are digital.
 pub struct I2sCodecs {
     pub port: usize, // TX controller
@@ -100,6 +109,10 @@ pub trait BoardModel {
     fn default_analog_inputs(&self) -> &'static [(u8, f32)] { &[] }
     /// Board-wired I2S codecs, with the current I2C-controlled signal gates.
     fn i2s_codecs(&self) -> Option<I2sCodecs> { None }
+    /// One-bit delta-sigma speaker wired to an I2S data-out pad.
+    fn i2s_buzzer_pin(&self) -> Option<u8> { None }
+    /// The buzzer's 32-bit duty samples span two 16-bit DMA slots.
+    fn i2s_buzzer_packed_stereo(&self) -> bool { false }
     /// Give the board's camera a picture to look at (RGB888).
     fn set_camera_picture(&mut self, _p: crate::picture::Picture) -> Result<(), &'static str> { Err("no camera on this board") }
     /// Next camera frame in the sensor's register-selected wire format, with its size.
@@ -219,11 +232,11 @@ pub trait BoardModel {
     fn pdm_mic(&self) -> Option<(u8, u8)> { None }
     /// GPIO that receives the camera master clock, if required for parallel capture.
     fn camera_xclk_pin(&self) -> Option<u8> { None }
-    /// Single-bit delta-sigma speaker on I2S data out.
-    fn i2s_buzzer_pin(&self) -> Option<u8> { None }
     fn i2s_buzzer_audio(&mut self, _rate: u32, _samples: &mut [i16]) {}
     /// Observe a short, non-wrapping RMT transfer routed to this pin.
     fn rmt_symbols(&mut self, _pin: u8, _tick_hz: u32, _symbols: &[u32]) {}
+    /// Completed LCD_CAM I80 data phase, in physical bus byte order.
+    fn lcd_i80_data(&mut self, _pins: LcdI80Pins, _data: &[u8]) {}
 }
 
 pub type Board = Box<dyn BoardModel>;

@@ -29,6 +29,55 @@ pub(super) struct Spi2DmaCompletion {
 
 
 impl SocBus {
+    /// IDF v5.5.4 lcd_cam_reg.h: LCD_USER START starts a finite I80 transfer
+    /// when LCD_RGB_MODE_EN is clear. The data phase consumes GDMA trigger 5.
+    /// Command/dummy-only starts still complete for the IDF ISR's priming transfer.
+    #[cold]
+    pub(super) fn start_lcd_i80(&mut self) {
+        let lcd = &self.periph.lcd_cam;
+        if !lcd.lcd_i80_started() { return; }
+        let user = lcd.lcd_user;
+        if user & (1 << 24) != 0 {
+            let Some(channel) = self.periph.gdma.out_channel_for(5) else { return; };
+            let wide = user & (1 << 23) != 0;
+            let expected = (((user & 0x1fff) + 1) * if wide { 2 } else { 1 }) as usize;
+            let limit = if user & (1 << 13) != 0 { 1 << 20 } else { expected };
+            let mut data = Vec::new();
+            let result = esp_periph::gdma::gather_out(&mut LcdDmaOut { bus: self, channel }, limit + 1, &mut data);
+            let valid = !data.is_empty() && data.len() <= limit
+                && (user & (1 << 13) != 0 || data.len() == expected)
+                && (!wide || data.len().is_multiple_of(2));
+            match result {
+                Ok(next) if valid => {
+                    let out = &mut self.periph.gdma.out[channel];
+                    out.desc = next;
+                    out.running = false;
+                    out.buf_pos = 0;
+                    if next == 0 { out.int_raw |= 1 << 3; }
+                }
+                _ => { self.fail_dma_out(channel); self.irq_dirty = true; return; }
+            }
+            if user & (1 << if wide { 22 } else { 19 }) != 0 {
+                for pair in data.as_chunks_mut::<2>().0 { pair.swap(0, 1); }
+            }
+            if user & (1 << 21) != 0 {
+                for byte in &mut data { *byte = byte.reverse_bits(); }
+                if wide { for pair in data.as_chunks_mut::<2>().0 { pair.swap(0, 1); } }
+            }
+            let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
+            // ESP-IDF v5.5.4 gpio_sig_map.h LCD_CS/WR and LCD_DATA_OUT0..15.
+            let mask = |signal| routes.output_pins(signal).fold(0, |mask, pin| mask | (1 << pin));
+            let pins = esp_soc::board::LcdI80Pins {
+                data: std::array::from_fn(|index| mask(133 + index as u32)),
+                write: mask(154), select: mask(132), width: if wide { 16 } else { 8 },
+            };
+            self.board.lcd_i80_data(pins, &data);
+        }
+        self.periph.lcd_cam.lcd_user &= !(1 << 27);
+        self.periph.lcd_cam.int_raw |= 1 << 1; // LCD_TRANS_DONE
+        self.irq_dirty = true;
+    }
+
     /// IDF v5.5.4 components/soc/esp32s3/include/soc/gdma_channel.h:21: trigger 9.
     /// Error bit: register/soc/rmt_reg.h:1650-1656. GDMA writeback/owner:
     /// register/soc/gdma_reg.h:585-618; OUT interrupts:649-678.
@@ -256,7 +305,10 @@ impl SocBus {
                     address,
                     fault,
                 })?;
-                channel.buf_pos += remaining as u32;                     // GDMA drains the descriptor
+                channel.buf_pos += count as u32;
+                // A command can end in the middle of a nonterminal descriptor.
+                // The next SPI data phase resumes on the same GDMA link.
+                if count < remaining && !eof { break; }
             }
             if channel.conf0 & (1 << 2) != 0 {
                 let writable = current.desc.checked_add(4).is_some_and(|end| {
@@ -384,6 +436,11 @@ impl SocBus {
         let (frames, bpf, sample_bytes) = { let i2s = if which == 0 { &mut self.periph.i2s0 } else { &mut self.periph.i2s1 }; (i2s.frames_due(cycles), i2s.bytes_per_frame as usize, i2s.sample_bytes()) };
         if frames == 0 || bpf == 0 { return; }
         let Some(ch) = self.periph.gdma.out_channel_for(if which == 0 { 3 } else { 4 }) else { return };
+        let buzzer = self.board.i2s_buzzer_pin().filter(|_| self.board.i2s_buzzer_packed_stereo() && sample_bytes == 2 && bpf == 4);
+        let buzzer_routed = buzzer.is_some_and(|pin|
+            esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux)
+                .matrix_output(pin as usize, if which == 0 { 25 } else { 30 }));
+        let rate = if which == 0 { self.periph.i2s0.sample_rate } else { self.periph.i2s1.sample_rate };
         let mut need = frames as usize * bpf;
         let mut samples: Vec<i16> = Vec::new();
         let mut walk = DescriptorWalk::new(GDMA_DESCRIPTOR_STEP_BUDGET);
@@ -406,11 +463,22 @@ impl SocBus {
             }
             let take = remaining.min(need);
             let start = d.buf.wrapping_add(c.buf_pos);
-            // Keep the first DMA channel, scaling its signed PCM sample to the 16-bit host sink.
+            // PCM capture selects the first slot. The single-bit route uses both
+            // 16-bit slots of each I2S frame as one 32-bit delta-sigma sample.
             let mut i = 0usize;
             while i + bpf <= take {
                 let addr = start.wrapping_add(i as u32);
-                let sample = if sample_bytes == 1 {
+                let sample = if buzzer_routed {
+                    self.read32_unpriced(addr).map(|word| {
+                        let voltage = (word.count_ones() as f32 - 16.0) * 2048.0;
+                        let gain = std::f32::consts::TAU * 200.0 / (rate as f32 + std::f32::consts::TAU * 200.0);
+                        let out = voltage - self.periph.buzzer_dc;
+                        self.periph.buzzer_dc += gain * out;
+                        out.round() as i16
+                    })
+                } else if buzzer.is_some() {
+                    Ok(0)
+                } else if sample_bytes == 1 {
                     self.read8_unpriced(addr).map(|v| (v as i8 as i16) << 8)
                 } else {
                     self.read16_unpriced(addr.wrapping_add((sample_bytes - 2) as u32)).map(|v| v as i16)
@@ -434,7 +502,7 @@ impl SocBus {
             if gain == 0.0 { samples.fill(0); }
             else if gain != 1.0 { for sample in &mut samples { *sample = (f32::from(*sample) * gain).round() as i16; } }
         }
-        if let Some(pin) = self.board.i2s_buzzer_pin() {
+        if let Some(pin) = self.board.i2s_buzzer_pin().filter(|_| !self.board.i2s_buzzer_packed_stereo()) {
             let routes = esp_soc::pins::ChipPins::S3.routes(&self.periph.gpio, &self.periph.io_mux);
             if !routes.matrix_output(pin as usize, if which == 0 { 25 } else { 30 }) { return; }
             let rate = if which == 0 { self.periph.i2s0.sample_rate } else { self.periph.i2s1.sample_rate };
@@ -840,4 +908,21 @@ impl esp_periph::gdma::OutMemory for RmtDmaOut<'_> {
         self.bus.append_mapped_bytes(address, count, out)
     }
     fn writeback(&mut self, address: u32, value: u32) -> Result<(), Fault> { self.bus.write32_unpriced(address, value) }
+}
+
+/// LCD_CAM DMA follows the common descriptor contract and excludes MMIO descriptors.
+struct LcdDmaOut<'a> { bus: &'a mut SocBus, channel: usize }
+impl esp_periph::gdma::OutMemory for LcdDmaOut<'_> {
+    fn out_channel(&mut self) -> &mut esp_periph::GdmaOutCh { &mut self.bus.periph.gdma.out[self.channel] }
+    fn word(&mut self, address: u32) -> Result<u32, Fault> {
+        if SocBus::is_periph(address) { return Err(Fault::Prohibited); }
+        self.bus.read32_unpriced(address)
+    }
+    fn append(&mut self, address: u32, count: usize, out: &mut Vec<u8>) -> Result<(), (u32, Fault)> {
+        self.bus.append_mapped_bytes(address, count, out)
+    }
+    fn writeback(&mut self, address: u32, value: u32) -> Result<(), Fault> {
+        if SocBus::is_periph(address) { return Err(Fault::Prohibited); }
+        self.bus.write32_unpriced(address, value)
+    }
 }
