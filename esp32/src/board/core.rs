@@ -19,7 +19,8 @@ const SCL: u8 = 22;
 const TOUCH_IRQ: u8 = 39;
 const RTC_IRQ: u8 = 35;
 const BUTTONS: [u8; 3] = [39, 38, 37];
-const LCD_ID: [u8; 3] = [0xe3, 0, 0]; // ILI9342C V102 §8.2.3
+const LCD_ID: [u8; 3] = [0xe3, 0, 0]; // ILI9342C V102 §8.2.3, RDDID
+const LCD_ID4: [u8; 3] = [0, 0x93, 0x42]; // ILI9342C V102, RDID4
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CoreKind { Basic, Core2, Core2Axp192 }
@@ -110,6 +111,7 @@ pub(crate) struct Core {
     cs: bool,
     clk: bool,
     command: u8,
+    read_index: usize,
     read_at: usize,
     hardware_read_bits: usize,
     id_probe: u64,
@@ -146,7 +148,7 @@ impl Core {
         let rails = power.rails();
         Self { kind, power, rtc, ina, imu, points, touch, wire: SoftI2c::idle(), ports,
                sd: None, sd_transactions: 0, sd_bit: 0, sd_shift: 0, sd_clock: false, panel: DcsPanel::new(320, 240), spi: SpiBitBang::new(CLK, DATA, kind.cs()),
-               cs: true, clk: false, command: 0, read_at: 0, hardware_read_bits: 0, id_probe: 0, lcd_reset: rails.reset,
+               cs: true, clk: false, command: 0, read_index: 0, read_at: 0, hardware_read_bits: 0, id_probe: 0, lcd_reset: rails.reset,
                display_version: 0, light: false, motor_changes: 0, motor_min: 0, motor_max: 0, rgb: Ws2812Chain::new(10),
                cycle: 0, signals: [None; 40], edges: Vec::new(), release: Vec::new(), rails }
     }
@@ -163,6 +165,7 @@ impl Core {
         if reset {
             self.panel.reset();
             self.command = 0;
+            self.read_index = 0;
             self.read_at = 0;
             self.hardware_read_bits = 0;
         }
@@ -172,7 +175,15 @@ impl Core {
 
     fn panel_byte(&mut self, byte: u8) {
         if self.lcd_reset { return; }
-        if !self.panel.dc { self.command = byte; self.read_at = 0; self.hardware_read_bits = 0; }
+        if !self.panel.dc {
+            self.command = byte;
+            self.read_at = 0;
+            self.hardware_read_bits = 0;
+            if byte == 0x01 { self.read_index = 0; }
+        } else if self.command == 0xd9 {
+            // M5GFX uses D9h to choose one numbered parameter of D3h.
+            self.read_index = usize::from(byte & 0x0f).saturating_sub(1);
+        }
         self.panel.byte(byte);
         self.display_version += 1;
     }
@@ -183,7 +194,7 @@ impl Core {
             0xda => &LCD_ID[..1],
             0xdb => &LCD_ID[1..2],
             0xdc => &LCD_ID[2..],
-            0xd3 => &[0, 0x93, 0x42],
+            0xd3 => LCD_ID4.get(self.read_index..).unwrap_or(&[]),
             _ => &[],
         }
     }
@@ -204,9 +215,10 @@ impl Core {
                 self.read_at = self.read_at.saturating_add(1);
                 if self.read_at == 1 { self.id_probe += 1; }
             }
-            // The first falling edge with MOSI released ends the dummy cycle.
-            // RDDID requires the guest to clock one dummy bit before the ID.
-            Some(self.read_at.checked_sub(1).is_some_and(|bit|
+            // RDDID has a dummy bit. An indexed D3h read starts with the
+            // parameter immediately, so M5GFX's first clock drops its MSB.
+            let dummy = usize::from(self.command != 0xd3);
+            Some(self.read_at.checked_sub(dummy).is_some_and(|bit|
                 self.response().get(bit / 8).is_some_and(|b| b & (0x80 >> (bit & 7)) != 0)))
         } else { Some(true) };
         self.drive(DATA, if data.is_none() { reply } else { None });
@@ -530,5 +542,13 @@ mod tests {
         assert_eq!(board.spi_transfer_pins_bits(3, pins, &[], 16), [0, 0]);
         let unselected = SpiPins { cs: 0, ..pins };
         assert_eq!(board.spi_transfer_pins_bits(3, unselected, &[], 8), [0xff]);
+        board.panel.dc = false;
+        board.spi_transfer_pins_bits(3, pins, &[0xd9], 0);
+        board.panel.dc = true;
+        board.spi_transfer_pins_bits(3, pins, &[0x12], 0);
+        board.panel.dc = false;
+        board.spi_transfer_pins_bits(3, pins, &[0xd3], 0);
+        board.panel.dc = true;
+        assert_eq!(board.spi_transfer_pins_bits(3, pins, &[], 16), [0x93, 0x42]);
     }
 }
