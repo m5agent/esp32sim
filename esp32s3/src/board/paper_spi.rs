@@ -279,7 +279,7 @@ impl BoardModel for PaperSpi {
         match &mut self.display {
             Display::Mono(panel) if matches_panel(14, 16) => panel.write(now, self.output & (1 << 17) != 0, tx),
             Display::Color(panel) if matches_panel(13, 44) => panel.write(now, self.output & (1 << 43) != 0, tx),
-            Display::Color(_) => {
+            Display::Color(_) if self.pmic.lock().unwrap().driven_high & (1 << 3) != 0 => {
                 let ns = (u128::from(now) * 1_000_000_000 / u128::from(CPU_HZ)) as u64;
                 read = self.sd.as_mut().and_then(|card| pins.transfer_sd(COLOR_SD, card, tx, rx_len, ns));
             }
@@ -316,7 +316,8 @@ impl BoardModel for PaperSpi {
         self.now.set(cycle);
         let rtc_high = !self.rtc.borrow_mut().irq();
         let rtc_pin = self.rtc_pmic_pin();
-        let motion_level = if self.mono_board() {
+        let mono = self.mono_board();
+        let motion_level = if mono {
             self.imu.cycle.store(cycle, std::sync::atomic::Ordering::Relaxed);
             self.imu_chip.borrow_mut().motion_int1()
         } else { None };
@@ -325,9 +326,13 @@ impl BoardModel for PaperSpi {
             pmic.advance_power_timer(cycle);
             pmic.gpio_input(rtc_pin, rtc_high);
             if let Some(level) = motion_level { pmic.gpio_input(4, level); }
+            if !mono {
+                let card_detect = self.sd.is_some() && pmic.driven_high & (1 << 4) != 0;
+                pmic.gpio_input(1, !card_detect);
+            }
             !pmic.power_off_requested
         };
-        if self.mono_board() {
+        if mono {
             let pmic = self.pmic.lock().unwrap();
             let irq_high = !pmic.gpio_irq(1);
             let outputs = self.expander.get();

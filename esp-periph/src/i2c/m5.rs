@@ -14,19 +14,29 @@ pub struct M5pm1State {
     pub driven_high: u8,
     pub led_enabled: bool,
     pub timer: Option<M5pm1Timer>,
-    gpio_in: u8,
-    gpio_wake: u8,
-    gpio_rising: u8,
-    gpio_status: u8,
-    gpio_mask: u8,
+    pub gpio: M5pm1Gpio,
+}
+
+#[derive(Debug)]
+pub struct M5pm1Gpio {
+    inputs: u8,
+    wake: u8,
+    rising: u8,
+    status: u8,
+    mask: u8,
     irq_outputs: u8,
+}
+
+impl Default for M5pm1Gpio {
+    fn default() -> Self {
+        Self { inputs: 0x1f, wake: 0, rising: 0, status: 0, mask: 0x1f, irq_outputs: 0 }
+    }
 }
 
 impl Default for M5pm1State {
     fn default() -> Self {
         Self { battery_mv: 3900, vbus_mv: 0, charging: false, power_off_requested: false,
-            driven_high: 0, led_enabled: true, timer: None, gpio_in: 0x1f, gpio_wake: 0,
-            gpio_rising: 0, gpio_status: 0, gpio_mask: 0x1f, irq_outputs: 0 }
+            driven_high: 0, led_enabled: true, timer: None, gpio: M5pm1Gpio::default() }
     }
 }
 
@@ -44,18 +54,18 @@ enum PowerAction { On, Off }
 impl M5pm1State {
     pub fn gpio_input(&mut self, pin: u8, high: bool) {
         let bit = 1 << pin;
-        let was_high = self.gpio_in & bit != 0;
-        self.gpio_in = (self.gpio_in & !bit) | (u8::from(high) << pin);
-        if was_high != high && high == (self.gpio_rising & bit != 0) {
-            self.gpio_status |= bit;
-            if self.gpio_wake & bit != 0 {
+        let was_high = self.gpio.inputs & bit != 0;
+        self.gpio.inputs = (self.gpio.inputs & !bit) | (u8::from(high) << pin);
+        if was_high != high && high == (self.gpio.rising & bit != 0) {
+            self.gpio.status |= bit;
+            if self.gpio.wake & bit != 0 {
                 self.power_off_requested = false;
             }
         }
     }
 
     pub fn gpio_irq(&self, pin: u8) -> bool {
-        self.irq_outputs & (1 << pin) != 0 && self.gpio_status & !self.gpio_mask != 0
+        self.gpio.irq_outputs & (1 << pin) != 0 && self.gpio.status & !self.gpio.mask != 0
     }
 
     pub fn power_deadline(&self) -> Option<u64> {
@@ -85,10 +95,10 @@ impl M5pm1 {
             state.power_off_requested = false;
             state.driven_high = 0;
             state.led_enabled = true;
-            state.irq_outputs = 0;
-            state.gpio_wake = 0;
-            state.gpio_rising = 0;
-            state.gpio_mask = 0x1f;
+            state.gpio.irq_outputs = 0;
+            state.gpio.wake = 0;
+            state.gpio.rising = 0;
+            state.gpio.mask = 0x1f;
         }
         Self {
             registers: Reg8Device::new("m5pm1", &[
@@ -106,7 +116,7 @@ impl M5pm1 {
 
     pub fn with_wake_input(mut self, pin: u8) -> Self {
         self.registers.regs[0x18] |= 1 << pin;
-        self.state.lock().expect("M5PM1 state mutex poisoned").gpio_wake |= 1 << pin;
+        self.state.lock().expect("M5PM1 state mutex poisoned").gpio.wake |= 1 << pin;
         self
     }
 }
@@ -125,10 +135,10 @@ impl I2cDevice for M5pm1 {
                 let mut state = self.state.lock().expect("M5PM1 state mutex poisoned");
                 match reg {
                     0x06 => state.led_enabled = byte & 0x10 != 0,
-                    0x18 => state.gpio_wake = byte & 0x1f,
-                    0x19 => state.gpio_rising = byte & 0x1f,
-                    0x40 => state.gpio_status &= byte,
-                    0x43 => state.gpio_mask = byte & 0x1f,
+                    0x18 => state.gpio.wake = byte & 0x1f,
+                    0x19 => state.gpio.rising = byte & 0x1f,
+                    0x40 => state.gpio.status &= byte,
+                    0x43 => state.gpio.mask = byte & 0x1f,
                     _ => unreachable!(),
                 }
             }
@@ -165,15 +175,15 @@ impl I2cDevice for M5pm1 {
             }
             let mut state = self.state.lock().expect("M5PM1 state mutex poisoned");
             state.driven_high = high;
-            state.irq_outputs = irq;
+            state.gpio.irq_outputs = irq;
         }
         ack
     }
 
     fn read(&mut self) -> u8 {
         let state = self.state.lock().expect("M5PM1 state mutex poisoned");
-        self.registers.regs[0x12] = (state.gpio_in & !4) | (u8::from(!state.charging && state.gpio_in & 4 != 0) << 2);
-        self.registers.regs[0x40] = state.gpio_status;
+        self.registers.regs[0x12] = (state.gpio.inputs & !4) | (u8::from(!state.charging && state.gpio.inputs & 4 != 0) << 2);
+        self.registers.regs[0x40] = state.gpio.status;
         [self.registers.regs[0x22], self.registers.regs[0x23]] = state.battery_mv.to_le_bytes();
         [self.registers.regs[0x24], self.registers.regs[0x25]] = state.vbus_mv.to_le_bytes();
         self.registers.read()
