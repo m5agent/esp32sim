@@ -101,7 +101,7 @@ with `ESP32SIM_ROM_DIR`, and a FAT32 image with `CORE_SD_SEED`.
 | `--uart-tcp HOST:PORT` | UART0's bytes both ways over a TCP socket, raw, to one client at a time: esptool and espefuse connect with `--port socket://HOST:PORT` (below). Port 0 picks a free port; the address is printed as `[emu] UART0 on tcp ...`. A second client waits until the first closes; without a client UART0's output is dropped. UART0 no longer goes to stdout, the USB-Serial/JTAG console still does. Implies `--realtime`, whose pacing step polls the socket |
 | `--uart1-tcp HOST:PORT` | the same for UART1: a host script plays a serial device (a GPS, a modem) wired to the firmware's UART1, while UART0 stays on stdout (checked with IDF's `peripherals/uart/uart_echo` on the C3) |
 | `--console usb\|uart0\|both\|all\|none`, `--console-prefix` | which consoles to print |
-| `--realtime` | pace to wall time without the UI |
+| `--realtime` | pace to wall time without the UI. Standalone CLI runs without this mode advance as fast as the host can execute. |
 | `--web PORT [--web-dir DIR]` | browser UI (implies real time). With `--wifi` the page gets a Network panel: the station's Ethernet frames live (time, ↑ sent / ↓ received, a dissection summary from [dpkt-js](https://www.npmjs.com/package/dpkt-js) 0.1.0, vendored under web/vendor/dpkt-js and loaded when the panel is first opened or a row clicked; until then, length and hex), a filter, pause, clear, the dissection tree of a clicked frame and a pcap download of the frames the page received. They arrive as binary WebSocket messages `[5][dir: 0 sent, 1 received][emulated µs, u64 LE][frame]`, only while a page is connected; at most 512 frames or 1 MiB wait between pushes, the rest are dropped |
 | `--cam-image F`, `--cam-fps N` | camera source for boards with a camera |
 | `--service-fd FD` | Unix Device Service integration. Uses an inherited stream socket and enables real-time execution. Cannot be used with `--web`. |
@@ -112,6 +112,12 @@ with `ESP32SIM_ROM_DIR`, and a FAT32 image with `CORE_SD_SEED`.
 | `--cooja-slice-us N` | how long a busy guest runs before asking csim to step it again (default 100; `hello.args.slice_us` overrides). A transmission reaches csim's medium at the end of the slice it started in, so this bounds how late it is |
 | `--cooja-rx-timing start\|end` | what an `rx` at `t` is: the frame's start (default — csim hands a frame-consuming mote the frame when it starts: `t` is the first preamble byte, the SFD five byte times later, RX_DONE after the whole PPDU, the ACK 192 µs after that) or its end, complete at `t` |
 | `--cooja-verbose` | narrate the exchange on stderr |
+
+Real-time pacing sleeps when the guest is ahead of wall time. If the host
+cannot keep up, it does not skip guest instructions to catch up. The native
+Device Service socket always enables pacing. For a faster offline run, use
+the standalone CLI without the service socket or the options that imply
+pacing. Schedule inputs with `--script` when comparing guest work across runs.
 
 The legacy name `--max-insns` counts scheduler work, not total retired instructions. The
 default scheduler charges one unit per core 0 instruction or idle cycle advanced; another
